@@ -127,6 +127,7 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         self._stop_flag = threading.Event()
         self._t0 = 0.0
 
+        self._build_menu()
         self._build_header()
         self._build_drop()
         self._build_settings()
@@ -135,6 +136,31 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         self.refresh_voices()
 
     # --- части окна -------------------------------------------------------
+    def _build_menu(self):
+        """Меню «Правка» с Copy/Select All.
+
+        Без него на macOS Cmd+C в окне не работает вовсе: Tk отправляет
+        виртуальное событие <<Copy>> только когда в приложении есть
+        соответствующий пункт меню.
+        """
+        import tkinter as tk
+        menubar = tk.Menu(self)
+        edit = tk.Menu(menubar, tearoff=0)
+        edit.add_command(label="Скопировать", accelerator="Cmd+C",
+                         command=lambda: self._menu_event("<<Copy>>"))
+        edit.add_command(label="Выделить всё", accelerator="Cmd+A",
+                         command=lambda: self._menu_event("<<SelectAll>>"))
+        edit.add_separator()
+        edit.add_command(label="Скопировать весь отчёт",
+                         command=lambda: self.copy_log())
+        menubar.add_cascade(label="Правка", menu=edit)
+        self.configure(menu=menubar)
+
+    def _menu_event(self, event: str):
+        w = self.focus_get()
+        if w is not None:
+            w.event_generate(event)
+
     def _build_header(self):
         head = ctk.CTkFrame(self, fg_color="transparent")
         head.pack(fill="x", padx=26, pady=(22, 4))
@@ -187,8 +213,17 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
              lambda: _menu(card, [ENGINE_SHORT[e] for e in ENGINE_IDS],
                            command=self.on_engine))
         self.voice_var = ctk.StringVar(value="")
-        self.voice_menu = cell(0, 1, "Голос",
-                               lambda: _menu(card, [""], variable=self.voice_var))
+        voice_box = ctk.CTkFrame(card, fg_color="transparent")
+        _label(card, "Голос", size=12, color=DIM).grid(
+            row=0, column=1, sticky="w", padx=14, pady=(14, 3))
+        voice_box.grid(row=1, column=1, sticky="ew", padx=14)
+        self.voice_menu = _menu(voice_box, [""], variable=self.voice_var)
+        self.voice_menu.pack(side="left", fill="x", expand=True)
+        # правим звучание ровно того голоса, который выбран рядом
+        ctk.CTkButton(voice_box, text="♪", width=34, height=34, corner_radius=8,
+                      fg_color=CARD2, hover_color=LINE, text_color=DIM,
+                      font=ctk.CTkFont(size=15), command=self.show_voice_fx).pack(
+            side="left", padx=(6, 0))
         self.mode_var = ctk.StringVar(value=MODE_TITLES[0])
         self.mode_menu = cell(0, 2, "Качество синтеза",
                               lambda: _menu(card, MODE_TITLES, variable=self.mode_var,
@@ -436,8 +471,11 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         _label(top, "Голос делается из любой записи нужного диктора — например,\n"
                     "из его аудиокниги. Программа сама найдёт подходящий отрывок.",
                size=12, color=DIM, justify="left").pack(fill="x", padx=16, pady=(0, 10))
-        self.voices_list = ctk.CTkLabel(top, anchor="w", justify="left",
-                                        text_color=TEXT, font=ctk.CTkFont(size=13))
+        # голоса — столбиком: в одну строку они не помещаются, а список растёт
+        self.voices_list = ctk.CTkTextbox(top, height=92, fg_color=CARD2,
+                                          text_color=TEXT, corner_radius=8,
+                                          font=ctk.CTkFont(size=13),
+                                          activate_scrollbars=True)
         self.voices_list.pack(fill="x", padx=16)
         row = ctk.CTkFrame(top, fg_color="transparent")
         row.pack(fill="x", padx=16, pady=14)
@@ -446,13 +484,10 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
             fg_color=ACCENT, hover_color=ACCENT_HOVER, text_color=INK,
             command=self.load_sample)
         self.load_sample_btn.pack(side="left")
-        ctk.CTkButton(row, text="Настроить звучание", height=36, corner_radius=8,
-                      fg_color=CARD2, hover_color=LINE, text_color=TEXT,
-                      command=self.show_voice_fx).pack(side="left", padx=8)
         ctk.CTkButton(row, text="Папка с голосами", height=36, corner_radius=8,
                       fg_color=CARD2, hover_color=LINE, text_color=TEXT,
                       command=lambda: _open_path(default_voices_dir())).pack(
-            side="left")
+            side="left", padx=8)
         self._refresh_voices_list()
 
         box = ctk.CTkTextbox(win, wrap="word", fg_color=CARD, text_color=TEXT,
@@ -573,9 +608,17 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
             except Exception as e:
                 self.after(0, lambda: messagebox.showerror("Ошибка", str(e)))
             finally:
-                self.after(0, lambda: self.fx_play_btn.configure(
-                    state="normal", text="Прослушать"))
+                # окно настройки могли закрыть, пока считалась фраза
+                self.after(0, self._fx_button_ready)
         threading.Thread(target=work, daemon=True).start()
+
+    def _fx_button_ready(self):
+        btn = getattr(self, "fx_play_btn", None)
+        try:
+            if btn is not None and btn.winfo_exists():
+                btn.configure(state="normal", text="Прослушать")
+        except Exception:
+            pass          # виджет уже уничтожен — ничего страшного
 
     def _fx_save(self, vid: str, win):
         save_fx(default_voices_dir(), vid, self._fx_current())
@@ -586,11 +629,18 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         if self.voices_list is None or not self.voices_list.winfo_exists():
             return
         try:
-            names = [self._voice_label(v) for v in get_engine("f5mlx").list_voices()]
+            voices = get_engine("f5mlx").list_voices()
         except Exception:
-            names = []
-        self.voices_list.configure(
-            text="Сейчас есть:  " + (",  ".join(names) if names else "пока ни одного"))
+            voices = []
+        fxdir = default_voices_dir()
+        lines = []
+        for v in voices:
+            fx = load_fx(fxdir, v.id)
+            mark = "" if fx.is_neutral() else "   (звучание настроено)"
+            lines.append(f"•  {self._voice_label(v)}{mark}")
+        self.voices_list.configure(state="normal")
+        self.voices_list.delete("1.0", "end")
+        self.voices_list.insert("1.0", "\n".join(lines) or "пока ни одного")
 
     # --- общее -----------------------------------------------------------
     # Осторожно с именами методов и полей: tkinter.Misc уже занимает `_options`,

@@ -155,7 +155,7 @@ def _chunk_paragraphs(text: str, max_chars: int, gap: float,
             continue
         # заголовок не склеиваем с текстом и читаем его размереннее: иначе он
         # проскакивает скороговоркой, а последнее слово в нём пропадает
-        if _is_heading(para):
+        if _is_heading(para) and len(para) >= MIN_HEADING_CHARS:
             out.append((para, para_gap, HEADING_SPEED_MUL))
             continue
         parts = _chunk_sentences(para, max_chars)
@@ -165,6 +165,9 @@ def _chunk_paragraphs(text: str, max_chars: int, gap: float,
 
 
 MIN_CHUNK_CHARS = 45
+# Заголовок короче этого отдельным куском не оставляем: на 14 символах модели
+# не за что зацепиться, и «Проба голоса» превращается в «Проба ГОД».
+MIN_HEADING_CHARS = 25
 
 
 def _merge_short(items, max_chars: int):
@@ -189,30 +192,34 @@ def _merge_short(items, max_chars: int):
     return out
 
 
-# --- страховка от смазанного последнего слова ----------------------------
-# F5 иногда «затухает» у самого края куска, и последнее слово теряет окончание
-# («ветер» -> «веть»). Происходит это не всегда: каждый синтез стартует со
-# своего случайного шума, поэтому достаточно переспросить — со второй попытки
-# кусок обычно выходит чистым. Проверяем только ПОСЛЕДНЕЕ слово и только его:
-# распознавание всего куска стоило бы дороже самого синтеза.
+# --- страховка от съеденных краёв ----------------------------------------
+# F5 иногда мажет у самых границ куска: то последнее слово теряет окончание
+# («ветер» -> «веть»), то пропадает первое («Море к вечеру стихло» -> «стихло»).
+# Каждый синтез стартует со своего случайного шума, поэтому достаточно
+# переспросить — со второй попытки кусок обычно выходит чистым. Проверяем
+# ТОЛЬКО крайние слова: распознавание всего куска стоило бы дороже синтеза.
 TAIL_RETRIES = 2
-TAIL_QUIET = 0.45         # хвост тише этой доли от средней громкости — подозрительно
+TAIL_QUIET = 0.45         # край тише этой доли от средней громкости — подозрительно
 _ASR_MODEL = "mlx-community/whisper-large-v3-turbo"
 _asr_failed = False
 
 
-def _tail_suspicious(audio: np.ndarray, sr: int) -> bool:
-    """Дешёвый предфильтр: смазанное окончание звучит тише обычного.
+def _edges_suspicious(audio: np.ndarray, sr: int) -> bool:
+    """Дешёвый предфильтр: смазанный край звучит тише обычного.
 
     Распознавание стоит около пятой части синтеза, а портится один кусок из
-    десяти. Поэтому сначала смотрим на громкость последней четверти секунды и
-    зовём распознавание, только если она подозрительно низкая.
+    десяти. Поэтому сначала смотрим на громкость первой и последней четверти
+    секунды и зовём распознавание, только если где-то подозрительно тихо.
     """
-    tail = audio[-int(0.25 * sr):]
-    if len(tail) < sr // 10:
+    n = int(0.25 * sr)
+    if len(audio) < sr // 2:
         return True
     body = float(np.sqrt(np.mean(audio ** 2)))
-    return body > 0 and float(np.sqrt(np.mean(tail ** 2))) / body < TAIL_QUIET
+    if body <= 0:
+        return True
+    head = float(np.sqrt(np.mean(audio[:n] ** 2))) / body
+    tail = float(np.sqrt(np.mean(audio[-n:] ** 2))) / body
+    return head < TAIL_QUIET or tail < TAIL_QUIET
 
 
 def _last_word(s: str) -> str:
@@ -220,25 +227,45 @@ def _last_word(s: str) -> str:
     return words[-1] if words else ""
 
 
-def _tail_ok(audio: np.ndarray, sr: int, text: str) -> bool:
-    """Слышно ли в конце куска то самое слово, которым он заканчивается."""
+def _words(s: str) -> list[str]:
+    return re.sub(r"[^\w ]", " ", s.lower().replace("+", "").replace("ё", "е")).split()
+
+
+def _edges_ok(audio: np.ndarray, sr: int, text: str, head_only: bool = False) -> bool:
+    """Слышны ли первое и последнее слова куска — те самые, что в тексте."""
     global _asr_failed
     if _asr_failed or len(audio) < sr:
         return True
-    want = _last_word(text)
-    if len(want) < 4:                       # короткие слова ASR путает сам
+    want = _words(text)
+    if not want:
         return True
     try:
         import tempfile as _tf
         import soundfile as _sf
         import mlx_whisper
-        tail = audio[-int(min(len(audio) / sr, 4.0) * sr):]
-        with _tf.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-            _sf.write(f.name, tail, sr)
-            r = mlx_whisper.transcribe(f.name, path_or_hf_repo=_ASR_MODEL,
-                                       language="ru", verbose=False)
-        os.unlink(f.name)
-        return _last_word(r["text"]) == want
+
+        def heard(chunk):
+            with _tf.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+                _sf.write(f.name, chunk, sr)
+                r = mlx_whisper.transcribe(f.name, path_or_hf_repo=_ASR_MODEL,
+                                           verbose=False)
+            os.unlink(f.name)
+            return _words(r["text"])
+
+        # слова короче четырёх букв распознаватель путает сам — их не проверяем
+        if len(want[0]) >= 4:
+            # Начало слушаем коротко (2 с) и ВСЕГДА: пропажу первого слова по
+            # громкости не поймать — звук на месте, просто произносится уже
+            # следующее слово. Двух секунд хватает, и это дёшево.
+            got = heard(audio[:int(min(len(audio) / sr, 2.0) * sr)])
+            if got and want[0] not in got[:2]:
+                return False
+        if not head_only and len(want[-1]) >= 4:
+            edge = int(min(len(audio) / sr, 4.0) * sr)
+            got = heard(audio[-edge:])
+            if got and want[-1] not in got[-2:]:
+                return False
+        return True
     except Exception:
         _asr_failed = True                  # нет модели — просто не проверяем
         return True
@@ -262,11 +289,14 @@ def _synth_chunks(eng: TTSEngine, voice: str, chunks, sr: int,
             raise Cancelled()
         audio = eng.synth_chunk(text, voice, speed_mul=mul)
         for _try in range(TAIL_RETRIES):
-            if (len(audio) and _tail_suspicious(audio, sr)
-                    and not _tail_ok(audio, sr, text)):
-                audio = eng.synth_chunk(text, voice, speed_mul=mul)
-            else:
+            if not len(audio):
                 break
+            # конец проверяем только при подозрении (там громкость выдаёт сбой),
+            # начало — всегда, иначе пропажу первого слова не заметить
+            if _edges_ok(audio, sr, text,
+                         head_only=not _edges_suspicious(audio, sr)):
+                break
+            audio = eng.synth_chunk(text, voice, speed_mul=mul)
         if len(audio):
             pieces.append(audio)
             pieces.append(np.zeros(int(sr * gap), dtype=np.float32))
