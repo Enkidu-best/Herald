@@ -251,7 +251,16 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         self.progress.set(0)
         self.log = ctk.CTkTextbox(card, fg_color=CARD2, text_color=TEXT,
                                   corner_radius=10, font=ctk.CTkFont(size=12))
-        self.log.pack(fill="both", expand=True, padx=16, pady=16)
+        self.log.pack(fill="both", expand=True, padx=16, pady=(0, 6))
+        foot = ctk.CTkFrame(card, fg_color="transparent")
+        foot.pack(fill="x", padx=16, pady=(0, 14))
+        self.copy_btn = ctk.CTkButton(
+            foot, text="Скопировать отчёт", width=170, height=30, corner_radius=8,
+            fg_color=CARD2, hover_color=LINE, text_color=DIM,
+            font=ctk.CTkFont(size=12), command=self.copy_log)
+        self.copy_btn.pack(side="right")
+        # Cmd+C по выделенному тексту тоже включаем
+        self.log.bind("<Command-c>", lambda e: self.copy_log(selection=True))
 
     # --- книга -----------------------------------------------------------
     def on_drop(self, event):
@@ -322,6 +331,7 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         kbps = {"mp3 192 кбит/с (обычный)": 192, "mp3 320 кбит/с": 320}.get(
             self.fmt_var.get(), 750)
         gb = e.audio_sec * kbps / 8 / 1024 / 1024
+        self.refresh_voices()          # голоса нужного языка поднимутся наверх
         lang = {"ru": "русская книга", "en": "английская книга"}.get(
             getattr(e, "language", "ru"), "")
         self.est_label.configure(
@@ -340,16 +350,40 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         self.refresh_voices()
         self.show_estimate()
 
+    # В меню голос показывается с пометкой языка («Игорь Ященко · русский»),
+    # а движку передаётся чистое имя — метка тут только для человека.
+    LANG_MARK = {"ru": "русский", "en": "английский"}
+
     def refresh_voices(self):
         try:
-            voices = [v.id for v in get_engine(self.engine_var.get()).list_voices()]
+            self._voices = get_engine(self.engine_var.get()).list_voices()
         except Exception:
-            voices = []
-        self.voice_menu.configure(values=voices or [""])
-        if voices and self.voice_var.get() not in voices:
-            self.voice_var.set(voices[0])
-        elif not voices:
-            self.voice_var.set("")
+            self._voices = []
+        book_lang = getattr(self.est, "language", None)
+        # голоса нужного языка — наверх, чужие всё равно оставляем в списке
+        if book_lang:
+            self._voices.sort(key=lambda v: v.language != book_lang)
+        labels = [self._voice_label(v) for v in self._voices] or [""]
+        self.voice_menu.configure(values=labels)
+        if self.voice_var.get() not in labels:
+            self.voice_var.set(labels[0])
+
+    def _select_voice(self, vid: str):
+        for v in getattr(self, "_voices", []):
+            if v.id == vid:
+                self.voice_var.set(self._voice_label(v))
+                return
+
+    def _voice_label(self, v) -> str:
+        return f"{v.id} · {self.LANG_MARK.get(v.language, v.language)}"
+
+    def current_voice(self) -> str:
+        """Имя голоса без пометки языка."""
+        label = self.voice_var.get()
+        for v in getattr(self, "_voices", []):
+            if self._voice_label(v) == label:
+                return v.id
+        return label.split(" · ")[0]
 
     def load_sample(self):
         messagebox.showinfo(
@@ -377,7 +411,8 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         def work():
             try:
                 vid = get_engine("f5mlx").prepare_reference(p, name=name.strip())
-                self.after(0, lambda: (self.refresh_voices(), self.voice_var.set(vid),
+                self.after(0, lambda: (self.refresh_voices(),
+                                       self._select_voice(vid),
                                        self._refresh_voices_list(),
                                        self._set_busy(False, f"Голос готов: {vid}")))
             except Exception as e:
@@ -428,7 +463,7 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         if self.voices_list is None or not self.voices_list.winfo_exists():
             return
         try:
-            names = [v.id for v in get_engine("f5mlx").list_voices()]
+            names = [self._voice_label(v) for v in get_engine("f5mlx").list_voices()]
         except Exception:
             names = []
         self.voices_list.configure(
@@ -480,11 +515,26 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
     def _logln(self, text: str):
         self.after(0, lambda: (self.log.insert("end", text + "\n"), self.log.see("end")))
 
+    def copy_log(self, selection: bool = False):
+        """Положить отчёт в буфер обмена — его удобно прислать целиком."""
+        try:
+            text = (self.log.get("sel.first", "sel.last") if selection
+                    else self.log.get("1.0", "end").strip())
+        except Exception:
+            text = self.log.get("1.0", "end").strip()
+        if not text:
+            return "break"
+        self.clipboard_clear()
+        self.clipboard_append(text)
+        self.copy_btn.configure(text="Скопировано ✓")
+        self.after(1600, lambda: self.copy_btn.configure(text="Скопировать отчёт"))
+        return "break"
+
     def _ready(self) -> bool:
         if not self.book_path or not os.path.isfile(self.book_path):
             messagebox.showwarning("Нет книги", "Перетащи книгу в окно.")
             return False
-        if not self.voice_var.get():
+        if not self.current_voice():
             messagebox.showwarning(
                 "Нет голоса",
                 "Открой настройки (⚙) и нажми «Добавить голос диктора».")
@@ -506,7 +556,7 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
             try:
                 out = preview_sample(self.book_path, engine=self.engine_var.get(),
                                      eng_kwargs=self._eng_kwargs(),
-                                     voice=self.voice_var.get(), minutes=1.0,
+                                     voice=self.current_voice(), minutes=1.0,
                                      options=self._conv_options(), progress=self._progress)
                 import soundfile as _sf
                 _a, _sr = _sf.read(out)
@@ -542,7 +592,7 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
             try:
                 res = convert_book(self.book_path, engine=self.engine_var.get(),
                                    eng_kwargs=self._eng_kwargs(),
-                                   voice=self.voice_var.get(),
+                                   voice=self.current_voice(),
                                    options=self._conv_options(),
                                    progress=self._progress, on_chapter=on_chapter,
                                    should_stop=self._stop_flag.is_set)

@@ -42,7 +42,7 @@ OUT_DIR = "Сравнение скорости"
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("book", nargs="?", default="Пример — проба пера.txt")
+    ap.add_argument("book", nargs="?", default="Примеры текстов/Пример — проба пера.txt")
     ap.add_argument("--voice", default="голос диктора")
     ap.add_argument("--chapter", type=int, default=2)
     ap.add_argument("--minutes", type=float, default=0.5)

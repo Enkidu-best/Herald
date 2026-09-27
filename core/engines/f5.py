@@ -70,12 +70,26 @@ class F5Engine(TTSEngine):
 
     # --- голоса = подготовленные образцы --------------------------------
     def list_voices(self) -> list[Voice]:
+        """Голоса с пометкой языка.
+
+        Язык определяем по расшифровке образца: на каком языке говорил диктор,
+        для такого языка голос и годится. Английскую книгу русским образцом
+        озвучивать бессмысленно — модели разные, выйдет тяжёлый акцент.
+        """
+        from ..normalize import detect_language
         out = []
         for fn in sorted(os.listdir(self.voices_dir)):
-            if fn.lower().endswith((".wav", ".flac")):
-                stem = os.path.splitext(fn)[0]
-                if os.path.isfile(os.path.join(self.voices_dir, stem + ".txt")):
-                    out.append(Voice(stem, stem, "", "ru"))
+            if not fn.lower().endswith((".wav", ".flac")):
+                continue
+            stem = os.path.splitext(fn)[0]
+            txt = os.path.join(self.voices_dir, stem + ".txt")
+            if not os.path.isfile(txt):
+                continue
+            try:
+                lang = detect_language(open(txt, encoding="utf-8").read())
+            except Exception:
+                lang = "ru"
+            out.append(Voice(stem, stem, "", lang))
         return out
 
     # --- загрузка модели ------------------------------------------------

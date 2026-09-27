@@ -27,7 +27,7 @@ from core.normalize import normalize_text, sentenize
 from core.stress import add_stress
 from core.pipeline import _chunk_sentences
 
-TEXT_FILE = "Пример — проба пера.txt"
+TEXT_FILE = "Примеры текстов/Пример — проба пера.txt"
 
 
 def load_chunks(max_chars: int, n: int, stress: bool = True) -> list[str]:

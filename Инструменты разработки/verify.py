@@ -23,7 +23,7 @@ os.environ.setdefault("PYTHONHASHSEED", "0")
 from core.normalize import normalize_text, sentenize
 from core.stress import add_stress
 
-TEXT_FILE = "Пример — проба пера.txt"
+TEXT_FILE = "Примеры текстов/Пример — проба пера.txt"
 
 
 def words(s: str) -> list[str]:

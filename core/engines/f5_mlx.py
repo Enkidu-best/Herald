@@ -33,6 +33,20 @@ from concurrent.futures import ThreadPoolExecutor
 
 from .f5 import F5Engine
 
+# ОДИН поток на весь процесс для всех операций MLX.
+#
+# MLX привязывает и загруженную модель, и скомпилированные через mx.compile
+# графы к потоку, в котором они созданы. Кэш компиляции при этом глобальный:
+# если второй движок (например, при переключении книги с английской на русскую)
+# заведёт свой поток, он достанет из кэша чужой граф и упадёт с
+# «There is no Stream(gpu, 1) in current thread», а книга выйдет пустой.
+# Поэтому поток должен быть общим и жить столько же, сколько процесс.
+_MLX_POOL = ThreadPoolExecutor(max_workers=1, thread_name_prefix="mlx")
+
+
+def _in_mlx_thread(fn, *args):
+    return _MLX_POOL.submit(fn, *args).result()
+
 # Берём ровно ту же accent_tune-модель, что и torch-движок (её голос одобрен).
 # Веса в формате PyTorch — f5-tts-mlx сконвертирует их сам (convert_weights=True).
 HF_SRC_REPO = "Misha24-10/F5-TTS_RUSSIAN"
@@ -43,11 +57,14 @@ VOCAB_REL = "F5TTS_v1_Base/vocab.txt"
 # f5-tts-mlx. Английская уже лежит в MLX-формате, её конвертировать не надо.
 LANG_MODELS: dict[str, dict] = {
     "ru": {"repo": HF_SRC_REPO, "ckpt": CKPT_REL, "vocab": VOCAB_REL,
-           "convert": True,  "stress": "+"},
+           "convert": True,  "stress": "+", "speed_base": 1.0},
     # у английской модели в репозитории тоже лежат веса с ключами «ema_model.*»,
     # то есть в формате PyTorch — конвертировать их надо так же, как русские
+    # speed_base=0.62: на общей шкале темпа английская модель читает заметно
+    # быстрее русской, и «обычный» темп 1.55 звучал скороговоркой
     "en": {"repo": "lucasnewman/f5-tts-mlx", "ckpt": "model_v1.safetensors",
-           "vocab": "vocab.txt", "convert": True, "stress": None},
+           "vocab": "vocab.txt", "convert": True, "stress": None,
+           "speed_base": 0.62},
 }
 
 SAMPLE_RATE = 24000
@@ -286,13 +303,7 @@ class F5MLXEngine(F5Engine):
         self._audio_cache: dict[str, tuple] = {}
         self._vocoder = None
         self._vocab: dict[str, int] = {}
-        # MLX привязывает загруженную модель к потоку, в котором она создана:
-        # из другого потока тот же объект падает с «There is no Stream(gpu, N)
-        # in current thread». В окне это и происходило — «Послушать минуту» и
-        # «Озвучить книгу» работают в разных фоновых потоках, поэтому после
-        # пробника вся книга рассыпалась в тишину. Держим один рабочий поток на
-        # движок и пропускаем через него И загрузку, И синтез.
-        self._mlx = ThreadPoolExecutor(max_workers=1, thread_name_prefix="mlx")
+        # все операции MLX идут через общий поток _MLX_POOL (см. выше)
 
     # --- подготовка локальной папки модели с ожидаемыми именами файлов ---
     def _prepare_model_dir(self) -> str:
@@ -322,7 +333,7 @@ class F5MLXEngine(F5Engine):
         return mdir
 
     def load(self, progress=None) -> None:
-        self._mlx.submit(self._load_in_thread).result()
+        _in_mlx_thread(self._load_in_thread)
 
     def _load_in_thread(self) -> None:
         import f5_tts_mlx.cfm as cfm
@@ -360,7 +371,7 @@ class F5MLXEngine(F5Engine):
     def _get_ref(self, voice: str):
         vid, wav, ref_text = self._resolve_voice(voice)
         if vid not in self._audio_cache:
-            return self._mlx.submit(self._make_ref, vid, wav, ref_text).result()
+            return _in_mlx_thread(self._make_ref, vid, wav, ref_text)
         return self._audio_cache[vid]
 
     def _make_ref(self, vid: str, wav: str, ref_text: str):
@@ -375,12 +386,6 @@ class F5MLXEngine(F5Engine):
         self._audio_cache[vid] = (mx.array(audio), _ref_text_for_model(ref_text),
                                   1.0 / gain)
         return self._audio_cache[vid]
-
-    def __del__(self):
-        try:
-            self._mlx.shutdown(wait=False)
-        except Exception:
-            pass
 
     def _max_gen_bytes(self, ref_frames: int, ref_text: str) -> int:
         """Сколько байт текста укладывается в один вызов — формула F5 (torch)."""
@@ -413,8 +418,8 @@ class F5MLXEngine(F5Engine):
 
     def _synth_one(self, audio, ref_frames: int, ref_text: str, gen_text: str,
                    speed_mul: float = 1.0) -> np.ndarray:
-        return self._mlx.submit(self._synth_in_thread, audio, ref_frames,
-                                ref_text, gen_text, speed_mul).result()
+        return _in_mlx_thread(self._synth_in_thread, audio, ref_frames,
+                              ref_text, gen_text, speed_mul)
 
     def _synth_in_thread(self, audio, ref_frames: int, ref_text: str,
                          gen_text: str, speed_mul: float = 1.0) -> np.ndarray:
@@ -425,7 +430,9 @@ class F5MLXEngine(F5Engine):
         # модель не успевает договорить и обрывает последнее слово (а иногда
         # комкает первое). Лишнее время она просто заполняет тишиной, которую
         # всё равно съедает пауза между кусками, так что цена запаса нулевая.
-        local_speed = 0.3 if len(gen_text.encode("utf-8")) < 10 else self.speed * speed_mul
+        base = LANG_MODELS[self.language].get("speed_base", 1.0)
+        local_speed = (0.3 if len(gen_text.encode("utf-8")) < 10
+                       else self.speed * speed_mul * base)
         # короткому куску (заголовок, реплика) нужен запас побольше: материала
         # мало, модель торопится и проглатывает последнее слово
         headroom = (SHORT_HEADROOM if len(gen_text) < SHORT_CHUNK_CHARS
