@@ -56,15 +56,16 @@ VOCAB_REL = "F5TTS_v1_Base/vocab.txt"
 # Модели по языкам. Русская — веса в формате PyTorch, их конвертирует сам
 # f5-tts-mlx. Английская уже лежит в MLX-формате, её конвертировать не надо.
 LANG_MODELS: dict[str, dict] = {
+    # target_bps подобран так, чтобы на «обычном» темпе выходило 26,8 байт/с
+    # для русского — ровно та скорость чтения, которую одобрили на слух.
+    # У английского байт на символ один, поэтому число вдвое меньше.
     "ru": {"repo": HF_SRC_REPO, "ckpt": CKPT_REL, "vocab": VOCAB_REL,
-           "convert": True,  "stress": "+", "speed_base": 1.0},
+           "convert": True,  "stress": "+", "target_bps": 29.7},
     # у английской модели в репозитории тоже лежат веса с ключами «ema_model.*»,
     # то есть в формате PyTorch — конвертировать их надо так же, как русские
-    # speed_base=0.62: на общей шкале темпа английская модель читает заметно
-    # быстрее русской, и «обычный» темп 1.55 звучал скороговоркой
     "en": {"repo": "lucasnewman/f5-tts-mlx", "ckpt": "model_v1.safetensors",
            "vocab": "vocab.txt", "convert": True, "stress": None,
-           "speed_base": 0.62},
+           "target_bps": 16.1},
 }
 
 SAMPLE_RATE = 24000
@@ -277,7 +278,7 @@ class F5MLXEngine(F5Engine):
     stress_format = "+"
 
     def __init__(self, voices_dir: str | None = None, model_name: str = HF_SRC_REPO,
-                 steps: int = 7, speed: float = 1.55, quant_bits: int | None = None,
+                 steps: int = 7, speed: float = 1.0, quant_bits: int | None = None,
                  max_total_sec: float = MAX_TOTAL_SEC, dtype: str = "float32",
                  schedule: str = "epss", language: str = "ru") -> None:
         super().__init__(voices_dir=voices_dir, device=None, nfe_step=steps, speed=speed)
@@ -301,6 +302,7 @@ class F5MLXEngine(F5Engine):
         # "uniform" — равномерное, как в torch-версии F5 (эталон для сверки)
         self.schedule = schedule
         self._audio_cache: dict[str, tuple] = {}
+        self._pace = 1.0                  # поправка темпа под образец
         self._vocoder = None
         self._vocab: dict[str, int] = {}
         # все операции MLX идут через общий поток _MLX_POOL (см. выше)
@@ -374,6 +376,23 @@ class F5MLXEngine(F5Engine):
             return _in_mlx_thread(self._make_ref, vid, wav, ref_text)
         return self._audio_cache[vid]
 
+    def _pace_for(self, audio: np.ndarray, ref_text: str) -> float:
+        """Поправка темпа под конкретный образец.
+
+        Выходная скорость речи равна «темп образца × speed». Образцы бывают
+        очень разные: у одного диктора в отрывке 29 байт текста на секунду, у
+        другого 11 (представляется с паузами). Без поправки один и тот же
+        «обычный» темп в окне давал бы то нормальную речь, то тягучую. Поэтому
+        приводим всё к целевому темпу языка, а ползунок в окне остаётся
+        множителем к нему.
+        """
+        sec = len(audio) / SAMPLE_RATE
+        bps = len(ref_text.encode("utf-8")) / sec if sec else 0
+        if bps <= 1:
+            return 1.0
+        target = LANG_MODELS[self.language].get("target_bps", 27.0)
+        return float(np.clip(target / bps, 0.5, 3.5))
+
     def _make_ref(self, vid: str, wav: str, ref_text: str):
         import mlx.core as mx
         audio = preprocess_ref_audio(wav)
@@ -383,8 +402,9 @@ class F5MLXEngine(F5Engine):
             gain = TARGET_RMS / rms              # как в torch: поднимаем образец…
             audio = audio * gain
         # …а результат потом опускаем обратно, чтобы громкость совпадала
-        self._audio_cache[vid] = (mx.array(audio), _ref_text_for_model(ref_text),
-                                  1.0 / gain)
+        rt = _ref_text_for_model(ref_text)
+        self._audio_cache[vid] = (mx.array(audio), rt, 1.0 / gain,
+                                  self._pace_for(audio, rt))
         return self._audio_cache[vid]
 
     def _max_gen_bytes(self, ref_frames: int, ref_text: str) -> int:
@@ -400,7 +420,7 @@ class F5MLXEngine(F5Engine):
         if not self.has_speech(text):
             return np.zeros(0, dtype=np.float32)
 
-        audio, ref_text, out_gain = self._get_ref(voice)
+        audio, ref_text, out_gain, self._pace = self._get_ref(voice)
         ref_frames = audio.shape[0] // HOP_LENGTH
         parts = _chunk_by_bytes(text.strip(), self._max_gen_bytes(ref_frames, ref_text))
         waves: list[np.ndarray] = []
@@ -430,9 +450,8 @@ class F5MLXEngine(F5Engine):
         # модель не успевает договорить и обрывает последнее слово (а иногда
         # комкает первое). Лишнее время она просто заполняет тишиной, которую
         # всё равно съедает пауза между кусками, так что цена запаса нулевая.
-        base = LANG_MODELS[self.language].get("speed_base", 1.0)
         local_speed = (0.3 if len(gen_text.encode("utf-8")) < 10
-                       else self.speed * speed_mul * base)
+                       else self.speed * speed_mul * self._pace)
         # короткому куску (заголовок, реплика) нужен запас побольше: материала
         # мало, модель торопится и проглатывает последнее слово
         headroom = (SHORT_HEADROOM if len(gen_text) < SHORT_CHUNK_CHARS

@@ -209,16 +209,26 @@ FORMATS: dict[str, tuple[str, list[str]]] = {
 DEFAULT_FORMAT = "mp3 192 кбит/с (обычный)"
 
 
+def _chain(hd: bool, fx: str) -> str:
+    """Полировка плюс ручные поправки голоса, если они заданы."""
+    parts = [HD_FILTER] if hd else []
+    if fx:
+        parts.append(fx)
+    return ",".join(parts)
+
+
 def encode_chapter_mp3(ch: RenderedChapter, out_path: str, *,
                        title: str = "", author: str = "", quality: str = "2",
-                       hd: bool = True, fmt: str = DEFAULT_FORMAT) -> str:
+                       hd: bool = True, fmt: str = DEFAULT_FORMAT,
+                       fx: str = "") -> str:
     ff = _ff()
     cmd = [
         ff, "-y", "-hide_banner", "-loglevel", "error",
         "-i", ch.wav_path,
     ]
-    if hd:
-        cmd += ["-af", HD_FILTER]
+    chain = _chain(hd, fx)
+    if chain:
+        cmd += ["-af", chain]
     _ext, codec = FORMATS.get(fmt, FORMATS[DEFAULT_FORMAT])
     cmd += codec + [
         "-metadata", f"title={ch.title}",
@@ -231,7 +241,8 @@ def encode_chapter_mp3(ch: RenderedChapter, out_path: str, *,
 
 
 def polish_wav_to_mp3(wav_path: str, out_path: str, *, hd: bool = True,
-                      quality: str = "2", fmt: str = DEFAULT_FORMAT) -> str:
+                      quality: str = "2", fmt: str = DEFAULT_FORMAT,
+                      fx: str = "") -> str:
     """Тот же путь, что у глав, но для одиночного файла (пробник).
 
     Пробник должен звучать ровно так же, как итоговая книга, иначе по нему
@@ -239,8 +250,9 @@ def polish_wav_to_mp3(wav_path: str, out_path: str, *, hd: bool = True,
     """
     ff = _ff()
     cmd = [ff, "-y", "-hide_banner", "-loglevel", "error", "-i", wav_path]
-    if hd:
-        cmd += ["-af", HD_FILTER]
+    chain = _chain(hd, fx)
+    if chain:
+        cmd += ["-af", chain]
     _ext, codec = FORMATS.get(fmt, FORMATS[DEFAULT_FORMAT])
     cmd += codec + [out_path]
     subprocess.run(cmd, check=True)

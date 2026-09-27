@@ -33,12 +33,13 @@ import tkinterdnd2
 from tkinter import filedialog, messagebox
 
 from core import VERSION, APP_NAME, APP_TAGLINE, ABOUT
-from core.assemble import FORMATS, DEFAULT_FORMAT, polish_wav_to_mp3
+from core.assemble import FORMATS, DEFAULT_FORMAT, polish_wav_to_mp3, HD_FILTER
 from core.engines import get_engine, list_engines
 from core.engines.f5 import default_voices_dir
 from core.pipeline import (convert_book, preview_sample, estimate_book,
                            ConvertOptions, Cancelled)
 from core.readers import ScannedPdfError, ReaderError
+from core.voicefx import VoiceFX, load as load_fx, save as save_fx
 
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("dark-blue")
@@ -59,11 +60,13 @@ MODES: list[tuple[str, dict, float]] = [
 ]
 MODE_TITLES = [m[0] for m in MODES]
 
-# 1.55 выбрано на слух как «обычный». Заголовки читаются медленнее самого
-# текста (HEADING_SPEED_MUL в pipeline), иначе они проскакивают скороговоркой.
+# Множитель к темпу, который движок уже подогнал под образец (target_bps в
+# LANG_MODELS). «Обычный» = 1.0 и даёт ту скорость чтения, что была одобрена на
+# слух, — причём одинаковую для любого голоса, хоть быстрого, хоть медленного.
+# Заголовки читаются ещё размереннее (HEADING_SPEED_MUL в pipeline).
 SPEEDS: list[tuple[str, float]] = [
-    ("Медленно", 1.30), ("Чуть медленнее", 1.42), ("Обычный", 1.55),
-    ("Чуть быстрее", 1.70), ("Быстро", 1.85),
+    ("Медленно", 0.85), ("Чуть медленнее", 0.93), ("Обычный", 1.0),
+    ("Чуть быстрее", 1.10), ("Быстро", 1.22),
 ]
 SPEED_TITLES = [t for t, _ in SPEEDS]
 
@@ -443,10 +446,13 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
             fg_color=ACCENT, hover_color=ACCENT_HOVER, text_color=INK,
             command=self.load_sample)
         self.load_sample_btn.pack(side="left")
-        ctk.CTkButton(row, text="Открыть папку с голосами", height=36, corner_radius=8,
+        ctk.CTkButton(row, text="Настроить звучание", height=36, corner_radius=8,
+                      fg_color=CARD2, hover_color=LINE, text_color=TEXT,
+                      command=self.show_voice_fx).pack(side="left", padx=8)
+        ctk.CTkButton(row, text="Папка с голосами", height=36, corner_radius=8,
                       fg_color=CARD2, hover_color=LINE, text_color=TEXT,
                       command=lambda: _open_path(default_voices_dir())).pack(
-            side="left", padx=8)
+            side="left")
         self._refresh_voices_list()
 
         box = ctk.CTkTextbox(win, wrap="word", fg_color=CARD, text_color=TEXT,
@@ -458,6 +464,123 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
                       fg_color=CARD2, hover_color=LINE, text_color=TEXT,
                       command=win.destroy).pack(pady=(0, 18))
         win.after(120, win.lift)
+
+    # --- ручная подстройка голоса ----------------------------------------
+    FX_PHRASE = {
+        "ru": "Дом сто+ял на краю дер+евни, и к+аждое +утро над ним подним+ался д+ым.",
+        "en": "The house stood at the edge of the village, and smoke rose above it every morning.",
+    }
+
+    def show_voice_fx(self):
+        """Высота, бас и яркость выбранного голоса — со слуховой проверкой.
+
+        Характер речи менять нельзя: интонация и манера приходят из образца.
+        А вот подправить голос как на пульте — можно, и слышно это сразу:
+        фраза синтезируется ОДИН раз, дальше ползунки меняют только обработку
+        готового звука, а это уже сотые доли секунды.
+        """
+        vid = self.current_voice()
+        if not vid:
+            messagebox.showwarning("Нет голоса", "Сначала добавь голос диктора.")
+            return
+        fx = load_fx(default_voices_dir(), vid)
+        self._fx_raw = None                      # синтезированная фраза (wav)
+
+        win = ctk.CTkToplevel(self)
+        win.title(f"Звучание · {vid}")
+        win.geometry("560x430")
+        win.configure(fg_color=BG)
+        win.transient(self)
+
+        card = _card(win)
+        card.pack(fill="both", expand=True, padx=18, pady=18)
+        _label(card, f"Голос «{vid}»", size=16, weight="bold").pack(
+            fill="x", padx=18, pady=(16, 2))
+        _label(card, "Темп задаётся в главном окне. Здесь — тембр.",
+               size=12, color=DIM).pack(fill="x", padx=18, pady=(0, 10))
+
+        rows = [("Высота", "pitch", -4, 4, " полутона"),
+                ("Бас", "bass", -6, 6, " дБ"),
+                ("Яркость", "brightness", -6, 6, " дБ")]
+        self._fx_vars = {}
+        for title, key, lo, hi, unit in rows:
+            line = ctk.CTkFrame(card, fg_color="transparent")
+            line.pack(fill="x", padx=18, pady=6)
+            _label(line, title, size=13, width=80).pack(side="left")
+            val = ctk.CTkLabel(line, text="", width=90, text_color=DIM,
+                               font=ctk.CTkFont(size=12))
+            val.pack(side="right")
+            sl = ctk.CTkSlider(line, from_=lo, to=hi, number_of_steps=(hi - lo) * 4,
+                               button_color=ACCENT, button_hover_color=ACCENT_HOVER,
+                               progress_color=ACCENT, fg_color=CARD2)
+            sl.pack(side="left", fill="x", expand=True, padx=10)
+            sl.set(getattr(fx, key))
+            self._fx_vars[key] = (sl, val, unit)
+            sl.configure(command=lambda _v, k=key: self._fx_changed(k))
+            self._fx_changed(key)
+
+        btns = ctk.CTkFrame(card, fg_color="transparent")
+        btns.pack(fill="x", padx=18, pady=(14, 16))
+        self.fx_play_btn = ctk.CTkButton(
+            btns, text="Прослушать", height=36, corner_radius=8, fg_color=ACCENT,
+            hover_color=ACCENT_HOVER, text_color=INK, command=self._fx_play)
+        self.fx_play_btn.pack(side="left")
+        ctk.CTkButton(btns, text="Сбросить", height=36, width=110, corner_radius=8,
+                      fg_color=CARD2, hover_color=LINE, text_color=TEXT,
+                      command=self._fx_reset).pack(side="left", padx=8)
+        ctk.CTkButton(btns, text="Сохранить", height=36, width=120, corner_radius=8,
+                      fg_color=CARD2, hover_color=LINE, text_color=TEXT,
+                      command=lambda: self._fx_save(vid, win)).pack(side="right")
+        win.after(120, win.lift)
+
+    def _fx_current(self) -> VoiceFX:
+        return VoiceFX(**{k: round(sl.get(), 1)
+                          for k, (sl, _l, _u) in self._fx_vars.items()})
+
+    def _fx_changed(self, key: str):
+        sl, lbl, unit = self._fx_vars[key]
+        v = round(sl.get(), 1)
+        lbl.configure(text=("нет" if v == 0 else f"{v:+.1f}{unit}"))
+
+    def _fx_reset(self):
+        for k, (sl, _l, _u) in self._fx_vars.items():
+            sl.set(0)
+            self._fx_changed(k)
+
+    def _fx_play(self):
+        """Синтезируем фразу один раз, потом только пересобираем обработку."""
+        vid = self.current_voice()
+        fx = self._fx_current()
+        self.fx_play_btn.configure(state="disabled", text="Считаю…")
+
+        def work():
+            try:
+                import tempfile
+                if self._fx_raw is None:
+                    lang = next((v.language for v in self._voices if v.id == vid), "ru")
+                    eng = get_engine("f5mlx", language=lang)
+                    audio = eng.synth_chunk(self.FX_PHRASE.get(lang, self.FX_PHRASE["ru"]),
+                                            vid)
+                    import soundfile as sf
+                    raw = os.path.join(tempfile.mkdtemp(prefix="herald_fx_"), "raw.wav")
+                    sf.write(raw, audio, 24000)
+                    self._fx_raw = raw
+                out = os.path.join(os.path.dirname(self._fx_raw), "play.wav")
+                chain = ",".join(x for x in (HD_FILTER, fx.filter_chain()) if x)
+                subprocess.run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                                "-i", self._fx_raw, "-af", chain, out], check=True)
+                subprocess.run(["afplay", out], check=False)
+            except Exception as e:
+                self.after(0, lambda: messagebox.showerror("Ошибка", str(e)))
+            finally:
+                self.after(0, lambda: self.fx_play_btn.configure(
+                    state="normal", text="Прослушать"))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _fx_save(self, vid: str, win):
+        save_fx(default_voices_dir(), vid, self._fx_current())
+        self.status.configure(text=f"Звучание голоса «{vid}» сохранено")
+        win.destroy()
 
     def _refresh_voices_list(self):
         if self.voices_list is None or not self.voices_list.winfo_exists():

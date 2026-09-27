@@ -25,6 +25,7 @@ from .stress import add_stress
 from .assemble import (RenderedChapter, write_wav, assemble_m4b, encode_chapter_mp3,
                        polish_wav_to_mp3, FORMATS, DEFAULT_FORMAT)
 from .engines import get_engine, TTSEngine
+from .voicefx import load as load_fx
 
 
 Progress = Callable[[float, str], None]
@@ -342,6 +343,14 @@ def convert_book(path: str, *, engine: str = "f5", eng_kwargs: dict | None = Non
         prepared.append((ch.title, _chunk_paragraphs(body, meta.max_chunk_chars,
                                                      opts.gap_sec, opts.para_gap_sec)))
 
+    # ручные поправки голоса (высота/бас/яркость), если их задавали
+    fx_chain = ""
+    try:
+        from .engines.f5 import default_voices_dir
+        fx_chain = load_fx(default_voices_dir(), voice).filter_chain()
+    except Exception:
+        pass
+
     base = _safe_name(doc.base_title)
     workdir = tempfile.mkdtemp(prefix="t2a_syn_")
     # папку под потоковые mp3 создаём сразу, если они нужны
@@ -370,7 +379,8 @@ def convert_book(path: str, *, engine: str = "f5", eng_kwargs: dict | None = Non
             mp3 = os.path.join(mp3_dir, name + ext)
             try:
                 encode_chapter_mp3(r, mp3, title=doc.title or base, author=doc.author,
-                                   hd=opts.hd_filter, fmt=opts.audio_format)
+                                   hd=opts.hd_filter, fmt=opts.audio_format,
+                                   fx=fx_chain)
             except Exception:
                 mp3 = None
             if on_chapter:

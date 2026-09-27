@@ -32,7 +32,7 @@ VOCAB_REL = "F5TTS_v1_Base/vocab.txt"
 REF_SECONDS = 12          # верхняя граница образца: F5 всё равно клипует ~12 с
 REF_MIN_SECONDS = 8       # короче — модели не хватает материала на тембр
 PROBE_SECONDS = 25        # столько слушаем в каждой пробной точке записи
-START_BONUS = 12.0        # фора началу записи при выборе образца
+START_BONUS = 6.0         # небольшая фора началу записи при выборе образца
 WHISPER_MLX = "mlx-community/whisper-large-v3-turbo"   # быстрый и точный на M-чипе
 WHISPER_FALLBACK = "small"                              # если MLX недоступен
 
@@ -51,7 +51,7 @@ class F5Engine(TTSEngine):
     stress_format = "+"            # accent_tune понимает '+' перед ударной гласной
 
     def __init__(self, voices_dir: str | None = None, device: str | None = "cpu",
-                 nfe_step: int = 32, speed: float = 1.55) -> None:
+                 nfe_step: int = 32, speed: float = 1.0) -> None:
         super().__init__()
         self.voices_dir = voices_dir or default_voices_dir()
         # По умолчанию CPU: F5 на MPS (видеопамять Apple Silicon) переполняет
@@ -59,8 +59,9 @@ class F5Engine(TTSEngine):
         # Быстрый путь на M-чипе — отдельная MLX-версия (следующий шаг).
         self.device = device
         self.nfe_step = nfe_step        # меньше = быстрее генерация, чуть ниже качество
-        # 1.0 = ровно темп образца, его и слышно на выходе (26,8 байт/с при
-        # образце в 28,9). Раньше стояло 1.55 — этим компенсировали
+        # 1.0 = «обычный» темп. Абсолютную скорость движок подгоняет под
+        # образец сам (target_bps), поэтому здесь просто множитель.
+        # Раньше стояло 1.55 — этим компенсировали
         # разрежённый образец (заголовок с паузами, ~14 байт/с вместо ~30).
         # С нормальным образцом ускорять не нужно: на 1.0 выходит 29.6 байт/с
         # против 30.9 у живого диктора.
@@ -209,7 +210,10 @@ class F5Engine(TTSEngine):
                 bps = len(text.encode("utf-8")) / sec
                 # чистота решает; темп речи — уточняющая поправка (ориентир ~29 байт/с,
                 # это обычная скорость чтения вслух), громкость — совсем мелкая
-                score = min(snr, 70.0) - 2.0 * abs(bps - 29.0) - 20.0 * abs(rms - 0.12)
+                # чистота по-прежнему главное, но за вялый темп штрафуем сильнее:
+                # образец с 12 байт/с вместо 29 звучит как речь с паузами, и
+                # клон наследует эту рваность
+                score = min(snr, 70.0) - 3.0 * abs(bps - 29.0) - 20.0 * abs(rms - 0.12)
                 if start < 1.0:
                     score += START_BONUS      # фора началу записи
                 if best is None or score > best[0]:
@@ -258,14 +262,19 @@ class F5Engine(TTSEngine):
         """Фразы с таймкодами. Сначала быстрый MLX-turbo, иначе faster-whisper."""
         try:
             import mlx_whisper
+            # язык НЕ навязываем: whisper определяет его сам и делает это точно.
+            # Раньше здесь стояло language="ru", и английская запись
+            # расшифровывалась русскими буквами («Шоан Антони, е-learning reel»),
+            # а с таким текстом образца клон получался никуда не годный.
             r = mlx_whisper.transcribe(wav_path, path_or_hf_repo=WHISPER_MLX,
-                                       language=getattr(self, "language", "ru"),
                                        verbose=False)
+            self.detected_language = r.get("language") or "ru"
             return [(s["start"], s["end"], s["text"]) for s in r["segments"]]
         except Exception:
             from faster_whisper import WhisperModel
             m = WhisperModel(WHISPER_FALLBACK, device="cpu", compute_type="int8")
-            segs, _ = m.transcribe(wav_path, language=getattr(self, "language", "ru"))
+            segs, info = m.transcribe(wav_path)
+            self.detected_language = getattr(info, "language", None) or "ru"
             return [(s.start, s.end, s.text) for s in segs]
 
     def _transcribe_text(self, wav_path: str) -> str:
