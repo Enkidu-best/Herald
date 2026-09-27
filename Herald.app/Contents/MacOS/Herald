@@ -1,6 +1,6 @@
 #!/bin/bash
 # Запускает окно Herald из окружения проекта.
-# .app лежит внутри папки проекта, поэтому корень — три уровня вверх от MacOS/.
+# .app лежит внутри папки программы, поэтому корень — три уровня вверх от MacOS/.
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/../../.." && pwd)"
 cd "$ROOT" || exit 1
@@ -19,4 +19,13 @@ export PATH="$ROOT/.venv/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
 LOG="$HOME/Library/Logs/Herald.log"
 mkdir -p "$(dirname "$LOG")"
+
+# arch -arm64 обязателен. И /bin/bash, и системный python — универсальные
+# бинарники; запущенный из Finder .app может уехать в ветку x86_64 (Rosetta),
+# а собранные под arm64 numpy/mlx тогда не загружаются:
+#   «mach-o file, but is an incompatible architecture (have 'arm64', need 'x86_64')»
+# Из терминала этого не видно — там архитектура уже правильная.
+if [ "$(uname -m)" = "arm64" ] && command -v arch >/dev/null; then
+  exec arch -arm64 "$PY" tts_gui.py >>"$LOG" 2>&1
+fi
 exec "$PY" tts_gui.py >>"$LOG" 2>&1

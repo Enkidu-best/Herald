@@ -245,12 +245,13 @@ class F5Engine(TTSEngine):
         try:
             import mlx_whisper
             r = mlx_whisper.transcribe(wav_path, path_or_hf_repo=WHISPER_MLX,
-                                       language="ru", verbose=False)
+                                       language=getattr(self, "language", "ru"),
+                                       verbose=False)
             return [(s["start"], s["end"], s["text"]) for s in r["segments"]]
         except Exception:
             from faster_whisper import WhisperModel
             m = WhisperModel(WHISPER_FALLBACK, device="cpu", compute_type="int8")
-            segs, _ = m.transcribe(wav_path, language="ru")
+            segs, _ = m.transcribe(wav_path, language=getattr(self, "language", "ru"))
             return [(s.start, s.end, s.text) for s in segs]
 
     def _transcribe_text(self, wav_path: str) -> str:

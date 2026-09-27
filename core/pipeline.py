@@ -20,7 +20,7 @@ import numpy as np
 
 from .readers import read_document, ScannedPdfError, ReaderError
 from .chapters import build_chapters
-from .normalize import normalize_text, sentenize
+from .normalize import normalize_text, sentenize, detect_language
 from .stress import add_stress
 from .assemble import (RenderedChapter, write_wav, assemble_m4b, encode_chapter_mp3,
                        polish_wav_to_mp3, FORMATS, DEFAULT_FORMAT)
@@ -76,9 +76,11 @@ def _safe_name(s: str) -> str:
     return re.sub(r"\s{2,}", " ", s) or "audiobook"
 
 
-def _prepare_text(text: str, stress_fmt: str | None, expand_numbers: bool, use_stress: bool) -> str:
-    t = normalize_text(text, expand_numbers=expand_numbers)
-    if use_stress and stress_fmt == "+":
+def _prepare_text(text: str, stress_fmt: str | None, expand_numbers: bool,
+                  use_stress: bool, language: str = "ru") -> str:
+    t = normalize_text(text, expand_numbers=expand_numbers, language=language)
+    # ударения ставим только русскому: английская модель прочитала бы «+» вслух
+    if use_stress and stress_fmt == "+" and language == "ru":
         t = add_stress(t)
     return t
 
@@ -186,6 +188,61 @@ def _merge_short(items, max_chars: int):
     return out
 
 
+# --- страховка от смазанного последнего слова ----------------------------
+# F5 иногда «затухает» у самого края куска, и последнее слово теряет окончание
+# («ветер» -> «веть»). Происходит это не всегда: каждый синтез стартует со
+# своего случайного шума, поэтому достаточно переспросить — со второй попытки
+# кусок обычно выходит чистым. Проверяем только ПОСЛЕДНЕЕ слово и только его:
+# распознавание всего куска стоило бы дороже самого синтеза.
+TAIL_RETRIES = 2
+TAIL_QUIET = 0.45         # хвост тише этой доли от средней громкости — подозрительно
+_ASR_MODEL = "mlx-community/whisper-large-v3-turbo"
+_asr_failed = False
+
+
+def _tail_suspicious(audio: np.ndarray, sr: int) -> bool:
+    """Дешёвый предфильтр: смазанное окончание звучит тише обычного.
+
+    Распознавание стоит около пятой части синтеза, а портится один кусок из
+    десяти. Поэтому сначала смотрим на громкость последней четверти секунды и
+    зовём распознавание, только если она подозрительно низкая.
+    """
+    tail = audio[-int(0.25 * sr):]
+    if len(tail) < sr // 10:
+        return True
+    body = float(np.sqrt(np.mean(audio ** 2)))
+    return body > 0 and float(np.sqrt(np.mean(tail ** 2))) / body < TAIL_QUIET
+
+
+def _last_word(s: str) -> str:
+    words = re.sub(r"[^\w ]", " ", s.lower().replace("+", "").replace("ё", "е")).split()
+    return words[-1] if words else ""
+
+
+def _tail_ok(audio: np.ndarray, sr: int, text: str) -> bool:
+    """Слышно ли в конце куска то самое слово, которым он заканчивается."""
+    global _asr_failed
+    if _asr_failed or len(audio) < sr:
+        return True
+    want = _last_word(text)
+    if len(want) < 4:                       # короткие слова ASR путает сам
+        return True
+    try:
+        import tempfile as _tf
+        import soundfile as _sf
+        import mlx_whisper
+        tail = audio[-int(min(len(audio) / sr, 4.0) * sr):]
+        with _tf.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+            _sf.write(f.name, tail, sr)
+            r = mlx_whisper.transcribe(f.name, path_or_hf_repo=_ASR_MODEL,
+                                       language="ru", verbose=False)
+        os.unlink(f.name)
+        return _last_word(r["text"]) == want
+    except Exception:
+        _asr_failed = True                  # нет модели — просто не проверяем
+        return True
+
+
 def _synth_chunks(eng: TTSEngine, voice: str, chunks, sr: int,
                   gap_sec: float, on_chunk=None, should_stop=None) -> np.ndarray:
     # принимаем простые строки, пары (текст, пауза) и тройки (…, множитель темпа)
@@ -203,6 +260,12 @@ def _synth_chunks(eng: TTSEngine, voice: str, chunks, sr: int,
         if should_stop is not None and should_stop():
             raise Cancelled()
         audio = eng.synth_chunk(text, voice, speed_mul=mul)
+        for _try in range(TAIL_RETRIES):
+            if (len(audio) and _tail_suspicious(audio, sr)
+                    and not _tail_ok(audio, sr, text)):
+                audio = eng.synth_chunk(text, voice, speed_mul=mul)
+            else:
+                break
         if len(audio):
             pieces.append(audio)
             pieces.append(np.zeros(int(sr * gap), dtype=np.float32))
@@ -251,6 +314,10 @@ def convert_book(path: str, *, engine: str = "f5", eng_kwargs: dict | None = Non
     opts = options or ConvertOptions()
     eng_kwargs = eng_kwargs or {}
     out_dir = out_dir or os.path.dirname(os.path.abspath(path))
+    # язык книги выбирает и модель синтеза, и нужны ли ударения
+    doc_lang = detect_language(read_document(path).text or "")
+    if engine in ("f5mlx", "f5") and "language" not in eng_kwargs:
+        eng_kwargs = dict(eng_kwargs, language=doc_lang)
     meta = get_engine(engine, **eng_kwargs)      # без загрузки модели: только метаданные
     sr = meta.sample_rate
     stress_fmt = getattr(meta, "stress_format", None)
@@ -270,7 +337,8 @@ def convert_book(path: str, *, engine: str = "f5", eng_kwargs: dict | None = Non
     for ch in chapters:
         # заголовок уже стоит первой строкой в ch.text (см. chapters.py), отдельно
         # его добавлять нельзя — иначе название прочитается дважды
-        body = _prepare_text(ch.text, stress_fmt, opts.expand_numbers, opts.use_stress)
+        body = _prepare_text(ch.text, stress_fmt, opts.expand_numbers,
+                             opts.use_stress, doc_lang)
         prepared.append((ch.title, _chunk_paragraphs(body, meta.max_chunk_chars,
                                                      opts.gap_sec, opts.para_gap_sec)))
 
@@ -371,6 +439,7 @@ class BookEstimate:
     audio_sec: float          # сколько будет звука
     title: str
     author: str
+    language: str = "ru"      # от него зависит модель синтеза и ударения
 
 
 def estimate_book(path: str, minutes_per_file: float = 15.0,
@@ -387,7 +456,8 @@ def estimate_book(path: str, minutes_per_file: float = 15.0,
     chars = sum(len(normalize_text(ch.text, expand_numbers=expand_numbers))
                 for ch in chapters)
     return BookEstimate(len(chapters), chars, chars / CHARS_PER_SEC,
-                        doc.title or doc.base_title, doc.author)
+                        doc.title or doc.base_title, doc.author,
+                        detect_language(doc.text or ""))
 
 
 # --- пробник (~1 минута из середины) ------------------------------------
@@ -414,11 +484,15 @@ def preview_sample(path: str, *, engine: str = "f5", eng_kwargs: dict | None = N
         # и тогда пробник выходил пустым (0,2 с тишины)
         ch = max(chapters, key=lambda c: len(c.text))
 
+    doc_lang = detect_language(doc.text or "")
+    if engine in ("f5mlx", "f5") and "language" not in (eng_kwargs or {}):
+        eng_kwargs = dict(eng_kwargs or {}, language=doc_lang)
     say(0.05, "Готовлю модель синтеза…")
     eng = _loaded_engine(engine, eng_kwargs)
     sr = eng.sample_rate
 
-    text = _prepare_text(ch.text, getattr(eng, "stress_format", None), opts.expand_numbers, opts.use_stress)
+    text = _prepare_text(ch.text, getattr(eng, "stress_format", None),
+                         opts.expand_numbers, opts.use_stress, doc_lang)
     sents = sentenize(text)
     budget = int(minutes * 60 * CHARS_PER_SEC)
     mid = len(sents) // 2

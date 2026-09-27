@@ -322,8 +322,10 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         kbps = {"mp3 192 кбит/с (обычный)": 192, "mp3 320 кбит/с": 320}.get(
             self.fmt_var.get(), 750)
         gb = e.audio_sec * kbps / 8 / 1024 / 1024
+        lang = {"ru": "русская книга", "en": "английская книга"}.get(
+            getattr(e, "language", "ru"), "")
         self.est_label.configure(
-            text=(f"{e.chapters} файлов · {_fmt_hms(e.audio_sec)} звука · "
+            text=(f"{lang} · {e.chapters} файлов · {_fmt_hms(e.audio_sec)} звука · "
                   f"расчёт около {_fmt_hms(e.audio_sec * rtf)} · "
                   f"на диске ~{gb:.1f} ГБ\n{note}"))
 

@@ -213,10 +213,29 @@ def _expand_percent(text: str) -> str:
     return text.replace("%", " процентов")
 
 
-def normalize_text(text: str, expand_numbers: bool = True) -> str:
+def detect_language(text: str) -> str:
+    """«ru» или «en» по тому, каких букв в тексте больше."""
+    cyr = sum(1 for c in text[:4000] if "а" <= c.lower() <= "я" or c.lower() == "ё")
+    lat = sum(1 for c in text[:4000] if "a" <= c.lower() <= "z")
+    return "en" if lat > cyr else "ru"
+
+
+_ABBR_EN = [
+    (r"\bMr\.", "Mister"), (r"\bMrs\.", "Missis"), (r"\bMs\.", "Miss"),
+    (r"\bDr\.", "Doctor"), (r"\bSt\.", "Saint"), (r"\bvs\.", "versus"),
+    (r"\be\.g\.", "for example"), (r"\bi\.e\.", "that is"),
+    (r"\betc\.", "et cetera"), (r"\bNo\.", "Number"),
+]
+
+
+def normalize_text(text: str, expand_numbers: bool = True,
+                   language: str | None = None) -> str:
     """Главная функция: сырой фрагмент -> текст, готовый к синтезу."""
     if not text:
         return ""
+    lang = language or detect_language(text)
+    if lang == "en":
+        return _normalize_en(text, expand_numbers)
     text = _strip_control(text)
     text = _dehyphenate(text)
 
@@ -243,6 +262,31 @@ def normalize_text(text: str, expand_numbers: bool = True) -> str:
     text = re.sub(r",{2,}", ",", text)
 
     # одиночные переводы строки -> пробел (абзацы разделяются пустой строкой)
+    text = re.sub(r"[ \t]*\n[ \t]*\n[ \t]*", "\n\n", text)
+    text = re.sub(r"(?<!\n)\n(?!\n)", " ", text)
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    return text.strip()
+
+
+def _normalize_en(text: str, expand_numbers: bool) -> str:
+    """То же самое для английского: свои сокращения и свои числительные."""
+    text = _strip_control(text)
+    text = _dehyphenate(text)
+    for a, b in _SYMBOLS:
+        if a not in ("№", "§", "&"):        # эти в английском читаются иначе
+            text = text.replace(a, b)
+    text = text.replace("№", " number ").replace("&", " and ")
+    for pat, rep in _ABBR_EN:
+        text = re.sub(pat, rep, text)
+    if expand_numbers and num2words is not None:
+        text = re.sub(r"\b(\d+)(st|nd|rd|th)\b",
+                      lambda m: num2words(int(m.group(1)), lang="en", to="ordinal"), text)
+        text = re.sub(r"\b(\d+)\s*%",
+                      lambda m: f"{num2words(int(m.group(1)), lang='en')} percent", text)
+        text = re.sub(r"\b\d+\b",
+                      lambda m: num2words(int(m.group(0)), lang="en"), text)
+    text = re.sub(r",\s*([,.!?;:…])", r"\1", text)
+    text = re.sub(r",{2,}", ",", text)
     text = re.sub(r"[ \t]*\n[ \t]*\n[ \t]*", "\n\n", text)
     text = re.sub(r"(?<!\n)\n(?!\n)", " ", text)
     text = re.sub(r"[ \t]{2,}", " ", text)

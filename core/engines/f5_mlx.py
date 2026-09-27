@@ -39,6 +39,17 @@ HF_SRC_REPO = "Misha24-10/F5-TTS_RUSSIAN"
 CKPT_REL = "F5TTS_v1_Base_accent_tune/model_last_inference.safetensors"
 VOCAB_REL = "F5TTS_v1_Base/vocab.txt"
 
+# Модели по языкам. Русская — веса в формате PyTorch, их конвертирует сам
+# f5-tts-mlx. Английская уже лежит в MLX-формате, её конвертировать не надо.
+LANG_MODELS: dict[str, dict] = {
+    "ru": {"repo": HF_SRC_REPO, "ckpt": CKPT_REL, "vocab": VOCAB_REL,
+           "convert": True,  "stress": "+"},
+    # у английской модели в репозитории тоже лежат веса с ключами «ema_model.*»,
+    # то есть в формате PyTorch — конвертировать их надо так же, как русские
+    "en": {"repo": "lucasnewman/f5-tts-mlx", "ckpt": "model_v1.safetensors",
+           "vocab": "vocab.txt", "convert": True, "stress": None},
+}
+
 SAMPLE_RATE = 24000
 HOP_LENGTH = 256
 TARGET_RMS = 0.1              # как target_rms в f5_tts.infer.utils_infer
@@ -76,8 +87,9 @@ CFG_STRENGTH = 2.0            # как cfg_strength в f5_tts.infer.utils_infer
 SWAY_COEF = -1.0              # как sway_sampling_coef там же
 
 
-def _mlx_model_dir() -> str:
-    d = os.path.join(os.path.expanduser("~"), ".cache", "text2audio", "f5mlx_model")
+def _mlx_model_dir(lang: str = "ru") -> str:
+    d = os.path.join(os.path.expanduser("~"), ".cache", "text2audio",
+                     f"f5mlx_model_{lang}")
     os.makedirs(d, exist_ok=True)
     return d
 
@@ -250,9 +262,13 @@ class F5MLXEngine(F5Engine):
     def __init__(self, voices_dir: str | None = None, model_name: str = HF_SRC_REPO,
                  steps: int = 7, speed: float = 1.55, quant_bits: int | None = None,
                  max_total_sec: float = MAX_TOTAL_SEC, dtype: str = "float32",
-                 schedule: str = "epss") -> None:
+                 schedule: str = "epss", language: str = "ru") -> None:
         super().__init__(voices_dir=voices_dir, device=None, nfe_step=steps, speed=speed)
         self.model_name = model_name
+        # язык задаёт и модель, и нужны ли ударения: у английской модели свой
+        # словарь, знак «+» она прочитала бы как символ
+        self.language = language if language in LANG_MODELS else "ru"
+        self.stress_format = LANG_MODELS[self.language]["stress"]
         # steps = число вызовов сети. По умолчанию 7 с расписанием EPSS: на целой
         # главе это RTF 0,62 при 94,1% разборчивости против 1,28 и 94,5% у
         # равномерных 16 шагов (эталон torch) — вдвое быстрее при той же речи.
@@ -280,6 +296,7 @@ class F5MLXEngine(F5Engine):
 
     # --- подготовка локальной папки модели с ожидаемыми именами файлов ---
     def _prepare_model_dir(self) -> str:
+        cfg = LANG_MODELS[self.language]
         """Папка с весами под именем, которого ждёт f5-tts-mlx (model_v1.safetensors).
 
         Кладём СИМВОЛЬНУЮ ССЫЛКУ на файл из кэша HF и каждый раз проверяем, куда
@@ -288,15 +305,15 @@ class F5MLXEngine(F5Engine):
         загружался без ошибок, но голос был не тот и речь выходила кашей).
         """
         from huggingface_hub import hf_hub_download
-        mdir = _mlx_model_dir()
-        src = os.path.realpath(hf_hub_download(HF_SRC_REPO, CKPT_REL))
+        mdir = _mlx_model_dir(self.language)
+        src = os.path.realpath(hf_hub_download(cfg["repo"], cfg["ckpt"]))
         dst = os.path.join(mdir, "model_v1.safetensors")
         if not (os.path.islink(dst) and os.path.realpath(dst) == src):
             if os.path.lexists(dst):
                 os.chmod(mdir, 0o755)
                 os.remove(dst)
             os.symlink(src, dst)
-        vocab_src = os.path.realpath(hf_hub_download(HF_SRC_REPO, VOCAB_REL))
+        vocab_src = os.path.realpath(hf_hub_download(cfg["repo"], cfg["vocab"]))
         vocab_dst = os.path.join(mdir, "vocab.txt")
         if not (os.path.islink(vocab_dst) and os.path.realpath(vocab_dst) == vocab_src):
             if os.path.lexists(vocab_dst):
@@ -316,7 +333,8 @@ class F5MLXEngine(F5Engine):
         cfm.fetch_from_hub = lambda *a, **k: Path(mdir)
         try:
             # convert_weights=True: веса в формате PyTorch — f5-tts-mlx их конвертирует
-            self._f5 = cfm.F5TTS.from_pretrained(mdir, convert_weights=True)
+            self._f5 = cfm.F5TTS.from_pretrained(
+                mdir, convert_weights=LANG_MODELS[self.language]["convert"])
         finally:
             cfm.fetch_from_hub = _orig
         # вокодер отцепляем: сначала обрежем мел-спектр образца, потом озвучим
