@@ -1,0 +1,22 @@
+#!/bin/bash
+# Запускает окно Herald из окружения проекта.
+# .app лежит внутри папки проекта, поэтому корень — три уровня вверх от MacOS/.
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$HERE/../../.." && pwd)"
+cd "$ROOT" || exit 1
+
+PY="$ROOT/.venv/bin/python"
+if [ ! -x "$PY" ]; then
+  osascript -e 'display alert "Herald" message "Окружение не найдено. Запусти setup_mac.command в папке программы." as critical'
+  exit 1
+fi
+
+# Интерпретатор зовём напрямую: при запуске из .app окружение урезанное, и
+# после source .venv/bin/activate команда python всё равно не находится.
+export PYTHONHASHSEED=0          # должен быть числом, иначе падают дочерние процессы
+export PYTORCH_ENABLE_MPS_FALLBACK=1
+export PATH="$ROOT/.venv/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+LOG="$HOME/Library/Logs/Herald.log"
+mkdir -p "$(dirname "$LOG")"
+exec "$PY" tts_gui.py >>"$LOG" 2>&1

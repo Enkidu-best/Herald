@@ -1,0 +1,41 @@
+# --- Ядро синтеза (ПРОВЕРЕННАЯ связка; torch 2.6 не требует torchcodec) ---
+torch==2.6.0
+torchaudio==2.6.0
+numpy
+soundfile
+certifi
+
+# --- Движок F5 (основной): естественный голос + клон + ударения ---
+f5-tts
+faster-whisper          # разовая расшифровка образца голоса
+ruaccent                # нейросетевая расстановка ударений
+huggingface_hub
+
+# --- Тот же F5 на MLX: нативно на Apple Silicon, в 4 раза быстрее torch ---
+# Это движок по умолчанию (f5mlx). Голос и ударения те же, что у torch-версии.
+# Маркеры платформы: на не-Apple-Silicon эти пакеты просто пропускаются,
+# приложение остаётся работоспособным на torch-движке.
+mlx; sys_platform == "darwin" and platform_machine == "arm64"
+f5-tts-mlx; sys_platform == "darwin" and platform_machine == "arm64"
+vocos-mlx; sys_platform == "darwin" and platform_machine == "arm64"
+pydub                   # подготовка образца (вырезание тишины) — как в f5-tts
+
+# --- Русская подготовка текста ---
+num2words
+razdel
+
+# --- Чтение форматов ---
+python-docx
+ebooklib
+beautifulsoup4
+lxml
+pymupdf
+pillow
+
+# --- GUI (для настольного приложения) ---
+customtkinter
+tkinterdnd2
+
+# Примечание: ставить в отдельный venv (см. setup_mac.command), чтобы не трогать
+# глобальный torch 2.14 (им пользуются Scribe и Anonymizer). torchcodec удаляется
+# скриптом — с torchaudio 2.6 он не нужен и на Homebrew-ffmpeg только мешает.
