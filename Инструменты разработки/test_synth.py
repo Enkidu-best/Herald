@@ -140,6 +140,8 @@ def main() -> int:
     ap.add_argument("--ru-voice", default=None)
     ap.add_argument("--en-voice", default=None)
     ap.add_argument("--keep", action="store_true", help="не удалять готовые файлы")
+    ap.add_argument("--quick", action="store_true",
+                    help="только короткие примеры (без проверки громких мест)")
     args = ap.parse_args()
 
     from core.engines import get_engine
@@ -149,8 +151,14 @@ def main() -> int:
 
     out = tempfile.mkdtemp(prefix="herald_test_")
     fails: list[str] = []
-    for book, voice, lang in (("Примеры текстов/Короткий тест — ru.txt", ru, "ru"),
-                              ("Примеры текстов/Короткий тест — en.txt", en, "en")):
+    # Короткие примеры — про то, доходит ли текст до звука. Длинный обязателен
+    # отдельно: громкие места в книге редки, на 13 секундах их можно не
+    # встретить, и клиппинг проходит мимо теста (так и случилось).
+    books = [("Примеры текстов/Короткий тест — ru.txt", ru, "ru"),
+             ("Примеры текстов/Короткий тест — en.txt", en, "en")]
+    if not args.quick:
+        books.append(("Примеры текстов/Пример — проба пера.txt", ru, "ru"))
+    for book, voice, lang in books:
         if not voice:
             print(f"\n--- {os.path.basename(book)}: нет голоса для «{lang}», пропуск")
             continue
