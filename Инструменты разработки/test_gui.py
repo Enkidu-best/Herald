@@ -111,8 +111,6 @@ def main() -> int:
     for title in tts_gui.MODE_TITLES:
         check(f"качество «{title}»",
               lambda t=title: (app.mode_var.set(t), app.show_estimate(), app.update()))
-    for title in tts_gui.SPEED_TITLES:
-        check(f"темп «{title}»", lambda t=title: app.speed_var.set(t))
     check("параметры движка собираются", lambda: app._eng_kwargs())
     check("параметры вывода собираются", lambda: app._conv_options())
 
@@ -124,6 +122,32 @@ def main() -> int:
           lambda: "проверочная" in app.clipboard_get() or (_ for _ in ()).throw(
               AssertionError(f"в буфере: {app.clipboard_get()[:40]!r}")))
 
+    def copy_selection():
+        inner = app.log._textbox
+        inner.tag_remove("sel", "1.0", "end")
+        inner.tag_add("sel", "1.0", "1.11")
+        app.copy_log(selection=True)
+        got = app.clipboard_get()
+        if "проверочн" not in got:
+            raise AssertionError(f"выделенное не скопировалось: {got[:30]!r}")
+    check("копируется выделенный фрагмент", copy_selection)
+    check("привязки Cmd+C стоят на внутреннем виджете",
+          lambda: app.log._textbox.bind("<Command-c>") or (_ for _ in ()).throw(
+              AssertionError("привязки нет")))
+    check("правая кнопка открывает меню",
+          lambda: app.log._textbox.bind("<Button-3>") or (_ for _ in ()).throw(
+              AssertionError("нет меню по правой кнопке")))
+
+    print("отчёт:")
+    app._set_book(book)
+    wait(lambda: app.est is not None)
+    check("шапка отчёта пишется", lambda: (app.log.delete("1.0", "end"),
+                                           app._log_settings("Проверка"),
+                                           app.update()))
+    check("в шапке есть настройки голоса",
+          lambda: "настройки голоса" in app.log.get("1.0", "end") or (
+              _ for _ in ()).throw(AssertionError("шапка без настроек")))
+
     print("настройки:")
     check("окно настроек открывается", lambda: (app.show_settings(), app.update()))
     check("список голосов в настройках не пуст",
@@ -134,6 +158,34 @@ def main() -> int:
             w.destroy()
     app.update()
 
+    print("кнопка звучания:")
+
+    def fx_button_stable():
+        sizes = set()
+        for label in app.voice_menu.cget("values"):
+            app.voice_var.set(label)
+            app.update_idletasks()
+            if not app.fx_btn.winfo_ismapped():
+                raise AssertionError(f"кнопка ♪ пропала при голосе «{label}»")
+            sizes.add((app.fx_btn.winfo_width(), app.fx_btn.winfo_height()))
+        if len(sizes) > 1:
+            raise AssertionError(f"размер кнопки ♪ скачет: {sizes}")
+    check("♪ одного размера при любом голосе", fx_button_stable)
+
+    print("блокировка на время работы:")
+
+    def busy_locks():
+        app._set_busy(True, "тест")
+        locked = [b for b in (app.start_btn, app.preview_btn, app.clear_btn,
+                              app.fx_btn) if b.cget("state") != "disabled"]
+        stop_live = app.stop_btn.cget("state") == "normal"
+        app._set_busy(False)
+        if locked:
+            raise AssertionError(f"не заблокировано кнопок: {len(locked)}")
+        if not stop_live:
+            raise AssertionError("«Стоп» недоступна во время работы")
+    check("во время работы активна только «Стоп»", busy_locks)
+
     print("звучание голоса:")
     vid = app.current_voice()
     before = load_fx(default_voices_dir(), vid)
@@ -142,20 +194,28 @@ def main() -> int:
           lambda: vid == app.current_voice() or (_ for _ in ()).throw(
               AssertionError("окно открылось не для выбранного голоса")))
 
+    check("темп есть среди настроек голоса",
+          lambda: "speed" in app._fx_vars or (_ for _ in ()).throw(
+              AssertionError("ползунка темпа нет")))
+
     def move_sliders():
         for key, (sl, _lbl, _u) in app._fx_vars.items():
-            sl.set(-2 if key == "pitch" else 3)
-            app._fx_changed(key)
+            sl.set(1.1 if key == "speed" else (-2 if key == "pitch" else 3))
+            app._fx_slider(key)
         app.update()
     check("ползунки двигаются", move_sliders)
     check("значения читаются",
-          lambda: app._fx_current().pitch == -2 or (_ for _ in ()).throw(
-              AssertionError(f"вышло {app._fx_current()}")))
+          lambda: (app._fx_current().pitch == -2
+                   and abs(app._fx_current().speed - 1.1) < 0.03) or (
+              _ for _ in ()).throw(AssertionError(f"вышло {app._fx_current()}")))
     check("сохранение не падает", lambda: save_fx(default_voices_dir(), vid,
                                                   app._fx_current()))
     check("сохранённое читается обратно",
           lambda: load_fx(default_voices_dir(), vid).pitch == -2 or (
               _ for _ in ()).throw(AssertionError("не сохранилось")))
+    check("темп голоса сохранился",
+          lambda: abs(load_fx(default_voices_dir(), vid).speed - 1.1) < 0.03 or (
+              _ for _ in ()).throw(AssertionError("темп не сохранился")))
     check("поправки попадают в фильтр",
           lambda: "asetrate" in load_fx(default_voices_dir(), vid).filter_chain()
           or (_ for _ in ()).throw(AssertionError("фильтр пустой")))

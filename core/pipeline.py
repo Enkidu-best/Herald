@@ -25,6 +25,7 @@ from .stress import add_stress
 from .assemble import (RenderedChapter, write_wav, assemble_m4b, encode_chapter_mp3,
                        polish_wav_to_mp3, FORMATS, DEFAULT_FORMAT)
 from .engines import get_engine, TTSEngine
+from .engines.f5 import default_voices_dir
 from .voicefx import load as load_fx
 
 
@@ -231,7 +232,8 @@ def _words(s: str) -> list[str]:
     return re.sub(r"[^\w ]", " ", s.lower().replace("+", "").replace("ё", "е")).split()
 
 
-def _edges_ok(audio: np.ndarray, sr: int, text: str, head_only: bool = False) -> bool:
+def _edges_ok(audio: np.ndarray, sr: int, text: str, head_only: bool = False,
+              lang: str = "ru") -> bool:
     """Слышны ли первое и последнее слова куска — те самые, что в тексте."""
     global _asr_failed
     if _asr_failed or len(audio) < sr:
@@ -240,6 +242,8 @@ def _edges_ok(audio: np.ndarray, sr: int, text: str, head_only: bool = False) ->
     if not want:
         return True
     try:
+        import contextlib
+        import io
         import tempfile as _tf
         import soundfile as _sf
         import mlx_whisper
@@ -247,8 +251,11 @@ def _edges_ok(audio: np.ndarray, sr: int, text: str, head_only: bool = False) ->
         def heard(chunk):
             with _tf.NamedTemporaryFile(suffix=".wav", delete=False) as f:
                 _sf.write(f.name, chunk, sr)
-                r = mlx_whisper.transcribe(f.name, path_or_hf_repo=_ASR_MODEL,
-                                           verbose=False)
+                # язык передаём явно: иначе whisper определяет его сам, и это
+                # ровно удваивает время проверки (2,4 с против 1,3 с)
+                with contextlib.redirect_stdout(io.StringIO()):
+                    r = mlx_whisper.transcribe(f.name, path_or_hf_repo=_ASR_MODEL,
+                                               language=lang, verbose=False)
             os.unlink(f.name)
             return _words(r["text"])
 
@@ -272,7 +279,8 @@ def _edges_ok(audio: np.ndarray, sr: int, text: str, head_only: bool = False) ->
 
 
 def _synth_chunks(eng: TTSEngine, voice: str, chunks, sr: int,
-                  gap_sec: float, on_chunk=None, should_stop=None) -> np.ndarray:
+                  gap_sec: float, on_chunk=None, should_stop=None,
+                  lang: str = "ru") -> np.ndarray:
     # принимаем простые строки, пары (текст, пауза) и тройки (…, множитель темпа)
     items = []
     for c in chunks:
@@ -293,7 +301,7 @@ def _synth_chunks(eng: TTSEngine, voice: str, chunks, sr: int,
                 break
             # конец проверяем только при подозрении (там громкость выдаёт сбой),
             # начало — всегда, иначе пропажу первого слова не заметить
-            if _edges_ok(audio, sr, text,
+            if _edges_ok(audio, sr, text, lang=lang,
                          head_only=not _edges_suspicious(audio, sr)):
                 break
             audio = eng.synth_chunk(text, voice, speed_mul=mul)
@@ -373,10 +381,9 @@ def convert_book(path: str, *, engine: str = "f5", eng_kwargs: dict | None = Non
         prepared.append((ch.title, _chunk_paragraphs(body, meta.max_chunk_chars,
                                                      opts.gap_sec, opts.para_gap_sec)))
 
-    # ручные поправки голоса (высота/бас/яркость), если их задавали
+    # настройки голоса: тембр применяем при кодировании, темп — при синтезе
     fx_chain = ""
     try:
-        from .engines.f5 import default_voices_dir
         fx_chain = load_fx(default_voices_dir(), voice).filter_chain()
     except Exception:
         pass
@@ -420,6 +427,13 @@ def convert_book(path: str, *, engine: str = "f5", eng_kwargs: dict | None = Non
 
     if workers == 1:
         say(0.05, "Готовлю модель синтеза…")
+        try:
+            vs = load_fx(default_voices_dir(), voice).speed
+            if vs != 1.0:
+                eng_kwargs = dict(eng_kwargs,
+                                  speed=eng_kwargs.get("speed", 1.0) * vs)
+        except Exception:
+            pass
         eng = _loaded_engine(engine, eng_kwargs)
         total_chunks = sum(max(1, len(c)) for _, c in prepared)
         done = 0
@@ -429,7 +443,7 @@ def convert_book(path: str, *, engine: str = "f5", eng_kwargs: dict | None = Non
                 done += 1
                 say(0.05 + 0.9 * done / total_chunks, f"Озвучиваю: глава {ci} из {len(prepared)}")
             audio = _synth_chunks(eng, voice, chunks, sr, opts.gap_sec, on_chunk=bump,
-                                  should_stop=should_stop)
+                                  should_stop=should_stop, lang=doc_lang)
             audio = np.concatenate([audio, np.zeros(int(sr * opts.para_gap_sec), dtype=np.float32)])
             wp = os.path.join(workdir, f"ch{ci:04d}.wav")
             emit(ci, RenderedChapter(title or f"Часть {ci}", wp, write_wav(audio, sr, wp)),
@@ -528,6 +542,15 @@ def preview_sample(path: str, *, engine: str = "f5", eng_kwargs: dict | None = N
     if engine in ("f5mlx", "f5") and "language" not in (eng_kwargs or {}):
         eng_kwargs = dict(eng_kwargs or {}, language=doc_lang)
     say(0.05, "Готовлю модель синтеза…")
+    # темп голоса подмешиваем в параметры, иначе кэш отдаст движок с прошлым
+    try:
+        from .engines.f5 import default_voices_dir
+        vs = load_fx(default_voices_dir(), voice).speed
+        if vs != 1.0:
+            eng_kwargs = dict(eng_kwargs or {},
+                              speed=(eng_kwargs or {}).get("speed", 1.0) * vs)
+    except Exception:
+        pass
     eng = _loaded_engine(engine, eng_kwargs)
     sr = eng.sample_rate
 
@@ -549,7 +572,8 @@ def preview_sample(path: str, *, engine: str = "f5", eng_kwargs: dict | None = N
     def bump():
         done[0] += 1
         say(0.2 + 0.7 * done[0] / max(1, len(chunks)), "Озвучиваю пробный фрагмент…")
-    audio = _synth_chunks(eng, voice, chunks, sr, opts.gap_sec, on_chunk=bump)
+    audio = _synth_chunks(eng, voice, chunks, sr, opts.gap_sec, on_chunk=bump,
+                          lang=doc_lang)
 
     out_path = out_path or os.path.join(tempfile.mkdtemp(prefix="t2a_prev_"), "preview.wav")
     write_wav(audio, sr, out_path)

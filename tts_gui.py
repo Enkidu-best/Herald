@@ -64,12 +64,6 @@ MODE_TITLES = [m[0] for m in MODES]
 # LANG_MODELS). «Обычный» = 1.0 и даёт ту скорость чтения, что была одобрена на
 # слух, — причём одинаковую для любого голоса, хоть быстрого, хоть медленного.
 # Заголовки читаются ещё размереннее (HEADING_SPEED_MUL в pipeline).
-SPEEDS: list[tuple[str, float]] = [
-    ("Медленно", 0.85), ("Чуть медленнее", 0.93), ("Обычный", 1.0),
-    ("Чуть быстрее", 1.10), ("Быстро", 1.22),
-]
-SPEED_TITLES = [t for t, _ in SPEEDS]
-
 ENGINE_TITLES = dict(list_engines())
 ENGINE_IDS = [e for e in ("f5mlx", "apple") if e in ENGINE_TITLES]
 ENGINE_SHORT = {"f5mlx": "Голос диктора (клон)", "apple": "Системный голос macOS"}
@@ -120,6 +114,7 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         self.configure(fg_color=BG)
 
         self.load_sample_btn = None       # появляется в окне настроек
+        self._setting_menus: list = []     # блокируются на время работы
         self.voices_list = None
         self.book_path: str | None = None
         self.est = None
@@ -206,6 +201,7 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
                 row=row, column=col, sticky="w", padx=14, pady=(14, 3))
             w = factory()
             w.grid(row=row + 1, column=col, sticky="ew", padx=14)
+            self._setting_menus.append(w)
             return w
 
         self.engine_var = ctk.StringVar(value=ENGINE_IDS[0])
@@ -217,26 +213,29 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         _label(card, "Голос", size=12, color=DIM).grid(
             row=0, column=1, sticky="w", padx=14, pady=(14, 3))
         voice_box.grid(row=1, column=1, sticky="ew", padx=14)
+        # сетка, а не pack: при длинном имени голоса меню раздувалось и
+        # выдавливало кнопку за край — она то меняла размер, то исчезала
+        voice_box.grid_columnconfigure(0, weight=1)
+        voice_box.grid_columnconfigure(1, weight=0, minsize=40)
         self.voice_menu = _menu(voice_box, [""], variable=self.voice_var)
-        self.voice_menu.pack(side="left", fill="x", expand=True)
+        self.voice_menu.grid(row=0, column=0, sticky="ew")
+        self._setting_menus.append(self.voice_menu)
         # правим звучание ровно того голоса, который выбран рядом
-        ctk.CTkButton(voice_box, text="♪", width=34, height=34, corner_radius=8,
-                      fg_color=CARD2, hover_color=LINE, text_color=DIM,
-                      font=ctk.CTkFont(size=15), command=self.show_voice_fx).pack(
-            side="left", padx=(6, 0))
+        self.fx_btn = ctk.CTkButton(
+            voice_box, text="♪", width=34, height=34, corner_radius=8,
+            fg_color=CARD2, hover_color=LINE, text_color=DIM,
+            font=ctk.CTkFont(size=15), command=self.show_voice_fx)
+        self.fx_btn.grid(row=0, column=1, sticky="e", padx=(6, 0))
         self.mode_var = ctk.StringVar(value=MODE_TITLES[0])
         self.mode_menu = cell(0, 2, "Качество синтеза",
                               lambda: _menu(card, MODE_TITLES, variable=self.mode_var,
                                             command=lambda *_: self.show_estimate()))
-        self.speed_var = ctk.StringVar(value="Обычный")
-        cell(2, 0, "Темп чтения",
-             lambda: _menu(card, SPEED_TITLES, variable=self.speed_var))
         self.len_var = ctk.StringVar(value="15 минут")
-        cell(2, 1, "Длина одного файла",
+        cell(2, 0, "Длина одного файла",
              lambda: _menu(card, FILE_LENGTHS, variable=self.len_var,
                            command=lambda *_: self.reestimate()))
         self.fmt_var = ctk.StringVar(value=DEFAULT_FORMAT)
-        cell(2, 2, "Качество записи",
+        cell(2, 1, "Качество записи",
              lambda: _menu(card, list(FORMATS), variable=self.fmt_var,
                            command=lambda *_: self.show_estimate()))
 
@@ -290,6 +289,7 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         self.log = ctk.CTkTextbox(card, fg_color=CARD2, text_color=TEXT,
                                   corner_radius=10, font=ctk.CTkFont(size=12))
         self.log.pack(fill="both", expand=True, padx=16, pady=(0, 6))
+        self._enable_copy(self.log)
         foot = ctk.CTkFrame(card, fg_color="transparent")
         foot.pack(fill="x", padx=16, pady=(0, 14))
         self.copy_btn = ctk.CTkButton(
@@ -297,8 +297,7 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
             fg_color=CARD2, hover_color=LINE, text_color=DIM,
             font=ctk.CTkFont(size=12), command=self.copy_log)
         self.copy_btn.pack(side="right")
-        # Cmd+C по выделенному тексту тоже включаем
-        self.log.bind("<Command-c>", lambda e: self.copy_log(selection=True))
+
 
     # --- книга -----------------------------------------------------------
     def on_drop(self, event):
@@ -362,20 +361,21 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
             return
         e = self.est
         if self.engine_var.get() not in CLONING:
-            rtf, note = 0.05, "системный голос считается почти мгновенно"
+            rtf = 0.05
         else:
             rtf = dict(zip(MODE_TITLES, (m[2] for m in MODES)))[self.mode_var.get()]
-            note = "файлы появляются по порядку — можно слушать, не дожидаясь конца"
+        # темп голоса меняет длину звука: медленнее читает — дольше звучит
+        rate = load_fx(default_voices_dir(), self.current_voice()).speed or 1.0
+        audio_sec = e.audio_sec / rate
         kbps = {"mp3 192 кбит/с (обычный)": 192, "mp3 320 кбит/с": 320}.get(
             self.fmt_var.get(), 750)
-        gb = e.audio_sec * kbps / 8 / 1024 / 1024
-        self.refresh_voices()          # голоса нужного языка поднимутся наверх
+        mb = audio_sec * kbps / 8 / 1024
+        size = f"{mb / 1024:.1f} ГБ" if mb >= 1024 else f"{mb:.0f} МБ"
         lang = {"ru": "русская книга", "en": "английская книга"}.get(
             getattr(e, "language", "ru"), "")
         self.est_label.configure(
-            text=(f"{lang} · {e.chapters} файлов · {_fmt_hms(e.audio_sec)} звука · "
-                  f"расчёт около {_fmt_hms(e.audio_sec * rtf)} · "
-                  f"на диске ~{gb:.1f} ГБ\n{note}"))
+            text=(f"{lang} · {e.chapters} файлов · {_fmt_hms(audio_sec)} звука · "
+                  f"расчёт около {_fmt_hms(audio_sec * rtf)} · на диске ~{size}"))
 
     # --- движок и голоса --------------------------------------------------
     def on_engine(self, title: str):
@@ -405,6 +405,9 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         self.voice_menu.configure(values=labels)
         if self.voice_var.get() not in labels:
             self.voice_var.set(labels[0])
+        self.voice_var.trace_add("write", lambda *_: self.show_estimate()) \
+            if not getattr(self, "_voice_traced", False) else None
+        self._voice_traced = True
 
     def _select_voice(self, vid: str):
         for v in getattr(self, "_voices", []):
@@ -523,7 +526,7 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
 
         win = ctk.CTkToplevel(self)
         win.title(f"Звучание · {vid}")
-        win.geometry("560x430")
+        win.geometry("580x500")
         win.configure(fg_color=BG)
         win.transient(self)
 
@@ -531,10 +534,13 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         card.pack(fill="both", expand=True, padx=18, pady=18)
         _label(card, f"Голос «{vid}»", size=16, weight="bold").pack(
             fill="x", padx=18, pady=(16, 2))
-        _label(card, "Темп задаётся в главном окне. Здесь — тембр.",
-               size=12, color=DIM).pack(fill="x", padx=18, pady=(0, 10))
+        _label(card, "Настройки запоминаются для этого голоса и применяются\n"
+                     "при каждой озвучке. Интонацию и манеру так не поменять —\n"
+                     "они приходят из образца.",
+               size=12, color=DIM, justify="left").pack(fill="x", padx=18, pady=(0, 10))
 
-        rows = [("Высота", "pitch", -4, 4, " полутона"),
+        rows = [("Темп", "speed", 0.8, 1.25, "×"),
+                ("Высота", "pitch", -4, 4, " полутона"),
                 ("Бас", "bass", -6, 6, " дБ"),
                 ("Яркость", "brightness", -6, 6, " дБ")]
         self._fx_vars = {}
@@ -545,13 +551,14 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
             val = ctk.CTkLabel(line, text="", width=90, text_color=DIM,
                                font=ctk.CTkFont(size=12))
             val.pack(side="right")
-            sl = ctk.CTkSlider(line, from_=lo, to=hi, number_of_steps=(hi - lo) * 4,
+            steps = 18 if key == "speed" else int((hi - lo) * 4)
+            sl = ctk.CTkSlider(line, from_=lo, to=hi, number_of_steps=steps,
                                button_color=ACCENT, button_hover_color=ACCENT_HOVER,
                                progress_color=ACCENT, fg_color=CARD2)
             sl.pack(side="left", fill="x", expand=True, padx=10)
             sl.set(getattr(fx, key))
             self._fx_vars[key] = (sl, val, unit)
-            sl.configure(command=lambda _v, k=key: self._fx_changed(k))
+            sl.configure(command=lambda _v, k=key: self._fx_slider(k))
             self._fx_changed(key)
 
         btns = ctk.CTkFrame(card, fg_color="transparent")
@@ -569,17 +576,28 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         win.after(120, win.lift)
 
     def _fx_current(self) -> VoiceFX:
-        return VoiceFX(**{k: round(sl.get(), 1)
-                          for k, (sl, _l, _u) in self._fx_vars.items()})
+        vals = {}
+        for k, (sl, _l, _u) in self._fx_vars.items():
+            vals[k] = round(sl.get(), 2 if k == "speed" else 1)
+        return VoiceFX(**vals)
+
+    def _fx_slider(self, key: str):
+        self._fx_changed(key)
+        if key == "speed":
+            self._fx_raw = None      # темп задаётся при синтезе, фразу пересчитаем
 
     def _fx_changed(self, key: str):
         sl, lbl, unit = self._fx_vars[key]
-        v = round(sl.get(), 1)
-        lbl.configure(text=("нет" if v == 0 else f"{v:+.1f}{unit}"))
+        if key == "speed":
+            v = round(sl.get(), 2)
+            lbl.configure(text="как есть" if abs(v - 1) < 0.01 else f"{v:.2f}{unit}")
+        else:
+            v = round(sl.get(), 1)
+            lbl.configure(text="нет" if v == 0 else f"{v:+.1f}{unit}")
 
     def _fx_reset(self):
         for k, (sl, _l, _u) in self._fx_vars.items():
-            sl.set(0)
+            sl.set(1.0 if k == "speed" else 0)
             self._fx_changed(k)
 
     def _fx_play(self):
@@ -593,7 +611,7 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
                 import tempfile
                 if self._fx_raw is None:
                     lang = next((v.language for v in self._voices if v.id == vid), "ru")
-                    eng = get_engine("f5mlx", language=lang)
+                    eng = get_engine("f5mlx", language=lang, speed=fx.speed)
                     audio = eng.synth_chunk(self.FX_PHRASE.get(lang, self.FX_PHRASE["ru"]),
                                             vid)
                     import soundfile as sf
@@ -622,7 +640,9 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
 
     def _fx_save(self, vid: str, win):
         save_fx(default_voices_dir(), vid, self._fx_current())
-        self.status.configure(text=f"Звучание голоса «{vid}» сохранено")
+        self.status.configure(text=f"Настройки голоса «{vid}» сохранены")
+        self._refresh_voices_list()
+        self.show_estimate()          # темп влияет на длину и прогноз
         win.destroy()
 
     def _refresh_voices_list(self):
@@ -647,7 +667,7 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
     # `_configure`, `_w` и другие. Свой метод `_options()` молча ломает окно на
     # старте (TypeError в configure), поэтому здесь `_conv_options`.
     def _eng_kwargs(self) -> dict:
-        kw = {"speed": dict(SPEEDS)[self.speed_var.get()]}
+        kw: dict = {}
         if self.engine_var.get() in CLONING:
             kw.update(dict(zip(MODE_TITLES, (m[1] for m in MODES)))[self.mode_var.get()])
         return kw
@@ -660,8 +680,13 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
     def _set_busy(self, busy: bool, status: str = ""):
         self.running = busy
         state = "disabled" if busy else "normal"
-        for b in (self.start_btn, self.preview_btn, self.clear_btn):
+        # во время счёта оставляем живой только «Стоп»: любое переключение
+        # настроек на ходу всё равно ни на что не повлияет, а нажатая по
+        # ошибке кнопка может запустить второй синтез поверх первого
+        for b in (self.start_btn, self.preview_btn, self.clear_btn, self.fx_btn):
             b.configure(state=state)
+        for w in self._setting_menus:
+            w.configure(state=state)
         self.stop_btn.configure(state="normal" if busy else "disabled",
                                 text_color=TEXT if busy else DIM)
         if getattr(self, "load_sample_btn", None) is not None:
@@ -688,13 +713,43 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
     def _logln(self, text: str):
         self.after(0, lambda: (self.log.insert("end", text + "\n"), self.log.see("end")))
 
+    def _enable_copy(self, box):
+        """Копирование из лога: Cmd+C, Ctrl+C и правая кнопка мыши.
+
+        Привязки ставим на ВНУТРЕННИЙ tkinter-виджет (box._textbox), а не на
+        CTkTextbox: обёртка события клавиш до него не доносит, поэтому Cmd+C
+        по выделенному тексту не работал вообще. Плюс своё контекстное меню —
+        стандартного у Tk на macOS нет.
+        """
+        inner = getattr(box, "_textbox", box)
+        import tkinter as tk
+
+        menu = tk.Menu(inner, tearoff=0)
+        menu.add_command(label="Скопировать выделенное",
+                         command=lambda: self.copy_log(selection=True))
+        menu.add_command(label="Скопировать всё", command=lambda: self.copy_log())
+        menu.add_separator()
+        menu.add_command(label="Выделить всё",
+                         command=lambda: (inner.tag_add("sel", "1.0", "end"), None))
+
+        def popup(event):
+            menu.tk_popup(event.x_root, event.y_root)
+            return "break"
+
+        for seq in ("<Command-c>", "<Control-c>", "<Command-C>"):
+            inner.bind(seq, lambda e: self.copy_log(selection=True))
+        inner.bind("<Command-a>", lambda e: (inner.tag_add("sel", "1.0", "end"), "break")[1])
+        for seq in ("<Button-2>", "<Button-3>", "<Control-Button-1>"):
+            inner.bind(seq, popup)
+
     def copy_log(self, selection: bool = False):
         """Положить отчёт в буфер обмена — его удобно прислать целиком."""
+        inner = getattr(self.log, "_textbox", self.log)
         try:
-            text = (self.log.get("sel.first", "sel.last") if selection
-                    else self.log.get("1.0", "end").strip())
+            text = (inner.get("sel.first", "sel.last") if selection
+                    else inner.get("1.0", "end").strip())
         except Exception:
-            text = self.log.get("1.0", "end").strip()
+            text = inner.get("1.0", "end").strip()      # выделения нет — берём всё
         if not text:
             return "break"
         self.clipboard_clear()
@@ -724,6 +779,8 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
             return
         self._set_busy(True, "Готовлю пробник…")
         self.progress.set(0)
+        self.log.delete("1.0", "end")
+        self._log_settings("Пробник (одна минута)")
 
         def work():
             try:
@@ -741,6 +798,8 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
                 out_path = os.path.splitext(self.book_path)[0] + " — пробник" + ext
                 # та же полировка, что у глав: иначе пробник звучит иначе, чем книга
                 polish_wav_to_mp3(out, out_path, fmt=self.fmt_var.get())
+                self._logln(f"Звука {len(_a) / _sr:.0f} c, "
+                            f"счёт {_fmt_hms(time.time() - self._t0)}")
                 self._logln(f"Пробник готов: {out_path}")
                 # сам файл не открываем: слушатель включит его, когда захочет
                 self.after(0, lambda: self._set_busy(
@@ -750,12 +809,29 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         threading.Thread(target=work, daemon=True).start()
 
     # --- вся книга -------------------------------------------------------
+    def _log_settings(self, what: str):
+        """Шапка отчёта: с какими настройками считали. Чтобы можно было прислать."""
+        vid = self.current_voice()
+        fx = load_fx(default_voices_dir(), vid)
+        e = self.est
+        self._logln(f"{what}: {os.path.basename(self.book_path)}")
+        if e is not None:
+            self._logln(f"  книга: {e.chapters} файлов, ~{_fmt_hms(e.audio_sec)} звука, "
+                        f"язык {getattr(e, 'language', '?')}")
+        self._logln(f"  голос: {vid}  ·  {ENGINE_SHORT.get(self.engine_var.get(), '')}")
+        self._logln(f"  качество синтеза: {self.mode_var.get()}  ·  "
+                    f"запись: {self.fmt_var.get()}  ·  файл по {self.len_var.get()}")
+        self._logln(f"  настройки голоса: темп ×{fx.speed:.2f}, высота {fx.pitch:+.1f}, "
+                    f"бас {fx.bass:+.1f}, яркость {fx.brightness:+.1f}")
+        self._logln("")
+
     def do_start(self):
         if self.running or not self._ready():
             return
         self._set_busy(True, "Старт…")
         self.progress.set(0)
         self.log.delete("1.0", "end")
+        self._log_settings("Озвучка книги")
 
         def on_chapter(ci, title, mp3):
             self._logln(f"✓ {ci}: {os.path.basename(mp3) if mp3 else title}"
@@ -769,7 +845,12 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
                                    options=self._conv_options(),
                                    progress=self._progress, on_chapter=on_chapter,
                                    should_stop=self._stop_flag.is_set)
+                took = time.time() - self._t0
                 mins = int(res.duration // 60)
+                self._logln("")
+                self._logln(f"Готово. Звука {_fmt_hms(res.duration)}, "
+                            f"счёт {_fmt_hms(took)} "
+                            f"(на секунду звука {took / max(res.duration, 1):.2f} с)")
                 self.after(0, lambda: self._set_busy(
                     False, f"Готово: {res.chapters} файлов, ~{mins} мин звука"))
                 if res.mp3_dir:
