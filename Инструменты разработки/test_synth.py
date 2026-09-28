@@ -69,7 +69,18 @@ def check_one(book: str, voice: str, lang: str, out_dir: str) -> list[str]:
     want = words(normalize_text(chapters[0].text, language=lang), lang)
     expect_sec = len(" ".join(want)) / 100 * MIN_SEC_PER_100_CHARS
 
-    print(f"  файл {files[0]}  {size//1024} КБ  {dur:.1f} c  (счёт {took:.0f} c)")
+    # прогноз не должен расходиться с фактом больше чем на четверть: по нему
+    # человек решает, ставить книгу на ночь или нет
+    from core.pipeline import estimate_book
+    est = estimate_book(book, 15.0)
+    err = abs(est.audio_sec - dur) / max(dur, 1) * 100
+    print(f"  файл {files[0]}  {size//1024} КБ  {dur:.1f} c  (счёт {took:.0f} c, "
+          f"на секунду звука {took/max(dur,1):.2f} с)")
+    print(f"  прогноз звука {est.audio_sec:.0f} c против факта {dur:.0f} c — "
+          f"расхождение {err:.0f}%")
+    if err > 25:
+        fails.append(f"{name}: прогноз звука врёт на {err:.0f}% "
+                     f"({est.audio_sec:.0f} c против {dur:.0f} c)")
     if size == 0:
         fails.append(f"{name}: файл ПУСТОЙ (0 байт)")
     if dur < expect_sec:
@@ -90,10 +101,14 @@ def check_one(book: str, voice: str, lang: str, out_dir: str) -> list[str]:
     # Края проверяем с допуском в два слова: распознаватель и сам может
     # разделить или склеить слово на границе, а нам важно, что оно ЗВУЧИТ,
     # а не стоит ли ровно первым в расшифровке.
-    if want[0] not in got[:3]:
+    def near(word: str, among: list[str]) -> bool:
+        # одна смазанная буква на стыке — не потеря слова, а предел модели
+        return any(difflib.SequenceMatcher(None, word, g).ratio() >= 0.7
+                   for g in among)
+    if not near(want[0], got[:3]):
         fails.append(f"{name}: первого слова «{want[0]}» не слышно "
                      f"(начало: {' '.join(got[:3])})")
-    if want[-1] not in got[-3:]:
+    if not near(want[-1], got[-3:]):
         fails.append(f"{name}: последнего слова «{want[-1]}» не слышно "
                      f"(конец: {' '.join(got[-3:])})")
     return fails

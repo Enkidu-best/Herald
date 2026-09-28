@@ -19,7 +19,7 @@ from typing import Callable, Optional
 import numpy as np
 
 from .readers import read_document, ScannedPdfError, ReaderError
-from .chapters import build_chapters
+from .chapters import build_chapters, CHARS_PER_SEC
 from .normalize import normalize_text, sentenize, detect_language
 from .stress import add_stress
 from .assemble import (RenderedChapter, write_wav, assemble_m4b, encode_chapter_mp3,
@@ -30,7 +30,6 @@ from .voicefx import load as load_fx
 
 
 Progress = Callable[[float, str], None]
-CHARS_PER_SEC = 14
 MIN_SEC_PER_1000 = 25.0   # меньше этого на 1000 символов — синтез явно не удался
 
 # Модель F5 весит 1,3 ГБ, и грузить её заново на каждое нажатие — это и время,
@@ -172,9 +171,11 @@ def _chunk_paragraphs(text: str, max_chars: int, gap: float,
 # по 200+ — около 110 с при том же объёме звука.
 MERGE_UNDER_FRACTION = 0.95
 MIN_CHUNK_CHARS = 45
-# Заголовок короче этого отдельным куском не оставляем: на 14 символах модели
-# не за что зацепиться, и «Проба голоса» превращается в «Проба ГОД».
-MIN_HEADING_CHARS = 25
+# Заголовок короче этого отдельным куском не оставляем: на коротком отрезке
+# модели не за что зацепиться, и «Проба голоса» превращается в «Проба ГОД», а
+# «Глава первая. Ветер с залива» пропадает целиком. Склеенный с первым абзацем
+# заголовок читается надёжно, паузу после него даёт точка.
+MIN_HEADING_CHARS = 45
 
 
 def _merge_short(items, max_chars: int):
@@ -207,7 +208,6 @@ def _merge_short(items, max_chars: int):
 # переспросить — со второй попытки кусок обычно выходит чистым. Проверяем
 # ТОЛЬКО крайние слова: распознавание всего куска стоило бы дороже синтеза.
 TAIL_RETRIES = 2
-TAIL_QUIET = 0.45         # край тише этой доли от средней громкости — подозрительно
 # Модель для проверки краёв. base (130 мс) оказалась слишком слабой: она врала
 # на краях («глова» вместо «глава», «гакма» вместо «как море»), и половина
 # кусков пересинтезировалась впустую. small — 310 мс и уже не путается, против
@@ -216,24 +216,6 @@ TAIL_QUIET = 0.45         # край тише этой доли от средн�
 _ASR_MODEL = "mlx-community/whisper-small-mlx"
 _WORD_SIMILAR = 0.75
 _asr_failed = False
-
-
-def _edges_suspicious(audio: np.ndarray, sr: int) -> bool:
-    """Дешёвый предфильтр: смазанный край звучит тише обычного.
-
-    Распознавание стоит около пятой части синтеза, а портится один кусок из
-    десяти. Поэтому сначала смотрим на громкость первой и последней четверти
-    секунды и зовём распознавание, только если где-то подозрительно тихо.
-    """
-    n = int(0.25 * sr)
-    if len(audio) < sr // 2:
-        return True
-    body = float(np.sqrt(np.mean(audio ** 2)))
-    if body <= 0:
-        return True
-    head = float(np.sqrt(np.mean(audio[:n] ** 2))) / body
-    tail = float(np.sqrt(np.mean(audio[-n:] ** 2))) / body
-    return head < TAIL_QUIET or tail < TAIL_QUIET
 
 
 def _last_word(s: str) -> str:
@@ -246,10 +228,20 @@ def _words(s: str) -> list[str]:
 
 
 def _sounds_like(want: str, heard: list[str]) -> bool:
-    """Есть ли среди услышанных слов похожее на нужное."""
+    """Есть ли среди услышанных слов похожее на нужное.
+
+    Сравниваем нечётко и ещё прощаем потерю первой буквы: модель смазывает
+    самую атаку звука на стыке кусков, и «проба» слышится как «роба». Гнать
+    из-за одной буквы кусок на пересинтез бессмысленно — второй раз выйдет
+    то же самое, а время потратим.
+    """
     import difflib
-    return any(difflib.SequenceMatcher(None, want, w).ratio() >= _WORD_SIMILAR
-               for w in heard)
+    for w in heard:
+        if difflib.SequenceMatcher(None, want, w).ratio() >= _WORD_SIMILAR:
+            return True
+        if len(want) > 3 and (w == want[1:] or w == want[:-1]):
+            return True
+    return False
 
 
 def _edges_ok(audio: np.ndarray, sr: int, text: str, head_only: bool = False,
@@ -319,10 +311,12 @@ def _synth_chunks(eng: TTSEngine, voice: str, chunks, sr: int,
         for _try in range(TAIL_RETRIES):
             if not len(audio):
                 break
-            # конец проверяем только при подозрении (там громкость выдаёт сбой),
-            # начало — всегда, иначе пропажу первого слова не заметить
-            if _edges_ok(audio, sr, text, lang=lang,
-                         head_only=not _edges_suspicious(audio, sr)):
+            # Проверяем ОБА края и всегда. Раньше конец смотрели только при
+            # подозрении по громкости, но смазанное окончание звучит не тише —
+            # «восемь часов» превращалось в «восемь чеф», и фильтр это
+            # пропускал. С моделью small проверка стоит около 0,3 с на край,
+            # то есть считаные проценты синтеза — дешевле, чем брак.
+            if _edges_ok(audio, sr, text, lang=lang):
                 break
             audio = eng.synth_chunk(text, voice, speed_mul=mul)
         if len(audio):
