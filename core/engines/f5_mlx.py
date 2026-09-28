@@ -100,7 +100,6 @@ EPSS_STEPS: dict[int, tuple[int, ...]] = {
 # 173 символа: запас 1.04 — первое слово теряется 5 раз из 5, запас 1.22 — ни
 # разу (английской модели и этого мало, её страхует проверка в pipeline). Лишнее время уходит в тишину, которую тут же срезает _trim_tail, так
 # что за надёжность мы не платим ни длиной книги, ни временем счёта.
-PACE_LIMIT = 1.6              # выше этого множителя темпа модель мажет края
 DURATION_HEADROOM = 1.22
 SHORT_CHUNK_CHARS = 80        # короче этого куски получают запас побольше
 SHORT_HEADROOM = 1.30         # на коротком куске модель торопится сильнее
@@ -253,13 +252,7 @@ def _trim_tail(wave: np.ndarray) -> np.ndarray:
         if np.sqrt(np.mean(wave[i * win:(i + 1) * win] ** 2)) > TRIM_SILENCE_DB:
             last = i
     end = min(len(wave), (last + 1) * win + win * 4)   # оставляем 40 мс на затухание
-    out = wave[:end].copy()
-    # Гасим последние 10 мс. Резать волну «как есть» нельзя: если обрыв попал
-    # не на нуль, на стыке с паузой получается щелчок.
-    fade = min(win, len(out))
-    if fade > 1:
-        out[-fade:] *= np.linspace(1.0, 0.0, fade, dtype=np.float32)
-    return out
+    return wave[:end]
 
 
 def _cross_fade(waves: list[np.ndarray], sr: int) -> np.ndarray:
@@ -405,12 +398,7 @@ class F5MLXEngine(F5Engine):
         if bps <= 1:
             return 1.0
         target = LANG_MODELS[self.language].get("target_bps", 27.0)
-        # Верхний предел важен: выше 1.6 модель начинает торопиться и мазать
-        # края («Глава первая. Ветер с залива» теряет окончания). У образцов с
-        # разрежённой речью — например снятых с чтения заголовка, где много
-        # пауз — множитель выходит 1.8 и больше, и тогда лучше смириться
-        # с чуть более медленной речью, чем ловить проглоченные слова.
-        return float(np.clip(target / bps, 0.6, PACE_LIMIT))
+        return float(np.clip(target / bps, 0.5, 3.5))
 
     def _make_ref(self, vid: str, wav: str, ref_text: str):
         import mlx.core as mx

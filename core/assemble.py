@@ -51,49 +51,10 @@ HD_FILTER = (
     "equalizer=f=3500:t=q:w=1.5:g=2,"             # присутствие согласных
     "equalizer=f=7500:t=q:w=1.4:g=2,"             # «воздух» там, где он настоящий
     "lowpass=f=11000,"                            # срез вокодерных артефактов
+    "volume=4dB,"
+    "alimiter=limit=0.95,"                        # без клиппинга, но и без сжатия
     "aresample=48000"
 )
-
-# Куда делась прибавка громкости. Стояло «volume=4dB, alimiter=limit=0.95», и
-# это был источник треска: эквалайзер и так поднимает бас с верхом, а прибавка
-# гнала сигнал в максимум — пик 1.00, лимитер работал непрерывно и добавлял
-# искажения. Замеры резких скачков волны, каких в речи не бывает (на 25 с):
-#     +4 дБ с лимитером   13003
-#     без прибавки         1986
-#     нормализация по пику  142   <- как в варианте, который слушатель
-#                                    отобрал как лучший
-# Фиксированная прибавка тоже не годится: громкие места в книге попадаются
-# редко, и на коротком отрывке их можно не встретить — а потом один выкрик
-# упирается в потолок. Поэтому громкость подбирается по факту: сначала мерим
-# настоящий пик готового звука, потом приводим его к PEAK_TARGET. Это обычное
-# умножение, оно ничего не искажает — в отличие от лимитера.
-# 0.88 — громко, но с запасом до предела. Выше нельзя: подъём баса даёт
-# отдельные высокие выбросы, и они начнут упираться в потолок.
-PEAK_TARGET = 0.88
-
-
-def _gain_to_peak(wav_path: str, chain: str) -> str:
-    """Прибавка в дБ, после которой пик встанет ровно на PEAK_TARGET."""
-    ff = _ff()
-    cmd = [ff, "-hide_banner", "-i", wav_path]
-    if chain:
-        cmd += ["-af", chain + ",volumedetect"]
-    else:
-        cmd += ["-af", "volumedetect"]
-    cmd += ["-f", "null", "-"]
-    out = subprocess.run(cmd, capture_output=True, text=True).stderr
-    peak_db = None
-    for line in out.splitlines():
-        if "max_volume:" in line:
-            try:
-                peak_db = float(line.split("max_volume:")[1].split("dB")[0])
-            except ValueError:
-                pass
-    if peak_db is None:
-        return ""
-    import math
-    target_db = 20 * math.log10(PEAK_TARGET)
-    return f"volume={target_db - peak_db:.2f}dB"
 
 
 def write_wav(audio: np.ndarray, sr: int, path: str) -> float:
@@ -248,17 +209,12 @@ FORMATS: dict[str, tuple[str, list[str]]] = {
 DEFAULT_FORMAT = "mp3 192 кбит/с (обычный)"
 
 
-def _chain(hd: bool, fx: str, wav_path: str = "") -> str:
-    """Полировка, поправки голоса и подгонка громкости под пик."""
+def _chain(hd: bool, fx: str) -> str:
+    """Полировка плюс ручные поправки голоса, если они заданы."""
     parts = [HD_FILTER] if hd else []
     if fx:
         parts.append(fx)
-    chain = ",".join(parts)
-    if wav_path:
-        gain = _gain_to_peak(wav_path, chain)
-        if gain:
-            chain = ",".join(x for x in (chain, gain) if x)
-    return chain
+    return ",".join(parts)
 
 
 def encode_chapter_mp3(ch: RenderedChapter, out_path: str, *,
@@ -270,7 +226,7 @@ def encode_chapter_mp3(ch: RenderedChapter, out_path: str, *,
         ff, "-y", "-hide_banner", "-loglevel", "error",
         "-i", ch.wav_path,
     ]
-    chain = _chain(hd, fx, ch.wav_path)
+    chain = _chain(hd, fx)
     if chain:
         cmd += ["-af", chain]
     _ext, codec = FORMATS.get(fmt, FORMATS[DEFAULT_FORMAT])
@@ -294,7 +250,7 @@ def polish_wav_to_mp3(wav_path: str, out_path: str, *, hd: bool = True,
     """
     ff = _ff()
     cmd = [ff, "-y", "-hide_banner", "-loglevel", "error", "-i", wav_path]
-    chain = _chain(hd, fx, ch.wav_path)
+    chain = _chain(hd, fx)
     if chain:
         cmd += ["-af", chain]
     _ext, codec = FORMATS.get(fmt, FORMATS[DEFAULT_FORMAT])
