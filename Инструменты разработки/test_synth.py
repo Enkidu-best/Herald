@@ -86,6 +86,27 @@ def check_one(book: str, voice: str, lang: str, out_dir: str) -> list[str]:
     if dur < expect_sec:
         fails.append(f"{name}: звука всего {dur:.1f} c, ждали хотя бы {expect_sec:.0f} c")
 
+    # Чистота звука. Проверяем ровно то, что однажды сломали и не заметили:
+    # прибавка громкости с лимитером загоняла сигнал в потолок, лимитер начинал
+    # работать непрерывно, и в речи появлялся треск. На слух это ловил только
+    # слушатель, а числами видно сразу.
+    import soundfile as _sf
+    subprocess.run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", path,
+                    "-ac", "1", "-ar", "48000", "/tmp/_herald_check.wav"], check=True)
+    snd, _sr = _sf.read("/tmp/_herald_check.wav")
+    import numpy as _np
+    snd = _np.asarray(snd, dtype=_np.float32)
+    peak = float(_np.max(_np.abs(snd)))
+    at_ceiling = float((_np.abs(snd) > 0.9).mean()) * 100
+    print(f"  пик {peak:.2f} | сэмплов у потолка {at_ceiling:.3f}%")
+    # Разделяет надёжно и не зависит от голоса: у файлов, которые слушатель
+    # признал чистыми, пик 0,53-0,59 и НОЛЬ сэмплов у потолка; у тех, где он
+    # услышал треск, пик 0,99 и 0,002-0,006% сэмплов прижаты к максимуму.
+    if peak > 0.92:
+        fails.append(f"{name}: сигнал у потолка (пик {peak:.2f}) — будет трещать")
+    if at_ceiling > 0.001:
+        fails.append(f"{name}: {at_ceiling:.3f}% сэмплов прижаты к максимуму — треск")
+
     from faster_whisper import WhisperModel
     asr = WhisperModel("small", device="cpu", compute_type="int8")
     segs, _ = asr.transcribe(path, language=lang)

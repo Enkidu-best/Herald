@@ -253,7 +253,13 @@ def _trim_tail(wave: np.ndarray) -> np.ndarray:
         if np.sqrt(np.mean(wave[i * win:(i + 1) * win] ** 2)) > TRIM_SILENCE_DB:
             last = i
     end = min(len(wave), (last + 1) * win + win * 4)   # оставляем 40 мс на затухание
-    return wave[:end]
+    out = wave[:end].copy()
+    # Гасим последние 10 мс. Резать волну «как есть» нельзя: если обрыв попал
+    # не на нуль, на стыке с паузой получается щелчок.
+    fade = min(win, len(out))
+    if fade > 1:
+        out[-fade:] *= np.linspace(1.0, 0.0, fade, dtype=np.float32)
+    return out
 
 
 def _cross_fade(waves: list[np.ndarray], sr: int) -> np.ndarray:
