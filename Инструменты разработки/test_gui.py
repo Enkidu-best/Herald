@@ -172,6 +172,21 @@ def main() -> int:
             raise AssertionError(f"размер кнопки ♪ скачет: {sizes}")
     check("♪ одного размера при любом голосе", fx_button_stable)
 
+    def layout_stable():
+        """Поля настроек не должны прыгать при переключении голоса."""
+        geoms = set()
+        for label in app.voice_menu.cget("values"):
+            app.voice_var.set(label)
+            app.update_idletasks()
+            geoms.add(tuple(w.winfo_x() for w in app._setting_menus))
+        if len(geoms) > 1:
+            raise AssertionError(f"поля сдвигаются: {len(geoms)} разных раскладок")
+    check("поля не сдвигаются при смене голоса", layout_stable)
+    check("длинное имя голоса укорачивается",
+          lambda: len(app._voice_label(type("V", (), {"id": "О" * 40,
+                                                      "language": "ru"})())) < 40
+          or (_ for _ in ()).throw(AssertionError("имя не обрезается")))
+
     print("блокировка на время работы:")
 
     def busy_locks():

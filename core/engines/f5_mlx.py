@@ -77,7 +77,7 @@ CROSS_FADE_SEC = 0.15         # как cross_fade_duration там же
 # образец (8.9 с) пересчитывался дважды. При 30 с кусок идёт одним вызовом:
 # на этом M4 это RTF 1.40 -> 1.25 при той же разборчивости (проверено ASR).
 # F5 v1 обучена на отрезках до ~30 с, так что 8.9 + 15.7 остаётся в пределах.
-MAX_TOTAL_SEC = 30
+MAX_TOTAL_SEC = 34
 # Расписания шагов EPSS из «Accelerating Flow-Matching-Based TTS via Empirically
 # Pruned Step Sampling» (arXiv 2505.19931, Fast F5-TTS). Идея: траектория ОДУ у
 # F5 почти вся «решается» в начале, поэтому шаги надо густо ставить у t=0 и
@@ -276,7 +276,11 @@ def _cross_fade(waves: list[np.ndarray], sr: int) -> np.ndarray:
 class F5MLXEngine(F5Engine):
     name = "f5mlx"
     sample_rate = SAMPLE_RATE
-    max_chunk_chars = 200
+    # Арифметика такая: на каждый вызов модель прогоняет образец (около 10 с)
+    # плюс саму речь, а полезен только второй кусок. Чтобы расчёт шёл быстрее
+    # реального времени, речи должно быть примерно вдвое больше образца —
+    # это около 280 символов. Больше нельзя: F5 обучена на отрезках до ~34 с.
+    max_chunk_chars = 280
     supports_cloning = True
     stress_format = "+"
 

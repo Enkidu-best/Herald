@@ -77,11 +77,14 @@ def _open_path(path: str):
 
 
 def _fmt_hms(sec: float) -> str:
+    """«1 ч 05 мин», «3 мин 56 с», «42 с» — с секундами, пока они заметны."""
     sec = int(max(0, sec))
-    h, m = sec // 3600, (sec % 3600) // 60
+    h, m, s = sec // 3600, (sec % 3600) // 60, sec % 60
     if h:
         return f"{h} ч {m:02d} мин"
-    return f"{m} мин" if m else f"{sec} с"
+    if m:
+        return f"{m} мин {s:02d} с"
+    return f"{s} с"
 
 
 def _card(parent, **kw) -> ctk.CTkFrame:
@@ -208,11 +211,13 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         cell(0, 0, "Чем озвучивать",
              lambda: _menu(card, [ENGINE_SHORT[e] for e in ENGINE_IDS],
                            command=self.on_engine))
+        # голосу отдаём две колонки: имена дикторов длинные, и в одной клетке
+        # меню то растягивалось, то поджималось, сдвигая всё вокруг
         self.voice_var = ctk.StringVar(value="")
         voice_box = ctk.CTkFrame(card, fg_color="transparent")
         _label(card, "Голос", size=12, color=DIM).grid(
-            row=0, column=1, sticky="w", padx=14, pady=(14, 3))
-        voice_box.grid(row=1, column=1, sticky="ew", padx=14)
+            row=0, column=1, columnspan=2, sticky="w", padx=14, pady=(14, 3))
+        voice_box.grid(row=1, column=1, columnspan=2, sticky="ew", padx=14)
         # сетка, а не pack: при длинном имени голоса меню раздувалось и
         # выдавливало кнопку за край — она то меняла размер, то исчезала
         voice_box.grid_columnconfigure(0, weight=1)
@@ -227,15 +232,15 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
             font=ctk.CTkFont(size=15), command=self.show_voice_fx)
         self.fx_btn.grid(row=0, column=1, sticky="e", padx=(6, 0))
         self.mode_var = ctk.StringVar(value=MODE_TITLES[0])
-        self.mode_menu = cell(0, 2, "Качество синтеза",
+        self.mode_menu = cell(2, 0, "Качество синтеза",
                               lambda: _menu(card, MODE_TITLES, variable=self.mode_var,
                                             command=lambda *_: self.show_estimate()))
         self.len_var = ctk.StringVar(value="15 минут")
-        cell(2, 0, "Длина одного файла",
+        cell(2, 1, "Длина одного файла",
              lambda: _menu(card, FILE_LENGTHS, variable=self.len_var,
                            command=lambda *_: self.reestimate()))
         self.fmt_var = ctk.StringVar(value=DEFAULT_FORMAT)
-        cell(2, 1, "Качество записи",
+        cell(2, 2, "Качество записи",
              lambda: _menu(card, list(FORMATS), variable=self.fmt_var,
                            command=lambda *_: self.show_estimate()))
 
@@ -415,8 +420,14 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
                 self.voice_var.set(self._voice_label(v))
                 return
 
+    VOICE_NAME_LIMIT = 22
+
     def _voice_label(self, v) -> str:
-        return f"{v.id} · {self.LANG_MARK.get(v.language, v.language)}"
+        # длинные имена укорачиваем: от них меню меняло ширину, и вся строка
+        # настроек прыгала влево-вправо при каждом переключении голоса
+        name = v.id if len(v.id) <= self.VOICE_NAME_LIMIT else \
+            v.id[:self.VOICE_NAME_LIMIT - 1] + "…"
+        return f"{name} · {self.LANG_MARK.get(v.language, v.language)}"
 
     def current_voice(self) -> str:
         """Имя голоса без пометки языка."""

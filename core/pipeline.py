@@ -165,6 +165,12 @@ def _chunk_paragraphs(text: str, max_chars: int, gap: float,
     return _merge_short(out, max_chars)
 
 
+# Куски меньше этой доли от максимума склеиваем со следующими. Причина в
+# арифметике: на каждый вызов модель заново прогоняет весь образец (около 10 с),
+# поэтому кусок на 95 символов стоит почти столько же, сколько на 250, а звука
+# даёт втрое меньше. Замерено на книге: куски по 95 символов — синтез 162 с,
+# по 200+ — около 110 с при том же объёме звука.
+MERGE_UNDER_FRACTION = 0.95
 MIN_CHUNK_CHARS = 45
 # Заголовок короче этого отдельным куском не оставляем: на 14 символах модели
 # не за что зацепиться, и «Проба голоса» превращается в «Проба ГОД».
@@ -180,10 +186,11 @@ def _merge_short(items, max_chars: int):
     одного вызова, и модель произносит их как одну фразу с остановкой.
     """
     out: list[tuple[str, float, float]] = []
+    limit = int(max_chars * MERGE_UNDER_FRACTION)
     for text, gap, mul in items:
         prev_is_heading = out and out[-1][2] != 1.0
         if (out and not prev_is_heading and mul == 1.0
-                and len(out[-1][0]) < MIN_CHUNK_CHARS
+                and len(out[-1][0]) < limit
                 and len(out[-1][0]) + len(text) + 2 <= max_chars):
             prev, _g, pm = out[-1]
             sep = " " if prev.endswith((".", "!", "?", "…", ",", ":", ";")) else ". "
@@ -201,7 +208,13 @@ def _merge_short(items, max_chars: int):
 # ТОЛЬКО крайние слова: распознавание всего куска стоило бы дороже синтеза.
 TAIL_RETRIES = 2
 TAIL_QUIET = 0.45         # край тише этой доли от средней громкости — подозрительно
-_ASR_MODEL = "mlx-community/whisper-large-v3-turbo"
+# Модель для проверки краёв. base (130 мс) оказалась слишком слабой: она врала
+# на краях («глова» вместо «глава», «гакма» вместо «как море»), и половина
+# кусков пересинтезировалась впустую. small — 310 мс и уже не путается, против
+# 1260 мс у large-v3-turbo. Плюс сравниваем слова НЕЧЁТКО: распознаватель имеет
+# право слегка переврать окончание, нам важно, что слово вообще прозвучало.
+_ASR_MODEL = "mlx-community/whisper-small-mlx"
+_WORD_SIMILAR = 0.75
 _asr_failed = False
 
 
@@ -230,6 +243,13 @@ def _last_word(s: str) -> str:
 
 def _words(s: str) -> list[str]:
     return re.sub(r"[^\w ]", " ", s.lower().replace("+", "").replace("ё", "е")).split()
+
+
+def _sounds_like(want: str, heard: list[str]) -> bool:
+    """Есть ли среди услышанных слов похожее на нужное."""
+    import difflib
+    return any(difflib.SequenceMatcher(None, want, w).ratio() >= _WORD_SIMILAR
+               for w in heard)
 
 
 def _edges_ok(audio: np.ndarray, sr: int, text: str, head_only: bool = False,
@@ -265,12 +285,12 @@ def _edges_ok(audio: np.ndarray, sr: int, text: str, head_only: bool = False,
             # громкости не поймать — звук на месте, просто произносится уже
             # следующее слово. Двух секунд хватает, и это дёшево.
             got = heard(audio[:int(min(len(audio) / sr, 2.0) * sr)])
-            if got and want[0] not in got[:2]:
+            if got and not _sounds_like(want[0], got[:2]):
                 return False
         if not head_only and len(want[-1]) >= 4:
             edge = int(min(len(audio) / sr, 4.0) * sr)
             got = heard(audio[-edge:])
-            if got and want[-1] not in got[-2:]:
+            if got and not _sounds_like(want[-1], got[-2:]):
                 return False
         return True
     except Exception:
