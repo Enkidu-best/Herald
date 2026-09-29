@@ -99,13 +99,19 @@ def check_one(book: str, voice: str, lang: str, out_dir: str) -> list[str]:
     peak = float(_np.max(_np.abs(snd)))
     at_ceiling = float((_np.abs(snd) > 0.9).mean()) * 100
     print(f"  пик {peak:.2f} | сэмплов у потолка {at_ceiling:.3f}%")
-    # Разделяет надёжно и не зависит от голоса: у файлов, которые слушатель
-    # признал чистыми, пик 0,53-0,59 и НОЛЬ сэмплов у потолка; у тех, где он
-    # услышал треск, пик 0,99 и 0,002-0,006% сэмплов прижаты к максимуму.
-    if peak > 0.92:
-        fails.append(f"{name}: сигнал у потолка (пик {peak:.2f}) — будет трещать")
-    if at_ceiling > 0.001:
-        fails.append(f"{name}: {at_ceiling:.3f}% сэмплов прижаты к максимуму — треск")
+    # Признак обрезания — СРЕЗАННЫЕ ВЕРШИНЫ волны: три отсчёта подряд у самого
+    # верха. Доля сэмплов выше абсолютных 0,9 для этого не годится: файл с пиком
+    # 0,95 имеет их просто потому, что он громкий, и тест ругался на исправный
+    # звук. Проверено на заведомо испорченном исходнике (английский сэмпл,
+    # 417 срезанных вершин) и на принятых слушателем файлах (ноль).
+    flat = _np.abs(snd) > 0.985 * peak
+    tops = int(_np.sum(flat[2:] & flat[1:-1] & flat[:-2]))
+    per_min = tops / max(len(snd) / 24000 / 60, 0.01)
+    print(f"  срезанных вершин {tops} ({per_min:.0f} в минуту)")
+    if per_min > 20:
+        fails.append(f"{name}: {tops} срезанных вершин волны — обрезание, будет трещать")
+    if peak > 0.999:
+        fails.append(f"{name}: пик {peak:.3f} — сигнал упёрся в потолок")
 
     from faster_whisper import WhisperModel
     asr = WhisperModel("small", device="cpu", compute_type="int8")
@@ -132,7 +138,62 @@ def check_one(book: str, voice: str, lang: str, out_dir: str) -> list[str]:
     if not near(want[-1], got[-3:]):
         fails.append(f"{name}: последнего слова «{want[-1]}» не слышно "
                      f"(конец: {' '.join(got[-3:])})")
+    fails += check_gate(path, voice, name)
     return fails
+
+
+def check_gate(path: str, voice: str, name: str) -> list[str]:
+    """Верх результата не должен быть грязнее, чем у своего живого чтеца.
+
+    Нужно потому, что на слух я не проверяю, а «железный звук», шипение и треск
+    слышны сразу. Однажды такие варианты дошли до слушателя: металл 0,19-0,21 и
+    шипение до 0,67 против 0,12 и 0,51 у самого чтеца — хуже оригинала по его же
+    меркам. Эталон берётся из <голос>.src.json, чтобы нельзя было сверить один
+    голос с записью другого (и такое уже было).
+    """
+    import json
+    # На коротком файле гейт врёт: «шипение» и «металл» на 14 секундах зависят
+    # от того, какие согласные попали во фразу, а не от качества голоса. На той
+    # же связке голос/тракт короткий тест дал шипение 0,38, полный — 0,09.
+    try:
+        dur = float(subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "csv=p=0", path], capture_output=True, text=True).stdout.strip())
+    except Exception:
+        dur = 0.0
+    if dur < 30.0:
+        print("  гейт пропущен: файл короче 30 с, шипение и металл на нём случайны")
+        return []
+    src = os.path.expanduser(f"~/.cache/text2audio/voices/{voice}.src.json")
+    if not os.path.exists(src):
+        print(f"  гейт пропущен: неизвестно, из какой записи сделан «{voice}»")
+        return []
+    try:
+        import voice_report as vr
+        target = json.load(open(src, encoding="utf-8"))["source"]
+        if not os.path.exists(target):
+            print(f"  гейт пропущен: нет записи чтеца {target}")
+            return []
+        t, r = vr.analyze(target), vr.analyze(path)
+    except Exception as e:
+        print(f"  гейт не сработал ({e})")
+        return []
+    print(f"  против чтеца: металл {r['metal']:.2f}/{t['metal']:.2f} "
+          f"шип {r['sibilance']:.2f}/{t['sibilance']:.2f} "
+          f"треск {r['crackle']:.0f}/{t['crackle']:.0f} "
+          f"воздух {r['air']:.2f}/{t['air']:.2f}% "
+          f"яркость {r['centroid']:.0f}/{t['centroid']:.0f}")
+    # Порог 1,4x: замерено, что «металл» гуляет 0,06-0,08 между прогонами с
+    # одним образцом (у каждого синтеза свой стартовый шум), и 1,25x браковал
+    # исправный звук. Грубый брак это ловит — у отозванных вариантов было 1,6-2,2x.
+    bad = []
+    if r["metal"] > t["metal"] * 1.4:
+        bad.append(f"металл {r['metal']:.2f} против {t['metal']:.2f}")
+    if r["sibilance"] > t["sibilance"] * 1.4:
+        bad.append(f"шипение {r['sibilance']:.2f} против {t['sibilance']:.2f}")
+    if r["crackle"] > t["crackle"] + 0.5 and r["crackle"] > t["crackle"] * 2.0:
+        bad.append(f"треск {r['crackle']:.0f} против {t['crackle']:.0f}")
+    return [f"{name}: верх грязнее, чем у чтеца ({', '.join(bad)})"] if bad else []
 
 
 def main() -> int:

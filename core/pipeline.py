@@ -132,6 +132,9 @@ class Cancelled(Exception):
 
 
 HEADING_SPEED_MUL = 0.88      # заголовок читается медленнее основного текста
+# Заголовок, склеенный с первой фразой: замедляем мягче, иначе вместе с
+# названием главы растягивается и всё первое предложение.
+HEADING_MERGED_MUL = 0.94
 
 
 def _is_heading(p: str) -> bool:
@@ -150,18 +153,32 @@ def _chunk_paragraphs(text: str, max_chars: int, gap: float,
     предложения. Теперь конец абзаца звучит как конец абзаца.
     """
     out: list[tuple[str, float, float]] = []
+    head = ""                      # заголовок ждёт первую фразу главы
     for para in re.split(r"\n\s*\n", text):
         para = para.strip()
         if not para:
             continue
-        # заголовок не склеиваем с текстом и читаем его размереннее: иначе он
-        # проскакивает скороговоркой, а последнее слово в нём пропадает
-        if _is_heading(para) and len(para) >= MIN_HEADING_CHARS:
-            out.append((para, para_gap, HEADING_SPEED_MUL))
+        # Заголовок отправляем в модель ВМЕСТЕ с первым предложением, одним
+        # вызовом. Отдельным куском он выходил ненадёжно сразу по двум причинам:
+        # кусок короткий (модели не за что зацепиться) и первое слово в куске у
+        # F5 нестабильно само по себе. Из-за этого название главы читалось
+        # неправильно или пропадало. Вызовов при этом становится МЕНЬШЕ.
+        if _is_heading(para):
+            head = para if para[-1] in ".!?…" else para + "."
             continue
         parts = _chunk_sentences(para, max_chars)
+        muls = [1.0] * len(parts)
+        if head:
+            if len(head) + 1 + len(parts[0]) <= max_chars:
+                parts[0] = head + " " + parts[0]
+                muls[0] = HEADING_MERGED_MUL
+            else:                  # первая фраза сама длинная — заголовок отдельно
+                out.append((head, para_gap, HEADING_SPEED_MUL))
+            head = ""
         for i, c in enumerate(parts):
-            out.append((c, gap if i < len(parts) - 1 else para_gap, 1.0))
+            out.append((c, gap if i < len(parts) - 1 else para_gap, muls[i]))
+    if head:                       # глава из одного заголовка
+        out.append((head, para_gap, HEADING_SPEED_MUL))
     return _merge_short(out, max_chars)
 
 
