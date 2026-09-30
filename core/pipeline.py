@@ -19,18 +19,18 @@ from typing import Callable, Optional
 import numpy as np
 
 from .readers import read_document, ScannedPdfError, ReaderError
-from .chapters import build_chapters
+# CHARS_PER_SEC — только в chapters: две копии однажды разошлись, и прогноз врал
+from .chapters import build_chapters, clean_book_title, part_name, CHARS_PER_SEC
 from .normalize import normalize_text, sentenize, detect_language
 from .stress import add_stress
 from .assemble import (RenderedChapter, write_wav, assemble_m4b, encode_chapter_mp3,
-                       polish_wav_to_mp3, FORMATS, DEFAULT_FORMAT)
+                       polish_wav_to_mp3, concat_to_single, FORMATS, DEFAULT_FORMAT)
 from .engines import get_engine, TTSEngine
 from .engines.f5 import default_voices_dir
 from .voicefx import load as load_fx
 
 
 Progress = Callable[[float, str], None]
-CHARS_PER_SEC = 12
 MIN_SEC_PER_1000 = 25.0   # меньше этого на 1000 символов — синтез явно не удался
 
 # Модель F5 весит 1,3 ГБ, и грузить её заново на каждое нажатие — это и время,
@@ -61,6 +61,10 @@ class ConvertOptions:
     gap_sec: float = 0.35
     para_gap_sec: float = 0.6
     workers: int = 1                 # параллельные процессы для синтеза глав
+    # Вся книга одним файлом. Синтез всё равно идёт по частям — так первые части
+    # можно слушать сразу, а после «Стопа» готовое не пропадает; в конце части
+    # склеиваются в один файл, а по отдельности удаляются.
+    single_file: bool = False
 
 
 @dataclass
@@ -317,7 +321,7 @@ def _edges_ok(audio: np.ndarray, sr: int, text: str, head_only: bool = False,
 
 def _synth_chunks(eng: TTSEngine, voice: str, chunks, sr: int,
                   gap_sec: float, on_chunk=None, should_stop=None,
-                  lang: str = "ru") -> np.ndarray:
+                  lang: str = "ru", pause_gate=None) -> np.ndarray:
     # принимаем простые строки, пары (текст, пауза) и тройки (…, множитель темпа)
     items = []
     for c in chunks:
@@ -329,6 +333,10 @@ def _synth_chunks(eng: TTSEngine, voice: str, chunks, sr: int,
             items.append(tuple(c))
     pieces: list[np.ndarray] = []
     for text, gap, mul in items:
+        # «Пауза»: ждём здесь, между кусками, не выходя из процесса — модель
+        # остаётся загруженной, готовые куски на месте, продолжение мгновенное
+        if pause_gate is not None:
+            pause_gate()
         # проверяем ПЕРЕД куском: один кусок считается секунды, ждать не придётся
         if should_stop is not None and should_stop():
             raise Cancelled()
@@ -382,10 +390,17 @@ def convert_book(path: str, *, engine: str = "f5", eng_kwargs: dict | None = Non
                  options: ConvertOptions | None = None,
                  progress: Progress | None = None,
                  on_chapter: Callable | None = None,
-                 should_stop: Callable[[], bool] | None = None) -> ConvertResult:
+                 should_stop: Callable[[], bool] | None = None,
+                 pause_gate: Callable[[], None] | None = None,
+                 part_progress: Callable[[int, int, float], None] | None = None,
+                 ) -> ConvertResult:
     """Озвучить книгу. Главы выдаются потоково: как только глава готова, её mp3
     сразу пишется рядом и вызывается on_chapter(index, title, mp3_path) - можно
     начинать слушать, пока остальные считаются. В конце собирается единый .m4b.
+
+    pause_gate() зовётся перед каждым куском и может ждать сколько угодно —
+    это «Пауза». part_progress(k, m, доля) сообщает, как далеко озвучена
+    текущая часть k из m (общий прогресс по книге идёт через progress).
     """
     opts = options or ConvertOptions()
     eng_kwargs = eng_kwargs or {}
@@ -425,7 +440,8 @@ def convert_book(path: str, *, engine: str = "f5", eng_kwargs: dict | None = Non
     except Exception:
         pass
 
-    base = _safe_name(doc.base_title)
+    book_title = clean_book_title(doc.title or doc.base_title)
+    base = _safe_name(book_title)
     workdir = tempfile.mkdtemp(prefix="t2a_syn_")
     # папку под потоковые mp3 создаём сразу, если они нужны
     mp3_dir = None
@@ -448,11 +464,16 @@ def convert_book(path: str, *, engine: str = "f5", eng_kwargs: dict | None = Non
                 on_chapter(ci, r.title, None)
             return
         if mp3_dir:
-            name = _safe_name(f"{ci:02d} {r.title}")[:80]
+            # имя файла — всегда «Часть N», у любой книги одинаково; настоящий
+            # заголовок (если он есть) остаётся в тегах, плеер его покажет
+            name = part_name(ci, len(prepared))
             ext = FORMATS.get(opts.audio_format, FORMATS[DEFAULT_FORMAT])[0]
             mp3 = os.path.join(mp3_dir, name + ext)
+            tagged = RenderedChapter(
+                name if not r.title or r.title.startswith("Часть ")
+                else f"{name}. {r.title}", r.wav_path, r.duration)
             try:
-                encode_chapter_mp3(r, mp3, title=doc.title or base, author=doc.author,
+                encode_chapter_mp3(tagged, mp3, title=book_title, author=doc.author,
                                    hd=opts.hd_filter, fmt=opts.audio_format,
                                    fx=fx_chain)
             except Exception:
@@ -475,12 +496,21 @@ def convert_book(path: str, *, engine: str = "f5", eng_kwargs: dict | None = Non
         total_chunks = sum(max(1, len(c)) for _, c in prepared)
         done = 0
         for ci, (title, chunks) in enumerate(prepared, 1):
+            in_part = 0
+            if part_progress:
+                part_progress(ci, len(prepared), 0.0)
+
             def bump():
-                nonlocal done
+                nonlocal done, in_part
                 done += 1
-                say(0.05 + 0.9 * done / total_chunks, f"Озвучиваю: глава {ci} из {len(prepared)}")
+                in_part += 1
+                say(0.05 + 0.9 * done / total_chunks,
+                    f"Озвучиваю: часть {ci} из {len(prepared)}")
+                if part_progress:
+                    part_progress(ci, len(prepared), in_part / max(1, len(chunks)))
             audio = _synth_chunks(eng, voice, chunks, sr, opts.gap_sec, on_chunk=bump,
-                                  should_stop=should_stop, lang=doc_lang)
+                                  should_stop=should_stop, lang=doc_lang,
+                                  pause_gate=pause_gate)
             audio = np.concatenate([audio, np.zeros(int(sr * opts.para_gap_sec), dtype=np.float32)])
             wp = os.path.join(workdir, f"ch{ci:04d}.wav")
             emit(ci, RenderedChapter(title or f"Часть {ci}", wp, write_wav(audio, sr, wp)),
@@ -503,23 +533,39 @@ def convert_book(path: str, *, engine: str = "f5", eng_kwargs: dict | None = Non
             # imap (а не imap_unordered): главы отдаются СТРОГО по порядку 1,2,3…,
             # даже если поздняя глава досчиталась раньше — чтобы слушать по порядку
             for ci, wav_path, dur, title in pool.imap(_worker_render, payloads):
-                emit(ci, RenderedChapter(title or f"Глава {ci}", wav_path, dur))
+                emit(ci, RenderedChapter(title or f"Часть {ci}", wav_path, dur))
                 done += 1
                 say(0.05 + 0.9 * done / len(prepared), f"Озвучено глав: {done} из {len(prepared)}")
 
     ordered = [rendered[i] for i in sorted(rendered)]
     total_dur = sum(r.duration for r in ordered)
 
+    single_path = None
+    if opts.single_file and ordered:
+        say(0.96, "Склеиваю части в один файл…")
+        ext = FORMATS.get(opts.audio_format, FORMATS[DEFAULT_FORMAT])[0]
+        folder = mp3_dir or out_dir
+        single_path = os.path.join(folder, base + ext)
+        concat_to_single(ordered, single_path, title=book_title, author=doc.author,
+                         hd=opts.hd_filter, fmt=opts.audio_format, fx=fx_chain)
+        # по отдельности части больше не нужны: остаётся один файл
+        if mp3_dir:
+            for n in range(1, len(prepared) + 1):
+                part = os.path.join(mp3_dir, part_name(n, len(prepared)) + ext)
+                if os.path.exists(part) and part != single_path:
+                    os.remove(part)
+
     m4b_path = None
     if opts.make_m4b:
         say(0.96, "Собираю аудиокнигу .m4b…")
         m4b_path = os.path.join(out_dir, base + ".m4b")
-        assemble_m4b(ordered, m4b_path, title=doc.title or base, author=doc.author,
+        assemble_m4b(ordered, m4b_path, title=book_title, author=doc.author,
                      cover_bytes=doc.cover.data if doc.cover else None,
                      cover_ext=doc.cover.ext if doc.cover else "jpg")
 
     say(1.0, "Готово")
-    return ConvertResult(m4b_path, mp3_dir, len(ordered), total_dur, doc.title or base, doc.author)
+    return ConvertResult(m4b_path, mp3_dir, 1 if single_path else len(ordered),
+                         total_dur, book_title, doc.author)
 
 
 # --- оценка объёма книги (без синтеза) ----------------------------------

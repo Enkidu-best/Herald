@@ -137,6 +137,28 @@ def _merge_tail(chunks: list[list[_Block]], target: int) -> list[list[_Block]]:
     return chunks
 
 
+# Служебные пометки магазинов и библиотек в названии: «Жажда власти [litres]».
+# В имени папки и в тегах они только мешают.
+_VENDOR = re.compile(r"\s*[\[(](?:litres|литрес|litmir|литмир|flibusta|флибуста"
+                     r"|hardcase|fb2|epub)[\])]\s*", re.I)
+
+
+def clean_book_title(t: str) -> str:
+    """Название книги без «[litres]» и подобного, без лишних пробелов."""
+    t = _VENDOR.sub(" ", t or "")
+    return re.sub(r"\s+", " ", t).strip(" .—-_") or (t or "").strip()
+
+
+def part_name(n: int, total: int) -> str:
+    """Имя файла: всегда «Часть N», единообразно для любой книги.
+
+    Номер дополняется нулём до ширины общего числа частей («Часть 01» … «Часть
+    12»): иначе плееры, сортирующие по буквам, ставят «Часть 10» перед «Часть 2».
+    Настоящий заголовок главы идёт в теги файла, а не в имя.
+    """
+    return f"Часть {n:0{len(str(max(total, 1)))}d}"
+
+
 def _title_for(blocks: list[_Block], n: int) -> str:
     for b in blocks:
         if b.heading:

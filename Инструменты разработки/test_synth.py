@@ -170,7 +170,7 @@ def check_gate(path: str, voice: str, name: str) -> list[str]:
         return []
     try:
         import voice_report as vr
-        target = json.load(open(src, encoding="utf-8"))["source"]
+        target = vr.resolve_source(json.load(open(src, encoding="utf-8"))["source"])
         if not os.path.exists(target):
             print(f"  гейт пропущен: нет записи чтеца {target}")
             return []

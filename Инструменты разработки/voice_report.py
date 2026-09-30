@@ -133,6 +133,25 @@ ORDER=[("lufs","LUFS громк"),("lra","LRA"),("crest","крест/динам"
     ("crackle","ТРЕСК/с"),("rough","ШЕРОХОВ%"),("jitter","ДЖИТТЕР%"),
     ("hnr","HNR"),("hum","гул50"),("f0","F0"),("f0_range","живость"),("voiced","озвуч%")]
 
+def resolve_source(path):
+    """Запись чтеца по пути из <голос>.src.json — даже если папку переименовали.
+
+    Папку с образцами уже раз переименовывали («Мои книги» -> «Образцы голосов»),
+    и сверка молча выключилась. Если по старому пути файла нет, ищем тот же файл
+    по имени внутри проекта.
+    """
+    import os
+    if os.path.exists(path):
+        return path
+    root=os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    name=os.path.basename(path)
+    for d,_dirs,files in os.walk(root):
+        if ".venv" in d or ".git" in d:
+            continue
+        if name in files:
+            return os.path.join(d,name)
+    return path
+
 def main():
     ap=argparse.ArgumentParser()
     ap.add_argument("--target"); ap.add_argument("--voice",
@@ -148,7 +167,7 @@ def main():
         src=os.path.expanduser(f"~/.cache/text2audio/voices/{a.voice}.src.json")
         if not os.path.exists(src):
             print(f"нет {src}: неизвестно, из какой записи сделан голос «{a.voice}»"); return 2
-        info=json.load(open(src,encoding="utf-8")); a.target=info["source"]
+        info=json.load(open(src,encoding="utf-8")); a.target=resolve_source(info["source"])
         print(f"эталон: {a.target}" + (f"  (читает {info['reader']})" if info.get("reader") else ""))
     if not a.target:
         print("нужен --target ФАЙЛ или --voice ИМЯ"); return 2

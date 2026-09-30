@@ -257,3 +257,33 @@ def polish_wav_to_mp3(wav_path: str, out_path: str, *, hd: bool = True,
     cmd += codec + [out_path]
     subprocess.run(cmd, check=True)
     return out_path
+
+
+def concat_to_single(chapters: list[RenderedChapter], out_path: str, *,
+                     title: str = "", author: str = "", hd: bool = True,
+                     fmt: str = DEFAULT_FORMAT, fx: str = "") -> str:
+    """Все части — одним файлом. Склеиваются wav, а кодируется результат один раз.
+
+    Склеивать уже готовые mp3 нельзя: у каждого свой заголовок с длительностью,
+    и плееры потом показывают длину первой части вместо всей книги. Тракт
+    полировки тот же, что у частей, — звук не отличается.
+    """
+    ff = _ff()
+    lst = out_path + ".list.txt"
+    with open(lst, "w", encoding="utf-8") as f:
+        for ch in chapters:
+            f.write("file '" + ch.wav_path.replace("'", "'\\''") + "'\n")
+    cmd = [ff, "-y", "-hide_banner", "-loglevel", "error",
+           "-f", "concat", "-safe", "0", "-i", lst]
+    chain = _chain(hd, fx)
+    if chain:
+        cmd += ["-af", chain]
+    _ext, codec = FORMATS.get(fmt, FORMATS[DEFAULT_FORMAT])
+    cmd += codec + ["-metadata", f"title={title}", "-metadata", f"artist={author}",
+                    "-metadata", f"album={title}", out_path]
+    try:
+        subprocess.run(cmd, check=True)
+    finally:
+        if os.path.exists(lst):
+            os.remove(lst)
+    return out_path

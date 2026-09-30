@@ -69,7 +69,12 @@ ENGINE_IDS = [e for e in ("f5mlx", "apple") if e in ENGINE_TITLES]
 ENGINE_SHORT = {"f5mlx": "Голос диктора (клон)", "apple": "Системный голос macOS"}
 CLONING = ("f5mlx", "f5")            # движки, где голос берётся из образца
 
-FILE_LENGTHS = ["10 минут", "15 минут", "20 минут", "30 минут", "45 минут"]
+SINGLE_FILE = "Один файл (без частей)"
+FILE_LENGTHS = ["10 минут", "15 минут", "20 минут", "30 минут", "45 минут",
+                "60 минут", SINGLE_FILE]
+# При «Одном файле» синтез всё равно идёт частями по столько минут — ради
+# потоковой выдачи и чтобы «Стоп» не терял сделанное; склейка в конце.
+SINGLE_PART_MINUTES = 15.0
 
 
 def _open_path(path: str):
@@ -85,6 +90,13 @@ def _fmt_hms(sec: float) -> str:
     if m:
         return f"{m} мин {s:02d} с"
     return f"{s} с"
+
+
+def _fmt_clock(sec: float) -> str:
+    """Живой таймер: «3 мин 07 с», а за час — «1 ч 05 мин 12 с»."""
+    sec = int(max(0, sec))
+    h, m, s = sec // 3600, (sec % 3600) // 60, sec % 60
+    return f"{h} ч {m:02d} мин {s:02d} с" if h else f"{m} мин {s:02d} с"
 
 
 def _card(parent, **kw) -> ctk.CTkFrame:
@@ -123,6 +135,9 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         self.est = None
         self.running = False
         self._stop_flag = threading.Event()
+        # «Пауза»: флаг поднят — синтез ждёт перед следующим куском
+        self._pause_flag = threading.Event()
+        self._paused_at = 0.0          # когда нажали паузу (для таймера)
         self._t0 = 0.0
 
         self._build_menu()
@@ -268,6 +283,13 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
             fg_color="transparent", hover_color=LINE, border_width=1,
             border_color=LINE, text_color=DIM, command=self.do_stop)
         self.stop_btn.pack(side="left")
+        # Пауза — не «Стоп»: процесс и модель остаются, продолжение мгновенное.
+        # Нужна, когда видеоядро понадобилось для другого или на ночь.
+        self.pause_btn = ctk.CTkButton(
+            row, text="Пауза", width=110, height=44, corner_radius=10, state="disabled",
+            fg_color="transparent", hover_color=LINE, border_width=1,
+            border_color=LINE, text_color=DIM, command=self.do_pause)
+        self.pause_btn.pack(side="left", padx=(8, 0))
         ctk.CTkButton(row, text="⚙", width=44, height=44, corner_radius=10,
                       fg_color="transparent", hover_color=LINE, border_width=1,
                       border_color=LINE, text_color=DIM,
@@ -284,13 +306,24 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         self.status.pack(side="left")
         # Таймер — отдельной надписью. Раньше он дописывался к тексту статуса и
         # пропадал каждый раз, когда статус обновлялся: казалось, что мигает.
-        self.timer = ctk.CTkLabel(bar, text="0:00", text_color=DIM,
+        self.timer = ctk.CTkLabel(bar, text=_fmt_clock(0), text_color=DIM,
                                   font=ctk.CTkFont(size=13))
         self.timer.pack(side="right")
         self.progress = ctk.CTkProgressBar(card, height=6, corner_radius=3,
                                            progress_color=ACCENT, fg_color=CARD2)
         self.progress.pack(fill="x", padx=16)
         self.progress.set(0)
+        # Вторая строка — прогресс ТЕКУЩЕЙ части: на книге в десятки частей
+        # общая полоса ползёт медленно, а тут видно, что работа идёт.
+        pbar = ctk.CTkFrame(card, fg_color="transparent")
+        pbar.pack(fill="x", padx=16, pady=(8, 8))
+        self.part_label = ctk.CTkLabel(pbar, text="", anchor="w", width=190,
+                                       text_color=DIM, font=ctk.CTkFont(size=12))
+        self.part_label.pack(side="left")
+        self.part_progress = ctk.CTkProgressBar(pbar, height=4, corner_radius=2,
+                                                progress_color=DIM, fg_color=CARD2)
+        self.part_progress.pack(side="left", fill="x", expand=True, padx=(8, 0))
+        self.part_progress.set(0)
         self.log = ctk.CTkTextbox(card, fg_color=CARD2, text_color=TEXT,
                                   corner_radius=10, font=ctk.CTkFont(size=12))
         self.log.pack(fill="both", expand=True, padx=16, pady=(0, 6))
@@ -334,7 +367,7 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         self.progress.set(0)
         self.log.delete("1.0", "end")
         self.status.configure(text="Готово к работе")
-        self.timer.configure(text="0:00")
+        self.timer.configure(text=_fmt_clock(0))
 
     def _set_book(self, p: str):
         self.book_path = p
@@ -358,7 +391,12 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
                     text=f"Не удалось прочитать книгу: {e}"))
         threading.Thread(target=work, daemon=True).start()
 
+    def single_file(self) -> bool:
+        return self.len_var.get() == SINGLE_FILE
+
     def file_minutes(self) -> float:
+        if self.single_file():
+            return SINGLE_PART_MINUTES
         return float(self.len_var.get().split()[0])
 
     def show_estimate(self):
@@ -379,7 +417,8 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         lang = {"ru": "русская книга", "en": "английская книга"}.get(
             getattr(e, "language", "ru"), "")
         self.est_label.configure(
-            text=(f"{lang} · {e.chapters} файлов · {_fmt_hms(audio_sec)} звука · "
+            text=(f"{lang} · {'один файл' if self.single_file() else f'{e.chapters} файлов'}"
+                  f" · {_fmt_hms(audio_sec)} звука · "
                   f"расчёт около {_fmt_hms(audio_sec * rtf)} · на диске ~{size}"))
 
     # --- движок и голоса --------------------------------------------------
@@ -686,7 +725,8 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
     def _conv_options(self) -> ConvertOptions:
         return ConvertOptions(make_m4b=False, make_chapter_mp3=True,
                               minutes_per_file=self.file_minutes(),
-                              audio_format=self.fmt_var.get())
+                              audio_format=self.fmt_var.get(),
+                              single_file=self.single_file())
 
     def _set_busy(self, busy: bool, status: str = ""):
         self.running = busy
@@ -700,6 +740,8 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
             w.configure(state=state)
         self.stop_btn.configure(state="normal" if busy else "disabled",
                                 text_color=TEXT if busy else DIM)
+        self._pause_flag.clear()
+        self.pause_btn.configure(text="Пауза", state="disabled", text_color=DIM)
         if getattr(self, "load_sample_btn", None) is not None:
             try:
                 self.load_sample_btn.configure(state=state)
@@ -711,15 +753,47 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
             self._stop_flag.clear()
             self._t0 = time.time()
             self._tick()
+        else:
+            self.part_label.configure(text="")
+            self.part_progress.set(0)
 
     def _tick(self):
         if self.running:
-            el = int(time.time() - self._t0)
-            self.timer.configure(text=f"{el // 60}:{el % 60:02d}")
+            # пока стоит пауза, таймер тоже стоит: счёт идёт только за работу
+            now = self._paused_at if self._pause_flag.is_set() else time.time()
+            self.timer.configure(text=_fmt_clock(now - self._t0))
             self.after(1000, self._tick)
 
     def _progress(self, fr: float, msg: str):
-        self.after(0, lambda: (self.progress.set(fr), self.status.configure(text=msg)))
+        text = f"{int(fr * 100)}% · {msg}"
+        self.after(0, lambda: (self.progress.set(fr),
+                               None if self._pause_flag.is_set()
+                               else self.status.configure(text=text)))
+
+    def _part_progress(self, k: int, m: int, fr: float):
+        text = f"Часть {k} из {m} — {int(fr * 100)}%"
+        self.after(0, lambda: (self.part_progress.set(fr),
+                               self.part_label.configure(text=text)))
+
+    def _pause_gate(self):
+        """Зовётся синтезом перед каждым куском. Держит, пока стоит пауза."""
+        while self._pause_flag.is_set() and not self._stop_flag.is_set():
+            time.sleep(0.3)
+
+    def do_pause(self):
+        if not self.running:
+            return
+        if self._pause_flag.is_set():                    # продолжить
+            self._t0 += time.time() - self._paused_at    # пауза не в счёт
+            self._pause_flag.clear()
+            self.pause_btn.configure(text="Пауза")
+            self.status.configure(text="Продолжаю…")
+        else:
+            self._paused_at = time.time()
+            self._pause_flag.set()
+            self.pause_btn.configure(text="Продолжить")
+            self.status.configure(
+                text="Пауза — доделываю текущий кусок и жду. Готовое на месте")
 
     def _logln(self, text: str):
         self.after(0, lambda: (self.log.insert("end", text + "\n"), self.log.see("end")))
@@ -782,6 +856,7 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
 
     def do_stop(self):
         self._stop_flag.set()
+        self._pause_flag.clear()          # иначе стоящий на паузе синтез не узнает
         self.status.configure(text="Останавливаю после текущего куска…")
 
     # --- пробник ---------------------------------------------------------
@@ -830,8 +905,9 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
             self._logln(f"  книга: {e.chapters} файлов, ~{_fmt_hms(e.audio_sec)} звука, "
                         f"язык {getattr(e, 'language', '?')}")
         self._logln(f"  голос: {vid}  ·  {ENGINE_SHORT.get(self.engine_var.get(), '')}")
+        size = "одним файлом" if self.single_file() else f"файл по {self.len_var.get()}"
         self._logln(f"  качество синтеза: {self.mode_var.get()}  ·  "
-                    f"запись: {self.fmt_var.get()}  ·  файл по {self.len_var.get()}")
+                    f"запись: {self.fmt_var.get()}  ·  {size}")
         self._logln(f"  настройки голоса: темп ×{fx.speed:.2f}, высота {fx.pitch:+.1f}, "
                     f"бас {fx.bass:+.1f}, яркость {fx.brightness:+.1f}")
         self._logln("")
@@ -840,6 +916,8 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         if self.running or not self._ready():
             return
         self._set_busy(True, "Старт…")
+        # пауза имеет смысл только для книги: пробник считается минуту
+        self.pause_btn.configure(state="normal", text_color=TEXT)
         self.progress.set(0)
         self.log.delete("1.0", "end")
         self._log_settings("Озвучка книги")
@@ -855,15 +933,18 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
                                    voice=self.current_voice(),
                                    options=self._conv_options(),
                                    progress=self._progress, on_chapter=on_chapter,
-                                   should_stop=self._stop_flag.is_set)
+                                   should_stop=self._stop_flag.is_set,
+                                   pause_gate=self._pause_gate,
+                                   part_progress=self._part_progress)
                 took = time.time() - self._t0
                 mins = int(res.duration // 60)
                 self._logln("")
                 self._logln(f"Готово. Звука {_fmt_hms(res.duration)}, "
                             f"счёт {_fmt_hms(took)} "
                             f"(на секунду звука {took / max(res.duration, 1):.2f} с)")
+                what = "один файл" if res.chapters == 1 else f"{res.chapters} файлов"
                 self.after(0, lambda: self._set_busy(
-                    False, f"Готово: {res.chapters} файлов, ~{mins} мин звука"))
+                    False, f"Готово: {what}, ~{mins} мин звука"))
                 if res.mp3_dir:
                     self._logln(f"Папка: {res.mp3_dir}")
                     self.after(0, lambda: _open_path(res.mp3_dir))

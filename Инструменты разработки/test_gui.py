@@ -201,6 +201,75 @@ def main() -> int:
             raise AssertionError("«Стоп» недоступна во время работы")
     check("во время работы активна только «Стоп»", busy_locks)
 
+    print("пауза, проценты, таймер, длина файла:")
+
+    def pause_cycle():
+        import threading, time as _t
+        app._set_busy(True, "тест")
+        app.pause_btn.configure(state="normal")
+        app.do_pause()
+        if not app._pause_flag.is_set() or app.pause_btn.cget("text") != "Продолжить":
+            raise AssertionError("пауза не встала")
+        passed = threading.Event()
+        th = threading.Thread(target=lambda: (app._pause_gate(), passed.set()))
+        th.start()
+        _t.sleep(0.8)
+        if passed.is_set():
+            raise AssertionError("синтез не ждёт на паузе")
+        app.do_pause()                                   # продолжить
+        th.join(2)
+        app._set_busy(False)
+        if not passed.is_set():
+            raise AssertionError("после «Продолжить» синтез не пошёл")
+    check("«Пауза» останавливает и «Продолжить» возобновляет", pause_cycle)
+
+    def stop_breaks_pause():
+        import threading
+        app._set_busy(True, "тест")
+        app.do_pause()
+        th = threading.Thread(target=app._pause_gate)
+        th.start()
+        app.do_stop()
+        th.join(2)
+        alive = th.is_alive()
+        app._set_busy(False)
+        if alive:
+            raise AssertionError("«Стоп» не снимает паузу — синтез завис бы")
+    check("«Стоп» работает и на паузе", stop_breaks_pause)
+
+    def percent_shown():
+        app._progress(0.42, "Озвучиваю: часть 2 из 5")
+        app.update()
+        if not app.status.cget("text").startswith("42%"):
+            raise AssertionError(f"нет процентов: {app.status.cget('text')!r}")
+    check("в статусе есть проценты", percent_shown)
+
+    def part_shown():
+        app._part_progress(2, 5, 0.5)
+        app.update()
+        if app.part_label.cget("text") != "Часть 2 из 5 — 50%":
+            raise AssertionError(app.part_label.cget("text"))
+    check("прогресс текущей части", part_shown)
+
+    def clock_fmt():
+        import tts_gui as G
+        for sec, want in ((187, "3 мин 07 с"), (3912, "1 ч 05 мин 12 с")):
+            if G._fmt_clock(sec) != want:
+                raise AssertionError(f"{sec} с -> {G._fmt_clock(sec)!r}")
+    check("таймер в часах и минутах", clock_fmt)
+
+    def single_file_opt():
+        import tts_gui as G
+        app.len_var.set("60 минут")
+        if app._conv_options().minutes_per_file != 60 or app._conv_options().single_file:
+            raise AssertionError("60 минут не работает")
+        app.len_var.set(G.SINGLE_FILE)
+        o = app._conv_options()
+        app.len_var.set("15 минут")
+        if not o.single_file:
+            raise AssertionError("«Один файл» не передаётся в синтез")
+    check("длина 60 минут и «Один файл»", single_file_opt)
+
     print("звучание голоса:")
     vid = app.current_voice()
     before = load_fx(default_voices_dir(), vid)
