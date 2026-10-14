@@ -65,7 +65,7 @@ class SileroEngine(TTSEngine):
             import certifi
             ctx = ssl.create_default_context(cafile=certifi.where())
         except Exception:
-            ctx = ssl.create_default_context()
+            ctx = ssl.create_default_context()   # нет certifi — системные сертификаты
         path = self._model_path()
         tmp = path + ".part"
         req = urllib.request.Request(MODEL_URL, headers={"User-Agent": "text2audio"})
@@ -118,9 +118,11 @@ class SileroEngine(TTSEngine):
                     put_yo=True,
                 )
                 return audio.numpy().astype(np.float32)
-            except Exception:
+            except Exception as e:
                 # один «неудобный» кусок не должен ронять всю книгу:
-                # пробуем очищенный вариант, иначе тихо пропускаем кусок
+                # пробуем очищенный вариант, иначе пропускаем кусок — но не молча
+                from ..log import log_problem
+                log_problem(f"[Silero] кусок не озвучился: «{text[:50]}»", e)
                 continue
         return np.zeros(0, dtype=np.float32)
 

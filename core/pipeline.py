@@ -9,8 +9,10 @@ GUI и CLI вызывают convert_book() (вся книга) или preview_sa
 
 from __future__ import annotations
 
+import json
 import os
 import re
+import shutil
 import sys
 import tempfile
 from dataclasses import dataclass, field
@@ -22,12 +24,14 @@ from .readers import read_document, ScannedPdfError, ReaderError
 # CHARS_PER_SEC — только в chapters: две копии однажды разошлись, и прогноз врал
 from .chapters import build_chapters, clean_book_title, part_name, CHARS_PER_SEC
 from .normalize import normalize_text, sentenize, detect_language
-from .stress import add_stress
+from .stress import add_stress_text, unify_book
 from .assemble import (RenderedChapter, write_wav, assemble_m4b, encode_chapter_mp3,
                        polish_wav_to_mp3, concat_to_single, FORMATS, DEFAULT_FORMAT)
 from .engines import get_engine, TTSEngine
 from .engines.f5 import default_voices_dir
 from .voicefx import load as load_fx
+from .keepawake import keep_awake
+from .log import log_problem, log_info
 
 
 Progress = Callable[[float, str], None]
@@ -87,7 +91,7 @@ def _prepare_text(text: str, stress_fmt: str | None, expand_numbers: bool,
     t = normalize_text(text, expand_numbers=expand_numbers, language=language)
     # ударения ставим только русскому: английская модель прочитала бы «+» вслух
     if use_stress and stress_fmt == "+" and language == "ru":
-        t = add_stress(t)
+        t = add_stress_text(t)
     return t
 
 
@@ -142,7 +146,7 @@ HEADING_MERGED_MUL = 0.94
 
 
 def _is_heading(p: str) -> bool:
-    """Короткая строка без точки на конце — заголовок (та же мерка, что в chapters)."""
+    """Короткая строка без точки на конце - заголовок (та же мерка, что в chapters)."""
     return (len(p) <= 90 and p[-1] not in ".!?…:,;»\"'"
             and not p[0].islower())
 
@@ -203,7 +207,7 @@ def _merge_short(items, max_chars: int):
 
     На огрызках вроде «Глава 5.» или «Открывая пустыню» F5 ведёт себя плохо:
     материала мало, и модель то глотает слово целиком, то мажет окончание.
-    Пауза между склеенными кусками сохраняется — просто она теперь внутри
+    Пауза между склеенными кусками сохраняется - просто она теперь внутри
     одного вызова, и модель произносит их как одну фразу с остановкой.
     """
     out: list[tuple[str, float, float]] = []
@@ -275,7 +279,7 @@ def _sounds_like(want: str, heard: list[str]) -> bool:
 
 def _edges_ok(audio: np.ndarray, sr: int, text: str, head_only: bool = False,
               lang: str = "ru") -> bool:
-    """Слышны ли первое и последнее слова куска — те самые, что в тексте."""
+    """Слышны ли первое и последнее слова куска - те самые, что в тексте."""
     global _asr_failed
     if _asr_failed or len(audio) < sr:
         return True
@@ -314,8 +318,11 @@ def _edges_ok(audio: np.ndarray, sr: int, text: str, head_only: bool = False,
             if got and not _sounds_like(want[-1], got[-2:]):
                 return False
         return True
-    except Exception:
-        _asr_failed = True                  # нет модели — просто не проверяем
+    except Exception as e:
+        _asr_failed = True                  # нет модели — дальше не проверяем
+        # без этой проверки съеденные края слов уже не перезаписываются
+        log_problem("проверка краёв кусков (распознавание) недоступна, "
+                    "съеденные окончания не будут переозвучиваться", e)
         return True
 
 
@@ -367,7 +374,7 @@ def _worker_init(engine_id: str, eng_kwargs: dict, threads: int) -> None:
         import torch
         torch.set_num_threads(max(1, threads))
     except Exception:
-        pass
+        pass                      # число потоков — только скорость, не результат
     eng = get_engine(engine_id, **(eng_kwargs or {}))
     eng.ensure_loaded()
     _W["eng"] = eng
@@ -384,6 +391,135 @@ def _worker_render(payload: tuple) -> tuple:
     return ci, wav_path, dur, title
 
 
+# --- продолжение после сбоя ---------------------------------------------
+# Сырые части книги лежат не во временной папке, а в скрытой «.herald» рядом с
+# готовыми файлами — в FLAC, вдвое меньше WAV. Рядом state.json: для каждой
+# части отпечаток «текст после ударений + голос + настройки». Если книгу
+# прервали (закрыли окно, сбой, «Стоп»), следующий запуск пропускает части с
+# тем же отпечатком. Книга досчиталась — «.herald» удаляется целиком.
+STATE_DIR = ".herald"
+STATE_FILE = "state.json"
+STATE_VERSION = 1
+
+
+def settings_fingerprint(engine: str, eng_kwargs: dict, voice: str,
+                         opts: "ConvertOptions") -> str:
+    """Отпечаток всего, что меняет звук, кроме самого текста части."""
+    import hashlib
+    vdir = default_voices_dir()
+    vinfo = {}
+    for ext in (".wav", ".txt", ".fx.json"):
+        p = os.path.join(vdir, voice + ext)
+        if os.path.exists(p):
+            with open(p, "rb") as f:
+                vinfo[ext] = hashlib.sha1(f.read()).hexdigest()
+    data = {
+        "v": STATE_VERSION, "engine": engine,
+        "kw": {k: eng_kwargs[k] for k in sorted(eng_kwargs)},
+        "voice": voice, "voice_files": vinfo,
+        "opts": {k: getattr(opts, k) for k in (
+            "minutes_per_file", "hd_filter", "audio_format", "expand_numbers",
+            "use_stress", "gap_sec", "para_gap_sec", "single_file")},
+    }
+    return hashlib.sha1(json.dumps(data, sort_keys=True, ensure_ascii=False,
+                                   default=str).encode("utf-8")).hexdigest()
+
+
+def _part_hash(fp: str, chunks) -> str:
+    import hashlib
+    body = json.dumps([list(c) if not isinstance(c, str) else c for c in chunks],
+                      ensure_ascii=False)
+    return hashlib.sha1((fp + body).encode("utf-8")).hexdigest()
+
+
+def _load_state(state_dir: str) -> dict:
+    p = os.path.join(state_dir, STATE_FILE)
+    if not os.path.exists(p):
+        return {}
+    try:
+        with open(p, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError) as e:
+        log_problem("файл продолжения озвучки повреждён, начинаю книгу заново", e)
+        return {}
+
+
+def _save_state(state_dir: str, state: dict) -> None:
+    p = os.path.join(state_dir, STATE_FILE)
+    tmp = p + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(state, f, ensure_ascii=False, indent=1)
+    os.replace(tmp, p)              # атомарно: сбой посреди записи не портит файл
+
+
+def output_dir_for(path: str, out_dir: str | None = None) -> str:
+    """Куда ляжет озвучка книги (та же логика, что в convert_book)."""
+    doc = read_document(path)
+    out_dir = out_dir or os.path.dirname(os.path.abspath(path))
+    return os.path.join(out_dir, _safe_name(clean_book_title(doc.title or doc.base_title)))
+
+
+def resume_info(path: str, *, engine: str, eng_kwargs: dict, voice: str,
+                options: "ConvertOptions", language: str | None = None,
+                out_dir: str | None = None) -> dict | None:
+    """Есть ли незаконченная озвучка этой книги с ТЕМИ ЖЕ настройками.
+
+    Возвращает {"done": готово частей, "total": всего} или None. Сам текст здесь
+    не проверяется (ударения на всю книгу считаются минутами) - это делает
+    convert_book по каждой части перед тем, как её пропустить.
+    """
+    try:
+        sd = os.path.join(output_dir_for(path, out_dir), STATE_DIR)
+        st = _load_state(sd)
+        if not st or st.get("finished"):
+            return None
+        kw = dict(eng_kwargs)
+        if engine in ("f5mlx", "f5") and "language" not in kw and language:
+            kw["language"] = language
+        if st.get("fingerprint") != settings_fingerprint(engine, kw, voice, options):
+            return None
+        done = sum(1 for d in st.get("parts", {}).values()
+                   if os.path.exists(os.path.join(sd, d.get("flac", ""))))
+        return {"done": done, "total": int(st.get("total", 0))} if done else None
+    except Exception as e:
+        log_problem("не удалось проверить, есть ли незаконченная озвучка", e, show=False)
+        return None
+
+
+def forget_progress(path: str, out_dir: str | None = None) -> None:
+    """«Начать заново»: стереть сохранённые части незаконченной озвучки."""
+    shutil.rmtree(os.path.join(output_dir_for(path, out_dir), STATE_DIR),
+                  ignore_errors=True)
+
+
+def cleanup_stale_temp(max_age_hours: float = 24.0) -> int:
+    """Удалить забытые временные папки программы старше суток.
+
+    Остаются после сбоев и после прежних версий, где временная папка с WAV
+    глав не удалялась вовсе - на восьмичасовой книге это гигабайты за раз.
+    """
+    import time as _time
+    root = tempfile.gettempdir()
+    now, n = _time.time(), 0
+    for name in os.listdir(root):
+        if not name.startswith(("t2a_", "herald_fx_")):
+            continue
+        p = os.path.join(root, name)
+        try:
+            if now - os.path.getmtime(p) < max_age_hours * 3600:
+                continue
+            if os.path.isdir(p):
+                shutil.rmtree(p, ignore_errors=True)
+            else:
+                os.remove(p)
+            n += 1
+        except OSError as e:
+            log_problem(f"не удалось удалить старый временный файл {p}", e, show=False)
+    if n:
+        log_info(f"удалено старых временных файлов и папок: {n}")
+    return n
+
+
 # --- вся книга -----------------------------------------------------------
 def convert_book(path: str, *, engine: str = "f5", eng_kwargs: dict | None = None,
                  voice: str, out_dir: str | None = None,
@@ -398,7 +534,7 @@ def convert_book(path: str, *, engine: str = "f5", eng_kwargs: dict | None = Non
     сразу пишется рядом и вызывается on_chapter(index, title, mp3_path) - можно
     начинать слушать, пока остальные считаются. В конце собирается единый .m4b.
 
-    pause_gate() зовётся перед каждым куском и может ждать сколько угодно —
+    pause_gate() зовётся перед каждым куском и может ждать сколько угодно -
     это «Пауза». part_progress(k, m, доля) сообщает, как далеко озвучена
     текущая часть k из m (общий прогресс по книге идёт через progress).
     """
@@ -424,41 +560,58 @@ def convert_book(path: str, *, engine: str = "f5", eng_kwargs: dict | None = Non
         raise ReaderError("Не удалось извлечь текст из файла.")
 
     say(0.04, "Готовлю текст (числа, ударения)…")
-    prepared = []
-    for ch in chapters:
-        # заголовок уже стоит первой строкой в ch.text (см. chapters.py), отдельно
-        # его добавлять нельзя — иначе название прочитается дважды
-        body = _prepare_text(ch.text, stress_fmt, opts.expand_numbers,
-                             opts.use_stress, doc_lang)
-        prepared.append((ch.title, _chunk_paragraphs(body, meta.max_chunk_chars,
-                                                     opts.gap_sec, opts.para_gap_sec)))
+    # заголовок уже стоит первой строкой в ch.text (см. chapters.py), отдельно
+    # его добавлять нельзя — иначе название прочитается дважды
+    bodies = [_prepare_text(ch.text, stress_fmt, opts.expand_numbers,
+                            opts.use_stress, doc_lang) for ch in chapters]
+    if opts.use_stress and stress_fmt == "+" and doc_lang == "ru":
+        # имя героя должно звучать одинаково во всей книге (см. stress.unify_book)
+        bodies, unified = unify_book(bodies)
+        if unified:
+            log_info("единое ударение по книге: " + ", ".join(
+                f"{v} ({n})" for v, n in list(unified.values())[:40]))
+            print(f"ℹ Ударения: у {len(unified)} слов вне словаря выровнено по книге "
+                  f"({sum(n for _w, n in unified.values())} мест)", file=sys.stderr)
+    prepared = [(ch.title, _chunk_paragraphs(body, meta.max_chunk_chars,
+                                             opts.gap_sec, opts.para_gap_sec))
+                for ch, body in zip(chapters, bodies)]
 
-    # настройки голоса: тембр применяем при кодировании, темп — при синтезе
+    # настройки голоса: тембр применяем при кодировании, темп — при синтезе.
+    # Сбой здесь меняет звук (книга выйдет без поправок тембра), поэтому —
+    # в журнал и в окно, а не молча.
     fx_chain = ""
     try:
         fx_chain = load_fx(default_voices_dir(), voice).filter_chain()
-    except Exception:
-        pass
+    except Exception as e:
+        log_problem(f"не прочитались настройки звучания голоса «{voice}», "
+                    "книга будет без них", e)
 
     book_title = clean_book_title(doc.title or doc.base_title)
     base = _safe_name(book_title)
-    workdir = tempfile.mkdtemp(prefix="t2a_syn_")
-    # папку под потоковые mp3 создаём сразу, если они нужны
-    mp3_dir = None
-    if opts.make_chapter_mp3:
-        mp3_dir = os.path.join(out_dir, base)
-        os.makedirs(mp3_dir, exist_ok=True)
+    book_dir = os.path.join(out_dir, base)
+    os.makedirs(book_dir, exist_ok=True)
+    mp3_dir = book_dir if opts.make_chapter_mp3 else None
+    # сырые части — в «.herald» рядом с результатом (см. «продолжение после сбоя»)
+    workdir = os.path.join(book_dir, STATE_DIR)
+    os.makedirs(workdir, exist_ok=True)
+    fp = settings_fingerprint(engine, eng_kwargs, voice, opts)
+    state = _load_state(workdir)
+    if state.get("fingerprint") != fp or state.get("total") != len(prepared):
+        state = {"fingerprint": fp, "total": len(prepared), "parts": {},
+                 "finished": False}
+    hashes = {ci: _part_hash(fp, chunks) for ci, (_t, chunks) in enumerate(prepared, 1)}
     rendered: dict[int, RenderedChapter] = {}
     workers = max(1, int(opts.workers))
 
-    def emit(ci: int, r: RenderedChapter, expected_chars: int = 0):
+    def emit(ci: int, r: RenderedChapter, expected_chars: int = 0,
+             reuse: bool = False):
         """Потоковая выдача готового файла: пишем mp3 сразу и сообщаем наверх."""
         rendered[ci] = r
         if expected_chars and r.duration < expected_chars / 1000 * MIN_SEC_PER_1000:
             # НЕ перезаписываем прошлый удачный mp3 неудачным: если синтез
             # сорвался, лучше оставить что было и сказать об этом
             print(f"[!] файл {ci}: на {expected_chars} символов вышло всего "
-                  f"{r.duration:.1f} с звука — синтез не сработал, файл не записан. "
+                  f"{r.duration:.1f} с звука - синтез не сработал, файл не записан. "
                   f"Прежний результат (если был) остался на месте.", file=sys.stderr)
             if on_chapter:
                 on_chapter(ci, r.title, None)
@@ -473,69 +626,105 @@ def convert_book(path: str, *, engine: str = "f5", eng_kwargs: dict | None = Non
                 name if not r.title or r.title.startswith("Часть ")
                 else f"{name}. {r.title}", r.wav_path, r.duration)
             try:
-                encode_chapter_mp3(tagged, mp3, title=book_title, author=doc.author,
-                                   hd=opts.hd_filter, fmt=opts.audio_format,
-                                   fx=fx_chain)
-            except Exception:
+                if not (reuse and os.path.exists(mp3)):
+                    encode_chapter_mp3(tagged, mp3, title=book_title, author=doc.author,
+                                       hd=opts.hd_filter, fmt=opts.audio_format,
+                                       fx=fx_chain)
+            except Exception as e:
+                log_problem(f"не записался файл части {ci}", e)
                 mp3 = None
             if on_chapter:
                 on_chapter(ci, r.title, mp3)
         elif on_chapter:
             on_chapter(ci, r.title, None)
+        if not reuse:
+            state["parts"][str(ci)] = {"hash": hashes[ci],
+                                       "flac": os.path.basename(r.wav_path),
+                                       "dur": r.duration, "title": r.title}
+            _save_state(workdir, state)
 
-    if workers == 1:
-        say(0.05, "Готовлю модель синтеза…")
-        try:
-            vs = load_fx(default_voices_dir(), voice).speed
-            if vs != 1.0:
-                eng_kwargs = dict(eng_kwargs,
-                                  speed=eng_kwargs.get("speed", 1.0) * vs)
-        except Exception:
-            pass
-        eng = _loaded_engine(engine, eng_kwargs)
-        total_chunks = sum(max(1, len(c)) for _, c in prepared)
-        done = 0
-        for ci, (title, chunks) in enumerate(prepared, 1):
-            in_part = 0
-            if part_progress:
-                part_progress(ci, len(prepared), 0.0)
+    def reusable(ci: int) -> RenderedChapter | None:
+        """Готовая часть из прошлого запуска - если текст и настройки те же."""
+        d = state["parts"].get(str(ci))
+        if not d or d.get("hash") != hashes[ci]:
+            return None
+        fl = os.path.join(workdir, d.get("flac", ""))
+        if not os.path.exists(fl):
+            return None
+        return RenderedChapter(d.get("title") or f"Часть {ci}", fl, float(d.get("dur", 0)))
 
-            def bump():
-                nonlocal done, in_part
-                done += 1
-                in_part += 1
-                say(0.05 + 0.9 * done / total_chunks,
-                    f"Озвучиваю: часть {ci} из {len(prepared)}")
+    reused = {ci: r for ci in hashes if (r := reusable(ci)) is not None}
+    if reused:
+        log_info(f"{book_title}: продолжаю озвучку, готово частей {len(reused)} "
+                 f"из {len(prepared)}")
+        print(f"ℹ Продолжаю: готовых частей из прошлого раза - {len(reused)} "
+              f"из {len(prepared)}", file=sys.stderr)
+
+    # Mac не должен уснуть посреди книги: запрет держится до конца синтеза и
+    # снимается при «Стопе» и при сбое (выход из блока — в любом случае)
+    with keep_awake():
+        if workers == 1:
+            say(0.05, "Готовлю модель синтеза…")
+            try:
+                vs = load_fx(default_voices_dir(), voice).speed
+                if vs != 1.0:
+                    eng_kwargs = dict(eng_kwargs,
+                                      speed=eng_kwargs.get("speed", 1.0) * vs)
+            except Exception as e:
+                log_problem(f"не прочитался темп голоса «{voice}», читаю обычным темпом", e)
+            total_chunks = sum(max(1, len(c)) for _, c in prepared)
+            done = sum(max(1, len(prepared[ci - 1][1])) for ci in reused)
+            # модель грузим, только если есть что считать: продолжение, где всё
+            # готово, не должно ждать загрузки 1,3 ГБ
+            eng = _loaded_engine(engine, eng_kwargs) if len(reused) < len(prepared) else None
+            for ci, (title, chunks) in enumerate(prepared, 1):
+                if ci in reused:
+                    emit(ci, reused[ci], reuse=True)
+                    say(0.05 + 0.9 * done / total_chunks,
+                        f"Часть {ci} из {len(prepared)} - готова с прошлого раза")
+                    continue
+                in_part = 0
                 if part_progress:
-                    part_progress(ci, len(prepared), in_part / max(1, len(chunks)))
-            audio = _synth_chunks(eng, voice, chunks, sr, opts.gap_sec, on_chunk=bump,
-                                  should_stop=should_stop, lang=doc_lang,
-                                  pause_gate=pause_gate)
-            audio = np.concatenate([audio, np.zeros(int(sr * opts.para_gap_sec), dtype=np.float32)])
-            wp = os.path.join(workdir, f"ch{ci:04d}.wav")
-            emit(ci, RenderedChapter(title or f"Часть {ci}", wp, write_wav(audio, sr, wp)),
-                 sum(len(c[0]) for c in chunks))
-    else:
-        import multiprocessing as mp
-        try:
-            import torch
-            cores = torch.get_num_threads() or (os.cpu_count() or 4)
-        except Exception:
-            cores = os.cpu_count() or 4
-        threads_per = max(1, cores // workers)
-        payloads = [(ci, title, chunks, voice, sr, opts.gap_sec, opts.para_gap_sec, workdir)
-                    for ci, (title, chunks) in enumerate(prepared, 1)]
-        say(0.05, f"Готовлю модель синтеза ({workers} процесса)…")
-        ctx = mp.get_context("spawn")
-        with ctx.Pool(processes=workers, initializer=_worker_init,
-                      initargs=(engine, eng_kwargs, threads_per)) as pool:
-            done = 0
-            # imap (а не imap_unordered): главы отдаются СТРОГО по порядку 1,2,3…,
-            # даже если поздняя глава досчиталась раньше — чтобы слушать по порядку
-            for ci, wav_path, dur, title in pool.imap(_worker_render, payloads):
-                emit(ci, RenderedChapter(title or f"Часть {ci}", wav_path, dur))
-                done += 1
-                say(0.05 + 0.9 * done / len(prepared), f"Озвучено глав: {done} из {len(prepared)}")
+                    part_progress(ci, len(prepared), 0.0)
+
+                def bump():
+                    nonlocal done, in_part
+                    done += 1
+                    in_part += 1
+                    say(0.05 + 0.9 * done / total_chunks,
+                        f"Озвучиваю: часть {ci} из {len(prepared)}")
+                    if part_progress:
+                        part_progress(ci, len(prepared), in_part / max(1, len(chunks)))
+                audio = _synth_chunks(eng, voice, chunks, sr, opts.gap_sec, on_chunk=bump,
+                                      should_stop=should_stop, lang=doc_lang,
+                                      pause_gate=pause_gate)
+                audio = np.concatenate([audio, np.zeros(int(sr * opts.para_gap_sec), dtype=np.float32)])
+                wp = os.path.join(workdir, f"part{ci:04d}.flac")
+                emit(ci, RenderedChapter(title or f"Часть {ci}", wp, write_wav(audio, sr, wp)),
+                     sum(len(c[0]) for c in chunks))
+        else:
+            import multiprocessing as mp
+            try:
+                import torch
+                cores = torch.get_num_threads() or (os.cpu_count() or 4)
+            except Exception:          # без torch просто берём число ядер — не важно
+                cores = os.cpu_count() or 4
+            threads_per = max(1, cores // workers)
+            for ci in sorted(reused):
+                emit(ci, reused[ci], reuse=True)
+            payloads = [(ci, title, chunks, voice, sr, opts.gap_sec, opts.para_gap_sec, workdir)
+                        for ci, (title, chunks) in enumerate(prepared, 1) if ci not in reused]
+            say(0.05, f"Готовлю модель синтеза ({workers} процесса)…")
+            ctx = mp.get_context("spawn")
+            with ctx.Pool(processes=workers, initializer=_worker_init,
+                          initargs=(engine, eng_kwargs, threads_per)) as pool:
+                done = 0
+                # imap (а не imap_unordered): главы отдаются СТРОГО по порядку 1,2,3…,
+                # даже если поздняя глава досчиталась раньше — чтобы слушать по порядку
+                for ci, wav_path, dur, title in pool.imap(_worker_render, payloads):
+                    emit(ci, RenderedChapter(title or f"Часть {ci}", wav_path, dur))
+                    done += 1
+                    say(0.05 + 0.9 * done / len(prepared), f"Озвучено глав: {done} из {len(prepared)}")
 
     ordered = [rendered[i] for i in sorted(rendered)]
     total_dur = sum(r.duration for r in ordered)
@@ -563,6 +752,10 @@ def convert_book(path: str, *, engine: str = "f5", eng_kwargs: dict | None = Non
                      cover_bytes=doc.cover.data if doc.cover else None,
                      cover_ext=doc.cover.ext if doc.cover else "jpg")
 
+    # книга целиком готова: сырые части больше не нужны. До этой строки они
+    # лежат в «.herald» — на случай сбоя, чтобы не считать книгу заново.
+    if len(ordered) == len(prepared):
+        shutil.rmtree(workdir, ignore_errors=True)
     say(1.0, "Готово")
     return ConvertResult(m4b_path, mp3_dir, 1 if single_path else len(ordered),
                          total_dur, book_title, doc.author)
@@ -581,12 +774,12 @@ class BookEstimate:
 
 def estimate_book(path: str, minutes_per_file: float = 15.0,
                   expand_numbers: bool = True) -> BookEstimate:
-    """Сколько в книге глав и сколько выйдет звука — быстро, без синтеза.
+    """Сколько в книге глав и сколько выйдет звука - быстро, без синтеза.
 
     Нужно, чтобы интерфейс сразу честно сказал, на сколько часов это затянется:
-    начитка книги — процесс на часы, и узнавать её длину по ходу неприятно.
+    начитка книги - процесс на часы, и узнавать её длину по ходу неприятно.
     Ударения тут не считаем (RUAccent на всю книгу сам по себе не быстрый),
-    а на длину они не влияют — только на произношение.
+    а на длину они не влияют - только на произношение.
     """
     doc = read_document(path)
     chapters = build_chapters(doc, minutes_per_file)
@@ -632,8 +825,8 @@ def preview_sample(path: str, *, engine: str = "f5", eng_kwargs: dict | None = N
         if vs != 1.0:
             eng_kwargs = dict(eng_kwargs or {},
                               speed=(eng_kwargs or {}).get("speed", 1.0) * vs)
-    except Exception:
-        pass
+    except Exception as e:
+        log_problem(f"не прочитался темп голоса «{voice}», пробник обычным темпом", e)
     eng = _loaded_engine(engine, eng_kwargs)
     sr = eng.sample_rate
 
@@ -658,6 +851,8 @@ def preview_sample(path: str, *, engine: str = "f5", eng_kwargs: dict | None = N
     audio = _synth_chunks(eng, voice, chunks, sr, opts.gap_sec, on_chunk=bump,
                           lang=doc_lang)
 
+    # временную папку пробника удаляет вызывающий (см. окно) или чистка при
+    # запуске — она старше суток не живёт
     out_path = out_path or os.path.join(tempfile.mkdtemp(prefix="t2a_prev_"), "preview.wav")
     write_wav(audio, sr, out_path)
     say(1.0, "Пробник готов")

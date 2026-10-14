@@ -18,6 +18,17 @@ try:
 except Exception:  # пакет может быть не установлен в среде без синтеза
     num2words = None
 
+_LOGGED: set = set()
+
+
+def _log_once(what: str, exc: BaseException | None = None) -> None:
+    """Одна и та же беда в книге встречается сотни раз — в журнал один раз."""
+    if what in _LOGGED:
+        return
+    _LOGGED.add(what)
+    from .log import log_problem
+    log_problem(what, exc)
+
 
 # --- сокращения: только однозначные, чтобы не наломать -------------------
 _ABBR = [
@@ -86,7 +97,9 @@ def _numbers_to_words(text: str) -> str:
         whole, frac = m.group(1), m.group(2)
         try:
             return num2words(float(f"{whole}.{frac}"), lang="ru")
-        except Exception:
+        except Exception as e:
+            # число останется цифрами — модель прочтёт его плохо или пропустит
+            _log_once(f"число «{m.group(0)}» не развернулось в слова", e)
             return m.group(0)
 
     # десятичные с запятой: «3,5»
@@ -95,7 +108,8 @@ def _numbers_to_words(text: str) -> str:
     def repl_int(m: re.Match) -> str:
         try:
             return num2words(int(m.group(0)), lang="ru")
-        except Exception:
+        except Exception as e:
+            _log_once(f"число «{m.group(0)}» не развернулось в слова", e)
             return m.group(0)
 
     # целые числа (в т.ч. годы — как количественные, этого для v1 достаточно)
@@ -302,6 +316,8 @@ def sentenize(text: str) -> list[str]:
     try:
         from razdel import sentenize as _rz
         return [s.text.strip() for s in _rz(text) if s.text.strip()]
-    except Exception:
+    except Exception as e:
+        # разбивка попроще: на «т. е.» и инициалах может резать лишнее
+        _log_once("умная разбивка на предложения недоступна, режу по точкам", e)
         parts = re.split(r"(?<=[.!?…])\s+", text)
         return [p.strip() for p in parts if p.strip()]

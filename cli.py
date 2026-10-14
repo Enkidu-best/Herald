@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Текст в Аудио — консольный запуск (без GUI).
+"""Текст в Аудио - консольный запуск (без GUI).
 
 Примеры:
     # разово подготовить голос-образец (обрезка + расшифровка) и озвучить пробник
@@ -31,7 +31,7 @@ import sys
 
 from core.engines import get_engine, list_engines
 from core.engines.f5 import F5Engine
-from core.pipeline import convert_book, preview_sample, ConvertOptions
+from core.pipeline import convert_book, preview_sample, ConvertOptions, cleanup_stale_temp
 from core.readers import ScannedPdfError, ReaderError
 
 
@@ -65,9 +65,10 @@ def main() -> int:
                     help="f5mlx: epss (прорежённое расписание, по умолчанию) | uniform (как torch)")
     ap.add_argument("--workers", type=int, default=1, help="параллельных процессов для глав (ускорение на многоядерном M4)")
     ap.add_argument("--device", default=None,
-                    help="только f5 (torch): cpu. mps на 16 ГБ упирается в память и медленнее — не советую")
+                    help="только f5 (torch): cpu. mps на 16 ГБ упирается в память и медленнее - не советую")
     ap.add_argument("--list-voices", action="store_true", help="показать голоса движка")
     args = ap.parse_args()
+    cleanup_stale_temp()          # забытые временные папки прошлых запусков
 
     if args.list_voices:
         eng = get_engine(args.engine)
@@ -100,7 +101,7 @@ def main() -> int:
             voice = eng_ref.prepare_reference(args.ref)
             print(f"  голос сохранён как: {voice}", file=sys.stderr)
     if not voice:
-        print("Не задан голос: укажите --voice, а для F5 — --ref <образец> или --voice <id>.",
+        print("Не задан голос: укажите --voice, а для F5 - --ref <образец> или --voice <id>.",
               file=sys.stderr)
         return 1
     if not args.inputs:
@@ -131,7 +132,7 @@ def main() -> int:
                 rms = float(np.sqrt(np.mean(np.square(a)))) if len(a) else 0.0
                 base = os.path.splitext(os.path.basename(path))[0]
                 mp3 = os.path.join(args.out or os.path.dirname(os.path.abspath(path)),
-                                   base + " — пробник.mp3")
+                                   base + " - пробник.mp3")
                 # CBR + Xing-заголовок -> корректная длительность в любом плеере
                 from core.assemble import polish_wav_to_mp3
                 polish_wav_to_mp3(out, mp3)
@@ -139,7 +140,7 @@ def main() -> int:
                 print(f"  Длительность: {dur:.1f} c | громкость(RMS): {rms:.4f} | "
                       f"счёт на этом компьютере: {elapsed:.0f} c")
                 if rms < 1e-3:
-                    print("  ВНИМАНИЕ: похоже, тишина (RMS≈0). Пришли этот вывод — разберёмся.")
+                    print("  ВНИМАНИЕ: похоже, тишина (RMS≈0). Пришли этот вывод - разберёмся.")
             else:
                 def _on_ch(ci, title, mp3):
                     sys.stderr.write("\n")

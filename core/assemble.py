@@ -3,7 +3,7 @@
 Выход:
   - книга целиком в .m4b с главами-закладками, обложкой и метаданными
     (её понимают Apple Books / Books, листается по главам);
-  - при желании — отдельные файлы по главам (.mp3).
+  - при желании - отдельные файлы по главам (.mp3).
 
 ffmpeg берётся из системы (у Scribe он уже стоит через brew).
 """
@@ -111,7 +111,7 @@ def make_title_cover(title: str, author: str, path: str) -> str:
                 try:
                     return ImageFont.truetype(name, size)
                 except Exception:
-                    pass
+                    pass          # шрифт обложки — пробуем следующий
         return ImageFont.load_default()
 
     def wrap(text, fnt, max_w):
@@ -154,8 +154,10 @@ def _prepare_cover(cover_bytes: bytes | None, cover_ext: str, title: str,
             im = Image.open(io.BytesIO(cover_bytes)).convert("RGB")
             im.save(out, "JPEG", quality=88)
             return out
-        except Exception:
-            pass
+        except Exception as e:
+            from .log import log_problem
+            log_problem("обложка книги не прочиталась, делаю обложку с названием", e,
+                        show=False)
     return make_title_cover(title, author, out)
 
 
@@ -262,11 +264,11 @@ def polish_wav_to_mp3(wav_path: str, out_path: str, *, hd: bool = True,
 def concat_to_single(chapters: list[RenderedChapter], out_path: str, *,
                      title: str = "", author: str = "", hd: bool = True,
                      fmt: str = DEFAULT_FORMAT, fx: str = "") -> str:
-    """Все части — одним файлом. Склеиваются wav, а кодируется результат один раз.
+    """Все части - одним файлом. Склеиваются wav, а кодируется результат один раз.
 
     Склеивать уже готовые mp3 нельзя: у каждого свой заголовок с длительностью,
     и плееры потом показывают длину первой части вместо всей книги. Тракт
-    полировки тот же, что у частей, — звук не отличается.
+    полировки тот же, что у частей, - звук не отличается.
     """
     ff = _ff()
     lst = out_path + ".list.txt"

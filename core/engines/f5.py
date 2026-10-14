@@ -85,7 +85,7 @@ class F5Engine(TTSEngine):
 
         Язык определяем по расшифровке образца: на каком языке говорил диктор,
         для такого языка голос и годится. Английскую книгу русским образцом
-        озвучивать бессмысленно — модели разные, выйдет тяжёлый акцент.
+        озвучивать бессмысленно - модели разные, выйдет тяжёлый акцент.
         """
         from ..normalize import detect_language
         out = []
@@ -98,7 +98,10 @@ class F5Engine(TTSEngine):
                 continue
             try:
                 lang = detect_language(open(txt, encoding="utf-8").read())
-            except Exception:
+            except Exception as e:
+                from ..log import log_problem
+                log_problem(f"не прочитался текст образца «{stem}», считаю голос русским",
+                            e, show=False)
                 lang = "ru"
             out.append(Voice(stem, stem, "", lang))
         return out
@@ -110,7 +113,7 @@ class F5Engine(TTSEngine):
             import torch
             torch.set_num_threads(_os.cpu_count() or 4)
         except Exception:
-            pass
+            pass                  # число потоков — только скорость, не результат
         from huggingface_hub import hf_hub_download
         ckpt = hf_hub_download(HF_REPO, CKPT_REL)
         vocab = hf_hub_download(HF_REPO, VOCAB_REL)
@@ -131,7 +134,7 @@ class F5Engine(TTSEngine):
         Что здесь важно и почему (это напрямую определяет качество клона):
 
         1. Кусок берём НЕ с начала файла. В начале главы диктор читает заголовок
-           с паузами — на таком образце получается ~14 байт текста на секунду
+           с паузами - на таком образце получается ~14 байт текста на секунду
            вместо обычных ~28. F5 считает длительность по соотношению
            «байт текста / секунда образца», поэтому вдвое разрежённый образец
            заставляет модель вдвое растягивать речь. Раньше это компенсировали
@@ -139,7 +142,7 @@ class F5Engine(TTSEngine):
         2. Границы куска берём по границам фраз из расшифровки, а не «первые
            10 секунд»: иначе образец начинается с обрезанного слова, а его текст
            этому слову не соответствует.
-        3. Расшифровка — whisper large-v3-turbo на MLX: быстрая (секунды) и
+        3. Расшифровка - whisper large-v3-turbo на MLX: быстрая (секунды) и
            точная. Модель small врала («раздерающимскрежитан» вместо
            «душераздирающим скрежетом»), а неверный текст образца портит и голос.
 
@@ -172,7 +175,7 @@ class F5Engine(TTSEngine):
         """Запомнить, из какой записи сделан голос, и кто в ней читает.
 
         Без этого невозможно потом сверить результат с оригиналом: имя голоса
-        ничего не говорит о файле. Один раз я на этом и ошибся — сравнивал
+        ничего не говорит о файле. Один раз я на этом и ошибся - сравнивал
         синтез одного чтеца с записью другого и делал выводы по чужим числам.
         Имя чтеца берём из ID3 (`album_artist`, у аудиокниг там именно чтец).
         """
@@ -198,13 +201,13 @@ class F5Engine(TTSEngine):
             if book:
                 info["book"] = book.strip()
         except Exception:
-            pass
+            pass                  # необязательная мелочь: результат не меняет
         try:
             with open(os.path.join(self.voices_dir, name + ".src.json"),
                       "w", encoding="utf-8") as f:
                 json.dump(info, f, ensure_ascii=False, indent=2)
         except Exception:
-            pass
+            pass                  # необязательная мелочь: результат не меняет
 
     @staticmethod
     def _tembre(y, sr: int):
@@ -212,7 +215,7 @@ class F5Engine(TTSEngine):
 
         Считаем по долгому среднему спектру (LTAS) и только по кадрам с речью:
         паузы иначе тянут картину вниз, а медиана по кадрам, наоборот, почти не
-        различает куски — у неё всё усредняется до типичной гласной.
+        различает куски - у неё всё усредняется до типичной гласной.
         """
         import numpy as np
         n = 2048
@@ -288,7 +291,7 @@ class F5Engine(TTSEngine):
                 "crackle": float(clicks / (len(y) / sr))}
 
     def _scan(self, audio_path: str, total: float, sr: int = 24000):
-        """[(секунда, признаки)] по всей записи — потоком, не грузя её в память.
+        """[(секунда, признаки)] по всей записи - потоком, не грузя её в память.
 
         Запись может быть и трёхчасовой книгой: при загрузке целиком это два с
         лишним гигабайта. Поэтому читаем из ffmpeg кусками и считаем признаки на
@@ -324,7 +327,7 @@ class F5Engine(TTSEngine):
             try:
                 proc.stdout.close()
             except Exception:
-                pass
+                pass                  # необязательная мелочь: результат не меняет
             proc.wait()
         return out
 
@@ -347,10 +350,10 @@ class F5Engine(TTSEngine):
 
     @classmethod
     def _profile(cls, scan):
-        """Типичный тембр записи — медиана по окнам с речью.
+        """Типичный тембр записи - медиана по окнам с речью.
 
         Медиана, а не максимум: самый звонкий кусок даёт не звонкий голос, а
-        поднятый шум вокодера (проверено — металл и шипение выходили выше, чем у
+        поднятый шум вокодера (проверено - металл и шипение выходили выше, чем у
         живого чтеца). И считается она по таким же окнам, какими мерятся
         кандидаты: у одного долгого спектра на всю запись «металл» выходит
         впятеро выше просто из-за усреднения, и штраф за грязный верх не
@@ -364,7 +367,7 @@ class F5Engine(TTSEngine):
         return {k: float(np.median([w[k] for _t, w in scan])) for k in keys}
 
     def _promising_regions(self, scan, target, total: float):
-        """Участки записи, похожие по тембру на чтеца, — куда стоит смотреть.
+        """Участки записи, похожие по тембру на чтеца, - куда стоит смотреть.
 
         Предотбор без распознавания: окна оцениваются только по тембру и чистоте
         верха, вокруг лучших берётся по REGION_PAD секунд. Поиск по-прежнему идёт
@@ -421,16 +424,16 @@ class F5Engine(TTSEngine):
         Два критерия, и оба обязательны.
 
         ЧИСТОТА. F5 клонирует не только тембр, но и акустику образца: шумит в
-        паузах образца — шумит и синтез. Отношение сигнал/шум переносится в
+        паузах образца - шумит и синтез. Отношение сигнал/шум переносится в
         выход почти один в один (замерено: образец 18,9 дБ -> синтез 18,9 дБ,
         «скрипы» и металл; образец 69,2 дБ -> синтез 76,0 дБ, чисто).
 
         ТЕМБР. Верх, которого в образце нет, потом не вернёт никакой
-        эквалайзер — он поднимет только шум вокодера. Прежний отбор смотрел
+        эквалайзер - он поднимет только шум вокодера. Прежний отбор смотрел
         лишь на чистоту и взял у чтеца самое глухое место записи: воздух 0,74%
         против 2,70% в среднем по его же голосу.
 
-        Кандидаты — все связки подряд идущих фраз длиной 7-12 с внутри
+        Кандидаты - все связки подряд идущих фраз длиной 7-12 с внутри
         перспективных участков.
         """
         import numpy as np
@@ -544,7 +547,7 @@ class F5Engine(TTSEngine):
 
     @staticmethod
     def _snr(a, sr: int, rms: float) -> float:
-        """Насколько речь громче фона. Фон — уровень в самых тихих окнах."""
+        """Насколько речь громче фона. Фон - уровень в самых тихих окнах."""
         import numpy as np
         win = int(0.05 * sr)
         n = len(a) // win
@@ -581,7 +584,10 @@ class F5Engine(TTSEngine):
                                        verbose=False)
             self.detected_language = r.get("language") or "ru"
             return [(s["start"], s["end"], s["text"]) for s in r["segments"]]
-        except Exception:
+        except Exception as e:
+            from ..log import log_problem
+            log_problem("быстрая расшифровка (MLX) недоступна, беру запасную", e,
+                        show=False)
             from faster_whisper import WhisperModel
             m = WhisperModel(WHISPER_FALLBACK, device="cpu", compute_type="int8")
             segs, info = m.transcribe(wav_path)
@@ -591,7 +597,10 @@ class F5Engine(TTSEngine):
     def _transcribe_text(self, wav_path: str) -> str:
         try:
             return " ".join(t for _a, _b, t in self._transcribe_segments(wav_path)).strip()
-        except Exception:
+        except Exception as e:
+            # без расшифровки образца клон заметно хуже — это надо видеть
+            from ..log import log_problem
+            log_problem("не удалось расшифровать образец голоса", e)
             return ""
 
     @staticmethod
@@ -647,8 +656,8 @@ class F5Engine(TTSEngine):
             self._empty_cache()
             return wav
         except Exception as e:
-            import sys
-            print(f"[F5] пропущен кусок: {e}", file=sys.stderr)
+            from ..log import log_problem
+            log_problem("[F5] пропущен кусок", e)
             self._empty_cache()
             return np.zeros(0, dtype=np.float32)
 
@@ -659,4 +668,4 @@ class F5Engine(TTSEngine):
                 import torch
                 torch.mps.empty_cache()
             except Exception:
-                pass
+                pass              # очистка кэша — только память, не результат

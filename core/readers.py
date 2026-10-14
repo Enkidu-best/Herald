@@ -1,11 +1,11 @@
 """Чтение входных форматов в единый объект Document.
 
 Поддержка: .txt/.md, .docx, .epub, .fb2 (+ .fb2.zip), .pdf (только текстовый слой).
-PDF-сканы без текстового слоя намеренно отсеиваются с понятной ошибкой — OCR не
+PDF-сканы без текстового слоя намеренно отсеиваются с понятной ошибкой - OCR не
 делаем (об этом договорились).
 
 Каждый ридер возвращает Document с метаданными, обложкой (если есть в файле) и
-либо готовыми главами, либо сплошным текстом — тогда главы построит chapters.py.
+либо готовыми главами, либо сплошным текстом - тогда главы построит chapters.py.
 """
 
 from __future__ import annotations
@@ -141,7 +141,7 @@ def _read_epub(path: str) -> Document:
             m = book.get_metadata(ns, name)
             return m[0][0].strip() if m else ""
         except Exception:
-            return ""
+            return ""          # нет поля в метаданных — название возьмём из имени файла
 
     title = meta("DC", "title")
     author = meta("DC", "creator")
@@ -162,8 +162,11 @@ def _read_epub(path: str) -> Document:
 
     try:
         walk_toc(book.toc)
-    except Exception:
-        pass
+    except Exception as e:
+        # без оглавления главы назовутся «Часть N» — на звук не влияет
+        from .log import log_problem
+        log_problem("оглавление книги не прочиталось, главы будут без названий", e,
+                    show=False)
 
     chapters: list[Chapter] = []
     for item in book.get_items_of_type(ebooklib.ITEM_DOCUMENT):
@@ -193,7 +196,7 @@ def _epub_cover(book) -> Optional[CoverImage]:
             if it.get_content():
                 return _cover_from_bytes(it.get_content(), it.get_name())
     except Exception:
-        pass
+        pass                # поиск обложки: не нашлась — сделаем свою с названием
     # 2) meta name=cover -> id изображения
     try:
         covers = book.get_metadata("OPF", "cover")
@@ -203,14 +206,14 @@ def _epub_cover(book) -> Optional[CoverImage]:
             if it and it.get_content():
                 return _cover_from_bytes(it.get_content(), it.get_name())
     except Exception:
-        pass
+        pass                # поиск обложки: не нашлась — сделаем свою с названием
     # 3) первое изображение с "cover" в имени
     try:
         for it in book.get_items_of_type(ebooklib.ITEM_IMAGE):
             if "cover" in it.get_name().lower():
                 return _cover_from_bytes(it.get_content(), it.get_name())
     except Exception:
-        pass
+        pass                # поиск обложки: не нашлась — сделаем свою с названием
     return None
 
 
@@ -277,7 +280,7 @@ def _read_fb2(path: str, zipped: bool = False) -> Document:
                     try:
                         cover = CoverImage(base64.b64decode(b.text), ext)
                     except Exception:
-                        cover = None
+                        cover = None    # обложка не прочиталась — сделаем свою
                     break
 
     bodies = L(root, "body")
@@ -314,7 +317,7 @@ def _read_pdf(path: str) -> Document:
         doc.close()
         raise ScannedPdfError(
             f"В PDF нет текстового слоя (похоже на скан): {os.path.basename(path)}. "
-            f"Такие файлы пропускаем — нужен OCR, а мы его не делаем."
+            f"Такие файлы пропускаем - нужен OCR, а мы его не делаем."
         )
     md = doc.metadata or {}
     title = (md.get("title") or "").strip()

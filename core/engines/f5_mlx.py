@@ -1,21 +1,21 @@
-"""Движок F5-TTS на MLX (нативно на Apple Silicon) — быстрый вариант.
+"""Движок F5-TTS на MLX (нативно на Apple Silicon) - быстрый вариант.
 
 Тот же голос, та же модель и те же ударения, что у torch-движка: берётся ровно
 тот же чекпойнт accent_tune, а все шаги подготовки (образец, токенизация текста,
 расчёт длительности, громкость, склейка) повторяют torch-версию один в один.
-MLX здесь — только другой способ посчитать ту же сеть, быстрее. Сверено: выход
+MLX здесь - только другой способ посчитать ту же сеть, быстрее. Сверено: выход
 DiT совпадает с torch с точностью float32 (расхождение ~1e-4).
 
 Что было сломано раньше и давало «речеподобную кашу» (три независимые причины):
   1) В кэше модели лежал ФАЙЛ ОТ ДРУГОЙ МОДЕЛИ. Имена слоёв совпадали, поэтому
-     он загружался без единой ошибки — но это были не те веса. Теперь на веса
+     он загружался без единой ошибки - но это были не те веса. Теперь на веса
      стоит символьная ссылка, и её цель проверяется при каждой загрузке.
   2) Свой convert_char_to_pinyin в f5-tts-mlx (устаревший) ставит пробел перед
      КАЖДЫМ неlatin-символом: «несмотря» -> «н е с м о т р я». В torch-версии
      эта ветка закрыта проверкой is_chinese(). Здесь перенесён torch-вариант.
   3) Длительность куска считалась своей эвристикой (символы/14) вместо формулы
      F5 (по БАЙТАМ utf-8 и длине образца), из-за чего текст «сжимался» вдвое.
-     Плюс образец брался как есть, а torch всегда режет в нём тишину — это ещё
+     Плюс образец брался как есть, а torch всегда режет в нём тишину - это ещё
      12% разницы в темпе.
 
 Работает ТОЛЬКО на Apple Silicon (пакеты mlx, f5-tts-mlx, vocos-mlx).
@@ -68,6 +68,15 @@ LANG_MODELS: dict[str, dict] = {
            "target_bps": 16.1},
 }
 
+# Другие веса той же архитектуры F5 (для сравнения на слух, этап 1 «3.0»). По
+# умолчанию по-прежнему Misha24-10 accent_tune — одобренный голос. ESpeech-TTS-1
+# (Apache-2.0) дообучена на русском, понимает «+», словарь тот же; выложена как
+# .pt из обучения, поэтому один раз конвертируется в .safetensors в кэш.
+MODEL_VARIANTS: dict[str, dict] = {
+    "espeech": {"repo": "ESpeech/ESpeech-TTS-1_RL-V2", "pt": "espeech_tts_rlv2.pt",
+                "vocab": "vocab.txt"},
+}
+
 SAMPLE_RATE = 24000
 HOP_LENGTH = 256
 TARGET_RMS = 0.1              # как target_rms в f5_tts.infer.utils_infer
@@ -108,9 +117,9 @@ CFG_STRENGTH = 2.0            # как cfg_strength в f5_tts.infer.utils_infer
 SWAY_COEF = -1.0              # как sway_sampling_coef там же
 
 
-def _mlx_model_dir(lang: str = "ru") -> str:
+def _mlx_model_dir(lang: str = "ru", variant: str | None = None) -> str:
     d = os.path.join(os.path.expanduser("~"), ".cache", "text2audio",
-                     f"f5mlx_model_{lang}")
+                     f"f5mlx_model_{lang}" + (f"_{variant}" if variant else ""))
     os.makedirs(d, exist_ok=True)
     return d
 
@@ -126,8 +135,8 @@ def _is_cjk(c: str) -> bool:
 def convert_char_to_tokens(text_list: list[str]) -> list[list[str]]:
     """Текст -> список символов-токенов, как это делает torch-версия F5.
 
-    Для кириллицы результат — просто символы текста (пробелы не вставляются).
-    Иероглифы переводятся в пиньинь — ветка оставлена для полноты совместимости.
+    Для кириллицы результат - просто символы текста (пробелы не вставляются).
+    Иероглифы переводятся в пиньинь - ветка оставлена для полноты совместимости.
     """
     import rjieba
     from pypinyin import lazy_pinyin, Style
@@ -167,7 +176,7 @@ def preprocess_ref_audio(path: str) -> np.ndarray:
     torch ВСЕГДА прогоняет образец через вырезание тишины (даже если он короче
     12 с) и дописывает 50 мс тишины в конец. От длины образца напрямую зависит
     расчётная длительность куска, т.е. темп речи, поэтому здесь нужен тот же
-    результат — иначе MLX читает заметно медленнее torch тем же голосом.
+    результат - иначе MLX читает заметно медленнее torch тем же голосом.
     """
     from pydub import AudioSegment, silence
 
@@ -211,14 +220,14 @@ def _remove_silence_edges(aseg, silence_threshold: int = -42):
 
 
 def _ref_text_for_model(ref_text: str) -> str:
-    """Дописать точку с пробелом в конце — как preprocess_ref_audio_text в torch."""
+    """Дописать точку с пробелом в конце - как preprocess_ref_audio_text в torch."""
     if not ref_text.endswith(". ") and not ref_text.endswith("。"):
         ref_text = ref_text + " " if ref_text.endswith(".") else ref_text + ". "
     return ref_text
 
 
 def _chunk_by_bytes(text: str, max_bytes: int) -> list[str]:
-    """Нарезка куска на под-куски по длине в БАЙТАХ — как chunk_text в torch."""
+    """Нарезка куска на под-куски по длине в БАЙТАХ - как chunk_text в torch."""
     chunks, cur = [], ""
     for sent in re.split(r"(?<=[;:,.!?])\s+|(?<=[；：，。！？])", text):
         if not sent:
@@ -241,7 +250,7 @@ def _trim_tail(wave: np.ndarray) -> np.ndarray:
     Модели даётся чуть больше времени, чем нужно (страховка от обрыва слова), и
     остаток она заполняет тишиной. Если её не убрать, каждый кусок тащит за
     собой лишний хвост: паузы разъезжаются, а книга становится длиннее без
-    всякой пользы. Паузы всё равно ставит пайплайн — ровные и одинаковые.
+    всякой пользы. Паузы всё равно ставит пайплайн - ровные и одинаковые.
     """
     if not len(wave):
         return wave
@@ -256,7 +265,7 @@ def _trim_tail(wave: np.ndarray) -> np.ndarray:
 
 
 def _cross_fade(waves: list[np.ndarray], sr: int) -> np.ndarray:
-    """Склейка под-кусков с перекрытием — как в infer_batch_process."""
+    """Склейка под-кусков с перекрытием - как в infer_batch_process."""
     if not waves:
         return np.zeros(0, dtype=np.float32)
     out = waves[0]
@@ -287,7 +296,8 @@ class F5MLXEngine(F5Engine):
     def __init__(self, voices_dir: str | None = None, model_name: str = HF_SRC_REPO,
                  steps: int = 7, speed: float = 1.0, quant_bits: int | None = None,
                  max_total_sec: float = MAX_TOTAL_SEC, dtype: str = "float32",
-                 schedule: str = "epss", language: str = "ru") -> None:
+                 schedule: str = "epss", language: str = "ru",
+                 variant: str | None = None) -> None:
         super().__init__(voices_dir=voices_dir, device=None, nfe_step=steps, speed=speed)
         self.model_name = model_name
         # язык задаёт и модель, и нужны ли ударения: у английской модели свой
@@ -308,6 +318,11 @@ class F5MLXEngine(F5Engine):
         # "epss" — прореженное расписание (то же качество за меньшее число шагов),
         # "uniform" — равномерное, как в torch-версии F5 (эталон для сверки)
         self.schedule = schedule
+        if variant and variant not in MODEL_VARIANTS:
+            raise ValueError(f"нет варианта весов {variant!r}")
+        if variant and language != "ru":
+            raise ValueError("другие веса есть только для русского")
+        self.variant = variant
         self._audio_cache: dict[str, tuple] = {}
         self._pace = 1.0                  # поправка темпа под образец
         self._vocoder = None
@@ -320,11 +335,13 @@ class F5MLXEngine(F5Engine):
         """Папка с весами под именем, которого ждёт f5-tts-mlx (model_v1.safetensors).
 
         Кладём СИМВОЛЬНУЮ ССЫЛКУ на файл из кэша HF и каждый раз проверяем, куда
-        она ведёт. Раньше здесь был copy «если файла нет» — и в папке оставался
+        она ведёт. Раньше здесь был copy «если файла нет» - и в папке оставался
         файл от прошлых опытов (другая модель с теми же именами слоёв: он
         загружался без ошибок, но голос был не тот и речь выходила кашей).
         """
         from huggingface_hub import hf_hub_download
+        if self.variant:
+            return self._prepare_variant_dir()
         mdir = _mlx_model_dir(self.language)
         src = os.path.realpath(hf_hub_download(cfg["repo"], cfg["ckpt"]))
         dst = os.path.join(mdir, "model_v1.safetensors")
@@ -334,6 +351,30 @@ class F5MLXEngine(F5Engine):
                 os.remove(dst)
             os.symlink(src, dst)
         vocab_src = os.path.realpath(hf_hub_download(cfg["repo"], cfg["vocab"]))
+        vocab_dst = os.path.join(mdir, "vocab.txt")
+        if not (os.path.islink(vocab_dst) and os.path.realpath(vocab_dst) == vocab_src):
+            if os.path.lexists(vocab_dst):
+                os.remove(vocab_dst)
+            os.symlink(vocab_src, vocab_dst)
+        return mdir
+
+    def _prepare_variant_dir(self) -> str:
+        """Папка с весами варианта: .pt из обучения -> model_v1.safetensors (разово)."""
+        from huggingface_hub import hf_hub_download
+        v = MODEL_VARIANTS[self.variant]
+        mdir = _mlx_model_dir(self.language, self.variant)
+        dst = os.path.join(mdir, "model_v1.safetensors")
+        if not os.path.exists(dst):
+            import torch
+            from safetensors.torch import save_file
+            ck = torch.load(hf_hub_download(v["repo"], v["pt"]), map_location="cpu",
+                            weights_only=False)
+            sd = ck.get("ema_model_state_dict") or ck
+            sd = {k: t.contiguous() for k, t in sd.items()
+                  if k not in ("initted", "step") and hasattr(t, "contiguous")}
+            save_file(sd, dst + ".part")
+            os.replace(dst + ".part", dst)
+        vocab_src = os.path.realpath(hf_hub_download(v["repo"], v["vocab"]))
         vocab_dst = os.path.join(mdir, "vocab.txt")
         if not (os.path.islink(vocab_dst) and os.path.realpath(vocab_dst) == vocab_src):
             if os.path.lexists(vocab_dst):
@@ -415,7 +456,7 @@ class F5MLXEngine(F5Engine):
         return self._audio_cache[vid]
 
     def _max_gen_bytes(self, ref_frames: int, ref_text: str) -> int:
-        """Сколько байт текста укладывается в один вызов — формула F5 (torch)."""
+        """Сколько байт текста укладывается в один вызов - формула F5 (torch)."""
         ref_sec = ref_frames * HOP_LENGTH / SAMPLE_RATE
         return max(40, int(len(ref_text.encode("utf-8")) / ref_sec
                            * (self.max_total_sec - ref_sec) * self.speed))
@@ -435,7 +476,8 @@ class F5MLXEngine(F5Engine):
             try:
                 waves.append(self._synth_one(audio, ref_frames, ref_text, part, speed_mul))
             except Exception as e:
-                print(f"[F5-MLX] пропущен кусок: {e}", file=sys.stderr)
+                from ..log import log_problem
+                log_problem("[F5-MLX] пропущен кусок", e)
         wave = _cross_fade([w for w in waves if len(w)], SAMPLE_RATE)
         if len(wave):
             wave = wave * out_gain
@@ -479,12 +521,12 @@ class F5MLXEngine(F5Engine):
         """Тот же расчёт, что F5TTS.sample(method="euler"), но экономнее.
 
         Отличия только в организации счёта, не в математике:
-          * условный и безусловный проходы CFG идут одним батчем (2, n, d) —
+          * условный и безусловный проходы CFG идут одним батчем (2, n, d) -
             вместо двух отдельных вызовов сети на каждом шаге;
           * эмбеддинг текста и rope считаются один раз на кусок, а не на каждом
             шаге (от шага они не зависят);
-          * не копится вся траектория — нужен только последний шаг;
-          * длительность — обычный int, поэтому не нужен патч mx.random.normal.
+          * не копится вся траектория - нужен только последний шаг;
+          * длительность - обычный int, поэтому не нужен патч mx.random.normal.
         """
         import mlx.core as mx
         d = self._f5.transformer

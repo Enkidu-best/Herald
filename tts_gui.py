@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Herald — окно приложения.
+"""Herald - окно приложения.
 
 Запуск: двойной щелчок по «Herald.app» (или по «Запустить.command», или
 `python tts_gui.py` из активированного .venv).
@@ -37,7 +37,10 @@ from core.assemble import FORMATS, DEFAULT_FORMAT, polish_wav_to_mp3, HD_FILTER
 from core.engines import get_engine, list_engines
 from core.engines.f5 import default_voices_dir
 from core.pipeline import (convert_book, preview_sample, estimate_book,
-                           ConvertOptions, Cancelled)
+                           ConvertOptions, Cancelled, resume_info, forget_progress,
+                           cleanup_stale_temp)
+from core import keepawake
+from core.log import log_problem, LOG_PATH
 from core.readers import ScannedPdfError, ReaderError
 from core.voicefx import VoiceFX, load as load_fx, save as save_fx
 
@@ -54,7 +57,7 @@ BOOK_EXT = (".txt", ".md", ".docx", ".epub", ".fb2", ".zip", ".pdf")
 # Готовые режимы вместо числа шагов: подписи с замерами на M4 (см. README).
 # RTF — секунды расчёта на секунду звука; по нему считаем прогноз времени.
 MODES: list[tuple[str, dict, float]] = [
-    ("Обычное — рекомендуется", {"steps": 7,  "schedule": "epss"},    0.80),
+    ("Обычное - рекомендуется", {"steps": 7,  "schedule": "epss"},    0.80),
     ("Быстрее",                 {"steps": 6,  "schedule": "epss"},    0.72),
     ("Точнее, вдвое дольше",    {"steps": 16, "schedule": "uniform"}, 1.70),
 ]
@@ -82,7 +85,7 @@ def _open_path(path: str):
 
 
 def _fmt_hms(sec: float) -> str:
-    """«1 ч 05 мин», «3 мин 56 с», «42 с» — с секундами, пока они заметны."""
+    """«1 ч 05 мин», «3 мин 56 с», «42 с» - с секундами, пока они заметны."""
     sec = int(max(0, sec))
     h, m, s = sec // 3600, (sec % 3600) // 60, sec % 60
     if h:
@@ -93,10 +96,21 @@ def _fmt_hms(sec: float) -> str:
 
 
 def _fmt_clock(sec: float) -> str:
-    """Живой таймер: «3 мин 07 с», а за час — «1 ч 05 мин 12 с»."""
+    """Живой таймер: «3 мин 07 с», а за час - «1 ч 05 мин 12 с»."""
     sec = int(max(0, sec))
     h, m, s = sec // 3600, (sec % 3600) // 60, sec % 60
     return f"{h} ч {m:02d} мин {s:02d} с" if h else f"{m} мин {s:02d} с"
+
+
+def _files(n: int) -> str:
+    """«1 файл», «3 файла», «12 файлов»."""
+    if n % 10 == 1 and n % 100 != 11:
+        w = "файл"
+    elif n % 10 in (2, 3, 4) and n % 100 not in (12, 13, 14):
+        w = "файла"
+    else:
+        w = "файлов"
+    return f"{n} {w}"
 
 
 def _card(parent, **kw) -> ctk.CTkFrame:
@@ -146,7 +160,10 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         self._build_settings()
         self._build_actions()
         self._build_progress()
+        self._resume = None                 # незаконченная озвучка этой книги
         self.refresh_voices()
+        # забытые временные папки прошлых запусков — в фоне, окно не ждёт
+        threading.Thread(target=cleanup_stale_temp, daemon=True).start()
 
     # --- части окна -------------------------------------------------------
     def _build_menu(self):
@@ -273,6 +290,11 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
             fg_color=ACCENT, hover_color=ACCENT_HOVER, text_color=INK,
             font=ctk.CTkFont(size=15, weight="bold"), command=self.do_start)
         self.start_btn.pack(side="left", fill="x", expand=True)
+        # видна только когда есть незаконченная озвучка этой книги
+        self.restart_btn = ctk.CTkButton(
+            row, text="Начать заново", width=130, height=44, corner_radius=10,
+            fg_color="transparent", hover_color=LINE, border_width=1,
+            border_color=LINE, text_color=DIM, command=self.do_restart)
         self.preview_btn = ctk.CTkButton(
             row, text="Послушать минуту", width=170, height=44, corner_radius=10,
             fg_color=CARD2, hover_color=LINE, text_color=TEXT,
@@ -364,6 +386,7 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         self.drop_label.configure(text="Перетащи книгу сюда")
         self.drop_hint.configure(text="txt · md · docx · epub · fb2 · pdf")
         self.est_label.configure(text="Книга не выбрана")
+        self._show_resume(None, None)
         self.progress.set(0)
         self.log.delete("1.0", "end")
         self.status.configure(text="Готово к работе")
@@ -399,9 +422,60 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
             return SINGLE_PART_MINUTES
         return float(self.len_var.get().split()[0])
 
+    def _check_resume(self):
+        """Есть ли незаконченная озвучка этой книги с текущими настройками."""
+        if not self.book_path or self.running:
+            return
+        path, voice = self.book_path, self.current_voice()
+        engine, kw, opts = self.engine_var.get(), self._eng_kwargs(), self._conv_options()
+        lang = getattr(self.est, "language", None)
+
+        # Поток только считает; окно трогаем из главного потока (опрос через
+        # after). Вызов after из фонового потока работает, лишь пока главный
+        # поток в этот момент обрабатывает события, — полагаться на это нельзя.
+        box: dict = {}
+
+        def work():
+            box["info"] = resume_info(path, engine=engine, eng_kwargs=kw, voice=voice,
+                                      options=opts, language=lang) if voice else None
+        th = threading.Thread(target=work, daemon=True)
+        th.start()
+
+        def poll():
+            if th.is_alive():
+                self.after(150, poll)
+            else:
+                self._show_resume(path, box.get("info"))
+        self.after(150, poll)
+
+    def _show_resume(self, path, info):
+        if path != self.book_path or (self.running and info):
+            return
+        self._resume = info
+        if info:
+            self.start_btn.configure(
+                text=f"Продолжить озвучку (готово {info['done']} из {info['total']})")
+            if not self.restart_btn.winfo_manager():
+                self.restart_btn.pack(side="left", padx=(8, 0), after=self.start_btn)
+        else:
+            self.start_btn.configure(text="Озвучить книгу")
+            self.restart_btn.pack_forget()
+
+    def do_restart(self):
+        """Стереть сохранённые части и считать книгу с начала."""
+        if self.running or not self.book_path:
+            return
+        try:
+            forget_progress(self.book_path)
+        except Exception as e:
+            log_problem("не удалось стереть сохранённые части", e)
+        self._show_resume(self.book_path, None)
+        self.do_start()
+
     def show_estimate(self):
         if not self.est:
             return
+        self._check_resume()
         e = self.est
         if self.engine_var.get() not in CLONING:
             rtf = 0.05
@@ -417,7 +491,7 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         lang = {"ru": "русская книга", "en": "английская книга"}.get(
             getattr(e, "language", "ru"), "")
         self.est_label.configure(
-            text=(f"{lang} · {'один файл' if self.single_file() else f'{e.chapters} файлов'}"
+            text=(f"{lang} · {'один файл' if self.single_file() else _files(e.chapters)}"
                   f" · {_fmt_hms(audio_sec)} звука · "
                   f"расчёт около {_fmt_hms(audio_sec * rtf)} · на диске ~{size}"))
 
@@ -439,7 +513,8 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
     def refresh_voices(self):
         try:
             self._voices = get_engine(self.engine_var.get()).list_voices()
-        except Exception:
+        except Exception as e:
+            log_problem("не удалось прочитать список голосов", e)
             self._voices = []
         book_lang = getattr(self.est, "language", None)
         # голоса нужного языка — наверх, чужие всё равно оставляем в списке
@@ -481,7 +556,7 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
             "Новый голос",
             "Сейчас нужно выбрать АУДИОФАЙЛ, где читает тот диктор, чьим голосом\n"
             "ты хочешь слушать книги. Подойдёт любая его аудиокнига целиком.\n\n"
-            "Дальше всё делается само — ровно так же, как был сделан готовый голос:\n"
+            "Дальше всё делается само - ровно так же, как был сделан готовый голос:\n"
             "  • программа слушает запись в нескольких местах, начиная с начала:\n"
             "    там диктор читает ровнее, а фон чище всего;\n"
             "  • выбирает отрывок 8–12 секунд с тихим фоном и беглой речью;\n"
@@ -521,7 +596,7 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         top = _card(win)
         top.pack(fill="x", padx=18, pady=(18, 8))
         _label(top, "Голоса", size=16, weight="bold").pack(fill="x", padx=16, pady=(14, 2))
-        _label(top, "Голос делается из любой записи нужного диктора — например,\n"
+        _label(top, "Голос делается из любой записи нужного диктора - например,\n"
                     "из его аудиокниги. Программа сама найдёт подходящий отрывок.",
                size=12, color=DIM, justify="left").pack(fill="x", padx=16, pady=(0, 10))
         # голоса — столбиком: в одну строку они не помещаются, а список растёт
@@ -560,10 +635,10 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
     }
 
     def show_voice_fx(self):
-        """Высота, бас и яркость выбранного голоса — со слуховой проверкой.
+        """Высота, бас и яркость выбранного голоса - со слуховой проверкой.
 
         Характер речи менять нельзя: интонация и манера приходят из образца.
-        А вот подправить голос как на пульте — можно, и слышно это сразу:
+        А вот подправить голос как на пульте - можно, и слышно это сразу:
         фраза синтезируется ОДИН раз, дальше ползунки меняют только обработку
         готового звука, а это уже сотые доли секунды.
         """
@@ -585,7 +660,7 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         _label(card, f"Голос «{vid}»", size=16, weight="bold").pack(
             fill="x", padx=18, pady=(16, 2))
         _label(card, "Настройки запоминаются для этого голоса и применяются\n"
-                     "при каждой озвучке. Интонацию и манеру так не поменять —\n"
+                     "при каждой озвучке. Интонацию и манеру так не поменять -\n"
                      "они приходят из образца.",
                size=12, color=DIM, justify="left").pack(fill="x", padx=18, pady=(0, 10))
 
@@ -700,7 +775,8 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
             return
         try:
             voices = get_engine("f5mlx").list_voices()
-        except Exception:
+        except Exception as e:
+            log_problem("не удалось прочитать список голосов", e)
             voices = []
         fxdir = default_voices_dir()
         lines = []
@@ -771,7 +847,7 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
                                else self.status.configure(text=text)))
 
     def _part_progress(self, k: int, m: int, fr: float):
-        text = f"Часть {k} из {m} — {int(fr * 100)}%"
+        text = f"Часть {k} из {m} - {int(fr * 100)}%"
         self.after(0, lambda: (self.part_progress.set(fr),
                                self.part_label.configure(text=text)))
 
@@ -786,14 +862,16 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         if self._pause_flag.is_set():                    # продолжить
             self._t0 += time.time() - self._paused_at    # пауза не в счёт
             self._pause_flag.clear()
+            keepawake.resume()
             self.pause_btn.configure(text="Пауза")
             self.status.configure(text="Продолжаю…")
         else:
             self._paused_at = time.time()
             self._pause_flag.set()
+            keepawake.pause()             # на паузе Mac может спать (пауза «на ночь»)
             self.pause_btn.configure(text="Продолжить")
             self.status.configure(
-                text="Пауза — доделываю текущий кусок и жду. Готовое на месте")
+                text="Пауза - доделываю текущий кусок и жду. Готовое на месте")
 
     def _logln(self, text: str):
         self.after(0, lambda: (self.log.insert("end", text + "\n"), self.log.see("end")))
@@ -803,7 +881,7 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
 
         Привязки ставим на ВНУТРЕННИЙ tkinter-виджет (box._textbox), а не на
         CTkTextbox: обёртка события клавиш до него не доносит, поэтому Cmd+C
-        по выделенному тексту не работал вообще. Плюс своё контекстное меню —
+        по выделенному тексту не работал вообще. Плюс своё контекстное меню -
         стандартного у Tk на macOS нет.
         """
         inner = getattr(box, "_textbox", box)
@@ -828,7 +906,7 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
             inner.bind(seq, popup)
 
     def copy_log(self, selection: bool = False):
-        """Положить отчёт в буфер обмена — его удобно прислать целиком."""
+        """Положить отчёт в буфер обмена - его удобно прислать целиком."""
         inner = getattr(self.log, "_textbox", self.log)
         try:
             text = (inner.get("sel.first", "sel.last") if selection
@@ -879,17 +957,19 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
                 if len(_a) / _sr < 3.0:
                     raise RuntimeError(
                         "синтез не дал звука (получилось меньше 3 секунд). "
-                        "Прежний пробник не тронут — смотри строки с ⚠︎ выше.")
+                        "Прежний пробник не тронут - смотри строки с ⚠︎ выше.")
                 ext = FORMATS.get(self.fmt_var.get(), FORMATS[DEFAULT_FORMAT])[0]
-                out_path = os.path.splitext(self.book_path)[0] + " — пробник" + ext
+                out_path = os.path.splitext(self.book_path)[0] + " - пробник" + ext
                 # та же полировка, что у глав: иначе пробник звучит иначе, чем книга
                 polish_wav_to_mp3(out, out_path, fmt=self.fmt_var.get())
+                import shutil as _sh
+                _sh.rmtree(os.path.dirname(out), ignore_errors=True)
                 self._logln(f"Звука {len(_a) / _sr:.0f} c, "
                             f"счёт {_fmt_hms(time.time() - self._t0)}")
                 self._logln(f"Пробник готов: {out_path}")
                 # сам файл не открываем: слушатель включит его, когда захочет
                 self.after(0, lambda: self._set_busy(
-                    False, "Пробник готов — файл рядом с книгой"))
+                    False, "Пробник готов - файл рядом с книгой"))
             except Exception as e:
                 self._fail(e)
         threading.Thread(target=work, daemon=True).start()
@@ -902,7 +982,7 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         e = self.est
         self._logln(f"{what}: {os.path.basename(self.book_path)}")
         if e is not None:
-            self._logln(f"  книга: {e.chapters} файлов, ~{_fmt_hms(e.audio_sec)} звука, "
+            self._logln(f"  книга: {_files(e.chapters)}, ~{_fmt_hms(e.audio_sec)} звука, "
                         f"язык {getattr(e, 'language', '?')}")
         self._logln(f"  голос: {vid}  ·  {ENGINE_SHORT.get(self.engine_var.get(), '')}")
         size = "одним файлом" if self.single_file() else f"файл по {self.len_var.get()}"
@@ -924,7 +1004,7 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
 
         def on_chapter(ci, title, mp3):
             self._logln(f"✓ {ci}: {os.path.basename(mp3) if mp3 else title}"
-                        f"{'  — можно слушать' if mp3 else ''}")
+                        f"{'  - можно слушать' if mp3 else ''}")
 
         def work():
             try:
@@ -942,15 +1022,17 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
                 self._logln(f"Готово. Звука {_fmt_hms(res.duration)}, "
                             f"счёт {_fmt_hms(took)} "
                             f"(на секунду звука {took / max(res.duration, 1):.2f} с)")
-                what = "один файл" if res.chapters == 1 else f"{res.chapters} файлов"
+                what = "один файл" if res.chapters == 1 else _files(res.chapters)
                 self.after(0, lambda: self._set_busy(
                     False, f"Готово: {what}, ~{mins} мин звука"))
+                self.after(0, self._check_resume)
                 if res.mp3_dir:
                     self._logln(f"Папка: {res.mp3_dir}")
                     self.after(0, lambda: _open_path(res.mp3_dir))
             except Cancelled:
                 self._logln("Остановлено. Готовые файлы остались на диске.")
-                self.after(0, lambda: self._set_busy(False, "Остановлено"))
+                self.after(0, lambda: (self._set_busy(False, "Остановлено"),
+                                       self._check_resume()))
             except ScannedPdfError as e:
                 self._fail(e, "PDF без текстового слоя (скан)")
             except ReaderError as e:
@@ -961,6 +1043,7 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
 
     def _fail(self, e, title="Ошибка"):
         traceback.print_exc()
+        log_problem(title, e, show=False)     # подробности — в журнал
         self.after(0, lambda: (self._set_busy(False, "Ошибка"),
                                messagebox.showerror(title, str(e))))
 
@@ -981,7 +1064,10 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
             while "\n" in self._buf:
                 line, self._buf = self._buf.split("\n", 1)
                 if line.strip() and not line.startswith("\r"):
-                    self.app._logln("⚠︎ " + line.strip())
+                    # «ℹ …» - справка (продолжение книги, выравнивание ударений),
+                    # всё остальное в stderr - предупреждение
+                    t = line.strip()
+                    self.app._logln(t[2:] if t.startswith("ℹ ") else "⚠︎ " + t)
 
         def flush(self):
             self.real.flush()

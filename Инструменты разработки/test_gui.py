@@ -93,7 +93,7 @@ def main() -> int:
               AssertionError("список голосов пуст")))
 
     print("книга:")
-    book = "Примеры текстов/Пример — проба пера.txt"
+    book = "Примеры текстов/Пример - проба пера.txt"
     check("выбор книги", lambda: app._set_book(book))
     wait(lambda: app.est is not None)        # оценка считается в фоне
     check("оценка посчиталась",
@@ -101,6 +101,39 @@ def main() -> int:
     check("язык книги определён",
           lambda: app.est.language in ("ru", "en") or (_ for _ in ()).throw(
               AssertionError(f"язык: {app.est.language}")))
+
+    def resume_button():
+        """Незаконченная озвучка с теми же настройками -> «Продолжить озвучку»."""
+        import json as _j
+        from core import pipeline as P
+        sd = os.path.join(P.output_dir_for(book), P.STATE_DIR)
+        os.makedirs(sd, exist_ok=True)
+        kw = dict(app._eng_kwargs(), language=app.est.language)
+        fp = P.settings_fingerprint(app.engine_var.get(), kw, app.current_voice(),
+                                    app._conv_options())
+        open(os.path.join(sd, "part0001.flac"), "wb").close()
+        _j.dump({"fingerprint": fp, "total": 3, "finished": False,
+                 "parts": {"1": {"flac": "part0001.flac"}}},
+                open(os.path.join(sd, P.STATE_FILE), "w"))
+        try:
+            app._check_resume()
+            wait(lambda: "Продолжить" in app.start_btn.cget("text"))
+            if "готово 1 из 3" not in app.start_btn.cget("text"):
+                raise AssertionError(app.start_btn.cget("text"))
+            if not app.restart_btn.winfo_manager():
+                raise AssertionError("нет кнопки «Начать заново»")
+            P.forget_progress(book)
+            app._check_resume()
+            wait(lambda: app.start_btn.cget("text") == "Озвучить книгу")
+            if app.restart_btn.winfo_manager():
+                raise AssertionError("«Начать заново» не спряталась")
+        finally:
+            P.forget_progress(book)
+            try:
+                os.rmdir(P.output_dir_for(book))   # папку создали только для теста
+            except OSError:
+                pass
+    check("кнопка «Продолжить озвучку» при незаконченной книге", resume_button)
     check("очистка книги", lambda: (app.clear_book(), app.update()))
 
     print("переключение настроек:")
@@ -247,7 +280,7 @@ def main() -> int:
     def part_shown():
         app._part_progress(2, 5, 0.5)
         app.update()
-        if app.part_label.cget("text") != "Часть 2 из 5 — 50%":
+        if app.part_label.cget("text") != "Часть 2 из 5 - 50%":
             raise AssertionError(app.part_label.cget("text"))
     check("прогресс текущей части", part_shown)
 

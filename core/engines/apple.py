@@ -89,8 +89,8 @@ class AppleEngine(TTSEngine):
             audio, _sr = sf.read(wav)
             return np.asarray(audio, dtype=np.float32).reshape(-1)
         except Exception as e:
-            import sys
-            print(f"[Apple] пропущен кусок: {e}", file=sys.stderr)
+            from ..log import log_problem
+            log_problem("[Apple] пропущен кусок", e)
             return np.zeros(0, dtype=np.float32)
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
