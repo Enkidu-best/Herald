@@ -1,10 +1,13 @@
-"""Движок синтеза на модели Silero (v4, русский).
+"""Движок синтеза на модели Silero (v5, русский) - «готовые голоса».
 
 Silero — быстрый и очень стабильный на длинном тексте движок. Работает на CPU,
 даёт ровный «дикторский» голос. Модель — один файл ~40 МБ, скачивается один раз
 и кэшируется; после этого всё офлайн.
 
-Голоса v4_ru: aidar (м), eugene (м), baya (ж), kseniya (ж), xenia (ж).
+Голоса v5_5_ru: aidar (м), eugene (м), baya (ж), kseniya (ж), xenia (ж).
+Это не клон: голоса готовые, зато быстрые - час звука за минуту на процессоре.
+Ударения ставит наш расстановщик (RUAccent + омографы от silero-stress).
+Лицензия Silero - CC BY-NC 4.0, только некоммерческое использование.
 """
 
 from __future__ import annotations
@@ -17,15 +20,15 @@ from .base import TTSEngine, Voice
 
 # Официальный адрес модели. Скачиваем сами (torch.hub ходит на GitHub, а он
 # в песочнице бывает недоступен через прокси — прямая ссылка надёжнее).
-MODEL_URL = "https://models.silero.ai/models/tts/ru/v4_ru.pt"
-MODEL_FILENAME = "v4_ru.pt"
+MODEL_URL = "https://models.silero.ai/models/tts/ru/v5_5_ru.pt"
+MODEL_FILENAME = "v5_5_ru.pt"
 
 VOICES = [
-    Voice("eugene", "Евгений (муж.)", "м"),
-    Voice("aidar", "Айдар (муж.)", "м"),
-    Voice("baya", "Бая (жен.)", "ж"),
-    Voice("kseniya", "Ксения (жен.)", "ж"),
-    Voice("xenia", "Ксения-2 (жен.)", "ж"),
+    Voice("aidar", "Айдар (муж.)", "м", "ru"),
+    Voice("eugene", "Евгений (муж.)", "м", "ru"),
+    Voice("baya", "Бая (жен.)", "ж", "ru"),
+    Voice("kseniya", "Ксения (жен.)", "ж", "ru"),
+    Voice("xenia", "Ксения-2 (жен.)", "ж", "ru"),
 ]
 
 

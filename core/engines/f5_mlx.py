@@ -244,13 +244,30 @@ def _chunk_by_bytes(text: str, max_bytes: int) -> list[str]:
     return chunks or [text.strip()]
 
 
+# Как обрезать хвост куска. «vad» (по умолчанию): конец речи по Silero VAD плюс
+# запас, но НЕ раньше прежнего среза по громкости - то есть звука оставляем
+# только больше, - и плавное затухание. «rms» - прежнее поведение (для замера).
+TAIL_MODE = "vad"
+TAIL_PAD_SEC = 0.12            # после конца речи по VAD
+FADE_OUT_SEC = 0.025           # затухание в конце куска: без него - щелчок
+FADE_IN_SEC = 0.005            # и короткое нарастание в начале
+
+
 def _trim_tail(wave: np.ndarray) -> np.ndarray:
-    """Срезать тишину в конце куска.
+    """Срезать тишину в конце куска - не задевая речь - и сгладить края.
 
     Модели даётся чуть больше времени, чем нужно (страховка от обрыва слова), и
     остаток она заполняет тишиной. Если её не убрать, каждый кусок тащит за
     собой лишний хвост: паузы разъезжаются, а книга становится длиннее без
     всякой пользы. Паузы всё равно ставит пайплайн - ровные и одинаковые.
+
+    Раньше конец искался по порогу громкости, и это давало две общие для всех
+    вариантов F5 беды, которые слышны на слух:
+      * тихое безударное окончание падало ниже порога и отрезалось вместе с
+        тишиной («как правил» вместо «как правило»);
+      * срез шёл без затухания: сигнал в точке среза не нулевой, дальше пауза из
+        нулей - ступенька, то есть щелчок «в конце фразы».
+    Теперь конец речи ищет Silero VAD, срез не раньше прежнего, а края сглажены.
     """
     if not len(wave):
         return wave
@@ -261,7 +278,24 @@ def _trim_tail(wave: np.ndarray) -> np.ndarray:
         if np.sqrt(np.mean(wave[i * win:(i + 1) * win] ** 2)) > TRIM_SILENCE_DB:
             last = i
     end = min(len(wave), (last + 1) * win + win * 4)   # оставляем 40 мс на затухание
-    return wave[:end]
+    if TAIL_MODE == "rms":
+        return wave[:end]
+    try:
+        from ..vad import speech_end
+        se = speech_end(wave, SAMPLE_RATE)
+        if se is not None:
+            end = max(end, min(len(wave), int((se + TAIL_PAD_SEC) * SAMPLE_RATE)))
+    except Exception as e:
+        from ..log import log_problem
+        log_problem("VAD недоступен, хвост режу по громкости", e, show=False)
+    out = wave[:end].copy()
+    k = min(len(out), int(FADE_OUT_SEC * SAMPLE_RATE))
+    if k > 1:
+        out[-k:] *= np.linspace(1.0, 0.0, k, dtype=np.float32) ** 2
+    k = min(len(out), int(FADE_IN_SEC * SAMPLE_RATE))
+    if k > 1:
+        out[:k] *= np.linspace(0.0, 1.0, k, dtype=np.float32)
+    return out
 
 
 def _cross_fade(waves: list[np.ndarray], sr: int) -> np.ndarray:
@@ -294,7 +328,7 @@ class F5MLXEngine(F5Engine):
     stress_format = "+"
 
     def __init__(self, voices_dir: str | None = None, model_name: str = HF_SRC_REPO,
-                 steps: int = 7, speed: float = 1.0, quant_bits: int | None = None,
+                 steps: int = 16, speed: float = 1.0, quant_bits: int | None = None,
                  max_total_sec: float = MAX_TOTAL_SEC, dtype: str = "float32",
                  schedule: str = "epss", language: str = "ru",
                  variant: str | None = None) -> None:
@@ -304,9 +338,10 @@ class F5MLXEngine(F5Engine):
         # словарь, знак «+» она прочитала бы как символ
         self.language = language if language in LANG_MODELS else "ru"
         self.stress_format = LANG_MODELS[self.language]["stress"]
-        # steps = число вызовов сети. По умолчанию 7 с расписанием EPSS: на целой
-        # главе это RTF 0,62 при 94,1% разборчивости против 1,28 и 94,5% у
-        # равномерных 16 шагов (эталон torch) — вдвое быстрее при той же речи.
+        # steps = число вызовов сети. По умолчанию 16 с расписанием EPSS (3.0):
+        # прежние 7 выбирались по разборчивости ASR (94,1% против 94,5%), но
+        # разборчивость - не естественность. В слепом прослушивании 7 шагов дали
+        # шум и металл, 16 - лучший голос на повествовании. Цена - вдвое дольше.
         self.steps = steps
         # quant_bits: 8 или 4 — сжатие весов DiT, ускоряет счёт (проверять слух/ASR)
         self.quant_bits = quant_bits

@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import os
+import re
 import random
 import shutil
 import subprocess
@@ -418,6 +419,47 @@ class F5Engine(TTSEngine):
                         "-ss", f"{start:.3f}", "-i", src, "-t", f"{dur:.3f}",
                         "-ac", "1", "-ar", "24000", dst], check=True)
 
+    # Текст образца должен быть настоящим текстом: F5 выравнивает образец по его
+    # расшифровке и по её длине подбирает темп. Образец Вячеслава был вырезан из
+    # бессвязных стихов, расшифровка вышла бессмыслицей («Бабаля, мальчик,
+    # трестень, губка…»), и клон с темпом страдали. Общее правило, без списков:
+    REF_MAX_OOV = 0.10          # доля слов вне словаря (3,2 млн форм RUAccent)
+    REF_MIN_LOGPROB = -0.6      # средняя уверенность Whisper по фразе
+    REF_MAX_COMPRESSION = 2.4   # повторы («ля-ля-ля») - признак галлюцинации
+    REF_MAX_LINE_CAPS = 0.12    # заглавные посреди фразы - строки стихов
+
+    def _ref_text_problem(self, text: str, conf: list) -> str | None:
+        """Почему фрагмент не годится в образец (или None, если годится)."""
+        import re as _re
+        words = _re.findall(r"[А-Яа-яЁё]+", text)
+        if len(words) < 5:
+            return None if not words else "мало слов"
+        try:
+            from ..stress import _get_accentizer
+            acc = _get_accentizer()
+        except Exception:
+            acc = None
+        if acc is not None:
+            known = lambda w: (w.lower() in acc.accents or w.lower() in acc.omographs  # noqa
+                               or w.lower().replace("ё", "е") in acc.accents)
+            long_ = [w for w in words if len(w) > 2]      # короткие - служебные
+            oov = sum(1 for w in long_ if not known(w)) / max(1, len(long_))
+            if oov > self.REF_MAX_OOV:
+                return f"слов вне словаря {oov:.0%}"
+        for lp, cr in conf:
+            if lp < self.REF_MIN_LOGPROB:
+                return f"Whisper не уверен ({lp:.2f})"
+            if cr > self.REF_MAX_COMPRESSION:
+                return "похоже на повторы"
+        # заглавная буква посреди предложения (после запятой или без знака) -
+        # так Whisper записывает строки стихов и перечисления-заголовки
+        toks = _re.findall(r"[.!?…]|[А-Яа-яЁё]+", text)
+        caps = sum(1 for prev, t in zip(toks, toks[1:])
+                   if t[:1].isupper() and prev not in ".!?…" and len(t) > 1)
+        if caps / len(words) > self.REF_MAX_LINE_CAPS:
+            return "похоже на стихи или перечисление"
+        return None
+
     def _pick_best_excerpt(self, audio_path: str) -> tuple[float, float, str]:
         """(начало, длительность, текст) самого подходящего куска записи.
 
@@ -455,6 +497,7 @@ class F5Engine(TTSEngine):
                       "заметно чище.", file=sys.stderr)
 
         best = None
+        rejected: dict = {}
         part = os.path.join(tempfile.gettempdir(), f"t2a_part_{os.getpid()}.wav")
         try:
             regions = self._promising_regions(scan, target, total)
@@ -466,8 +509,11 @@ class F5Engine(TTSEngine):
                 if r1 - r0 < MIN_REF_SECONDS:
                     continue
                 self._cut(audio_path, r0, r1 - r0, part)
+                self.seg_conf = {}
                 segs = [(g[0], g[1], g[2]) for g in self._transcribe_segments(part)
                         if (g[2] or "").strip()]
+                confs = [self.seg_conf.get((round(g[0], 2), round(g[1], 2)), (0.0, 1.0))
+                         for g in segs]
                 if not segs:
                     continue
                 y, sr = sf.read(part, dtype="float32")
@@ -489,9 +535,9 @@ class F5Engine(TTSEngine):
                         if t1 - t0 > REF_SECONDS:
                             break
                         if t1 - t0 >= MIN_REF_SECONDS:
-                            cands.append((t0, t1, " ".join(acc).strip()))
+                            cands.append((t0, t1, " ".join(acc).strip(), confs[i:j + 1]))
                 stride = max(1, len(cands) // 400)
-                for t0, t1, text in cands[::stride]:
+                for t0, t1, text, conf in cands[::stride]:
                     a = y[int(t0 * sr):int(t1 * sr)]
                     sec = len(a) / sr
                     if sec < MIN_REF_SECONDS:
@@ -524,8 +570,15 @@ class F5Engine(TTSEngine):
                                 + max(0.0, cand["tone"] - target["tone"] - 8.0) / 2.0
                                 + 200.0 * cand["clipped"])   # клиппинг — вон
                         score -= TEMBRE_W * dev + TEMBRE_CLEAN * dirt
+                    # негодный текст образца - фрагмент не берём, пока есть
+                    # хоть один годный (иначе берём лучший и предупреждаем)
+                    problem = self._ref_text_problem(text, conf)
+                    if problem:
+                        kind = re.sub(r"\s*\(?[-\d.,%]+\)?", "", problem).strip()
+                        rejected[kind] = rejected.get(kind, 0) + 1
+                        score -= 1000.0
                     if best is None or score > best[0]:
-                        best = (score, t0 + r0, sec, text, bps, rms, snr, cand)
+                        best = (score, t0 + r0, sec, text, bps, rms, snr, cand, problem)
         except Exception as e:
             print(f"[голос] отбор образца не удался ({e}), беру начало записи",
                   file=sys.stderr)
@@ -535,7 +588,13 @@ class F5Engine(TTSEngine):
 
         if best is None:                       # запись короткая или нераспознаваемая
             return 0.0, min(REF_SECONDS, total), self._transcribe_text(audio_path)
-        _sc, start, sec, text, bps, rms, snr, cand = best
+        _sc, start, sec, text, bps, rms, snr, cand, problem = best
+        if rejected:
+            print("ℹ [голос] отброшено фрагментов: " + ", ".join(
+                f"{k} - {v}" for k, v in rejected.items()), file=sys.stderr)
+        if problem:
+            print(f"[голос] ВНИМАНИЕ: годного фрагмента нет, взят лучший из негодных "
+                  f"({problem}). Лучше дать запись связной прозы.", file=sys.stderr)
         extra = ""
         if cand:
             extra = (f", яркость {cand['centroid']:.0f} Гц, воздух {cand['air']:.2f}%"
@@ -583,6 +642,10 @@ class F5Engine(TTSEngine):
             r = mlx_whisper.transcribe(wav_path, path_or_hf_repo=WHISPER_MLX,
                                        verbose=False)
             self.detected_language = r.get("language") or "ru"
+            # уверенность распознавания по фразам - для отбора образца
+            self.seg_conf = {(round(s["start"], 2), round(s["end"], 2)):
+                             (s.get("avg_logprob", 0.0), s.get("compression_ratio", 1.0))
+                             for s in r["segments"]}
             return [(s["start"], s["end"], s["text"]) for s in r["segments"]]
         except Exception as e:
             from ..log import log_problem
@@ -592,6 +655,9 @@ class F5Engine(TTSEngine):
             m = WhisperModel(WHISPER_FALLBACK, device="cpu", compute_type="int8")
             segs, info = m.transcribe(wav_path)
             self.detected_language = getattr(info, "language", None) or "ru"
+            segs = list(segs)
+            self.seg_conf = {(round(s.start, 2), round(s.end, 2)):
+                             (s.avg_logprob, s.compression_ratio) for s in segs}
             return [(s.start, s.end, s.text) for s in segs]
 
     def _transcribe_text(self, wav_path: str) -> str:

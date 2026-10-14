@@ -239,6 +239,14 @@ TAIL_QUIET = 0.45         # край тише этой доли от средн�
 # 1260 мс у large-v3-turbo. Плюс сравниваем слова НЕЧЁТКО: распознаватель имеет
 # право слегка переврать окончание, нам важно, что слово вообще прозвучало.
 _ASR_MODEL = "mlx-community/whisper-small-mlx"
+# Края кусков (этап 2 «3.0»). STRICT_EDGES: конец проверяется ВСЕГДА и строго -
+# последнее слово должно совпасть вместе с окончанием («правил» против
+# «правило» прежняя нечёткая проверка пропускала: схожесть 0,92). END_PUNCT:
+# кусок без знака препинания в конце получает точку - без неё F5 чаще
+# недоговаривает последнее слово. False в обоих - прежнее поведение (для замера).
+STRICT_EDGES = True
+END_PUNCT = True
+_END_MARKS = ".!?…;:,»\")—-"
 _WORD_SIMILAR = 0.75
 _asr_failed = False
 
@@ -275,6 +283,18 @@ def _sounds_like(want: str, heard: list[str]) -> bool:
     import difflib
     return any(difflib.SequenceMatcher(None, want, w).ratio() >= _WORD_SIMILAR
                for w in heard)
+
+
+def _ends_like(want: str, heard: list[str]) -> bool:
+    """Прозвучало ли последнее слово ЦЕЛИКОМ: похоже и с тем же окончанием."""
+    import difflib
+    for h in heard[-2:]:
+        if h == want:
+            return True
+        if (difflib.SequenceMatcher(None, want, h).ratio() >= _WORD_SIMILAR
+                and h[-2:] == want[-2:]):
+            return True
+    return False
 
 
 def _edges_ok(audio: np.ndarray, sr: int, text: str, head_only: bool = False,
@@ -315,7 +335,9 @@ def _edges_ok(audio: np.ndarray, sr: int, text: str, head_only: bool = False,
         if not head_only and len(want[-1]) >= 4:
             edge = int(min(len(audio) / sr, 4.0) * sr)
             got = heard(audio[-edge:])
-            if got and not _sounds_like(want[-1], got[-2:]):
+            ok = (_ends_like(want[-1], got) if STRICT_EDGES
+                  else _sounds_like(want[-1], got[-2:]))
+            if got and not ok:
                 return False
         return True
     except Exception as e:
@@ -347,14 +369,17 @@ def _synth_chunks(eng: TTSEngine, voice: str, chunks, sr: int,
         # проверяем ПЕРЕД куском: один кусок считается секунды, ждать не придётся
         if should_stop is not None and should_stop():
             raise Cancelled()
+        if END_PUNCT and text.strip() and text.rstrip()[-1] not in _END_MARKS:
+            text = text.rstrip() + "."
         audio = eng.synth_chunk(text, voice, speed_mul=mul)
         for _try in range(TAIL_RETRIES):
             if not len(audio):
                 break
-            # конец проверяем только при подозрении (там громкость выдаёт сбой),
-            # начало — всегда, иначе пропажу первого слова не заметить
-            if _edges_ok(audio, sr, text, lang=lang,
-                         head_only=not _edges_suspicious(audio, sr)):
+            # Начало проверяем всегда. Конец - всегда в строгом режиме (по
+            # громкости съеденное окончание не видно: звук есть, слова нет),
+            # в прежнем - только при подозрительно тихом крае.
+            head_only = False if STRICT_EDGES else not _edges_suspicious(audio, sr)
+            if _edges_ok(audio, sr, text, lang=lang, head_only=head_only):
                 break
             audio = eng.synth_chunk(text, voice, speed_mul=mul)
         if len(audio):

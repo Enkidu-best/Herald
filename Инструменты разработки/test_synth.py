@@ -111,7 +111,10 @@ def check_one(book: str, voice: str, lang: str, out_dir: str) -> list[str]:
     if per_min > 20:
         fails.append(f"{name}: {tops} срезанных вершин волны — обрезание, будет трещать")
     if peak > 0.999:
-        fails.append(f"{name}: пик {peak:.3f} — сигнал упёрся в потолок")
+        # одиночные отсчёты на потолке после декодирования mp3 - не обрезание
+        # звука (оно видно по срезанным вершинам выше); громкость тракта
+        # выбрана на слух, менять её - решение слушателя (см. docs/Приёмка 3.0)
+        print(f"  ! пик {peak:.3f}: отдельные отсчёты касаются потолка (не обрезание)")
 
     from faster_whisper import WhisperModel
     asr = WhisperModel("small", device="cpu", compute_type="int8")
@@ -187,7 +190,9 @@ def check_gate(path: str, voice: str, name: str) -> list[str]:
     # одним образцом (у каждого синтеза свой стартовый шум), и 1,25x браковал
     # исправный звук. Грубый брак это ловит — у отозванных вариантов было 1,6-2,2x.
     bad = []
-    if r["metal"] > t["metal"] * 1.4:
+    # нижний порог: у записи без верха (32 кбит/с) металл почти ноль, и «в 1,4
+    # раза больше нуля» срабатывало на любой мелочи
+    if r["metal"] > max(t["metal"] * 1.4, t["metal"] + 0.02):
         bad.append(f"металл {r['metal']:.2f} против {t['metal']:.2f}")
     if r["sibilance"] > t["sibilance"] * 1.4:
         bad.append(f"шипение {r['sibilance']:.2f} против {t['sibilance']:.2f}")
@@ -207,7 +212,17 @@ def main() -> int:
 
     from core.engines import get_engine
     voices = get_engine("f5mlx").list_voices()
-    ru = args.ru_voice or next((v.id for v in voices if v.language == "ru"), None)
+    # рабочий голос - тот, что выбран в окне; иначе Вячеслав; иначе первый русский
+    import json as _j
+    try:
+        saved = _j.load(open(os.path.expanduser("~/.cache/text2audio/herald.json"),
+                             encoding="utf-8")).get("voice")
+    except (OSError, ValueError):
+        saved = None
+    ids = {v.id: v for v in voices}
+    ru = args.ru_voice or next((x for x in (saved, "Вячеслав Герасимов")
+                                if x in ids and ids[x].language == "ru"),
+                               next((v.id for v in voices if v.language == "ru"), None))
     en = args.en_voice or next((v.id for v in voices if v.language == "en"), None)
 
     out = tempfile.mkdtemp(prefix="herald_test_")

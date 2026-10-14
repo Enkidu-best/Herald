@@ -124,7 +124,7 @@ def add_stress(text: str) -> str:
     if acc is None:
         return text
     try:
-        return acc.process_all(text)
+        return _fix_dialog_dash(acc.process_all(text))
     except Exception as e:
         # RUAccent может спотыкаться на отдельных фрагментах - не роняем
         # начитку, но и молча не глотаем: фраза без ударений звучит заметно
@@ -142,7 +142,17 @@ def add_stress(text: str) -> str:
                     log_problem(f"фраза осталась без ударений: «{part[:60]}»", e2)
         if lost:
             log_problem(f"без ударений осталось фраз: {lost}", None, show=True)
-        return " ".join(out)
+        return _fix_dialog_dash(" ".join(out))
+
+
+def _fix_dialog_dash(text: str) -> str:
+    """Вернуть пробел после тире в начале реплики.
+
+    RUAccent склеивает «- Ты правда…» в «-Ты правда…»: тире прилипает к слову, и
+    модель синтеза видит уже не реплику, а слово с дефисом. Слова с дефиса не
+    начинаются, поэтому правило общее и безопасное.
+    """
+    return re.sub(r"(^|\n)([ \t]*)-(?=[^\s\-])", r"\1\2- ", text)
 
 
 # --- silero-stress: омографы --------------------------------------------

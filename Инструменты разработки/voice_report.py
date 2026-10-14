@@ -189,7 +189,7 @@ def main():
         # порог лежал внутри этого разброса и браковал исправный звук. Грубый
         # брак виден всё равно: у отозванных вариантов было 1,6-2,2x.
         bad=[r["_name"] for r in rows[1:]
-             if r["metal"]>t["metal"]*1.4 or r["sibilance"]>t["sibilance"]*1.4
+             if r["metal"]>max(t["metal"]*1.4, t["metal"]+0.02) or r["sibilance"]>t["sibilance"]*1.4
              or r["crackle"]>t["crackle"]*2.0 or r["rough"]>t["rough"]*1.4]
         if bad: print("НЕ ПРОШЛИ (шип/металл/треск выше диктора):", ", ".join(bad)); return 1
     return 0

@@ -242,6 +242,45 @@ _ABBR_EN = [
 ]
 
 
+_RNZ = None
+_RNZ_FAILED = False
+_END_PUNCT = ".!?…:;,»\")"
+
+
+def _ru_normalizr(text: str) -> str:
+    """ru-normalizr по абзацам; при сбое или без пакета - текст как есть.
+
+    По абзацам - потому что ru-normalizr ставит точку в конце абзаца без знака,
+    а заголовок главы («Глава первая», «Пролог») наш конвейер узнаёт как раз по
+    отсутствию точки. Если в исходном абзаце знака не было, добавленная точка
+    снимается.
+    """
+    global _RNZ, _RNZ_FAILED
+    if _RNZ_FAILED:
+        return text
+    try:
+        if _RNZ is None:
+            import ru_normalizr as R
+            opts = R.NormalizeOptions(enable_letter_abbreviation_expansion=True,
+                                      enable_initials_expansion=True)
+            _RNZ = lambda t: R.normalize(t, opts)  # noqa: E731
+        parts = re.split(r"(\n\s*\n)", text)
+        out = []
+        for p in parts:
+            if not p.strip() or not re.search(r"\w", p):
+                out.append(p)
+                continue
+            n = _RNZ(p)
+            if p.rstrip() and p.rstrip()[-1] not in _END_PUNCT and n.endswith("."):
+                n = n[:-1]
+            out.append(n)
+        return "".join(out)
+    except Exception as e:
+        _RNZ_FAILED = True
+        _log_once("ru-normalizr недоступен, числа разбираю своим способом", e)
+        return text
+
+
 def normalize_text(text: str, expand_numbers: bool = True,
                    language: str | None = None) -> str:
     """Главная функция: сырой фрагмент -> текст, готовый к синтезу."""
@@ -252,6 +291,13 @@ def normalize_text(text: str, expand_numbers: bool = True,
         return _normalize_en(text, expand_numbers)
     text = _strip_control(text)
     text = _dehyphenate(text)
+    if expand_numbers:
+        # Сначала - ru-normalizr: числа с согласованием падежа и рода, века,
+        # единицы, аббревиатуры по буквам, инициалы. На проверочном наборе из
+        # 50 предложений: 47 верных против 22 у нашего прежнего разбора (см.
+        # «Инструменты разработки/bench_normalize.py»). Наш разбор ниже остаётся
+        # запасным и доделывает то, что ru-normalizr не тронул.
+        text = _ru_normalizr(text)
 
     for a, b in _SYMBOLS:
         text = text.replace(a, b)
