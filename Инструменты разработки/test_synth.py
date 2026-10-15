@@ -50,7 +50,7 @@ def check_one(book: str, voice: str, lang: str, out_dir: str) -> list[str]:
     t0 = time.time()
     res = convert_book(book, engine="f5mlx", eng_kwargs={},
                        voice=voice, out_dir=out_dir,
-                       options=ConvertOptions(minutes_per_file=15.0),
+                       options=ConvertOptions(minutes_per_file=15.0, use_cache=False),
                        progress=lambda f, m: None, on_chapter=lambda *a: None)
     took = time.time() - t0
 

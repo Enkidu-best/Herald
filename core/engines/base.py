@@ -61,6 +61,20 @@ class TTSEngine:
         """
         raise NotImplementedError
 
+    def synth_batch(self, texts: list[str], voice: str,
+                    speed_muls: list[float] | None = None,
+                    headroom_muls: list[float] | None = None) -> list[np.ndarray]:
+        """Несколько кусков разом. По умолчанию - просто по одному.
+
+        F5 переопределяет: считает куски одним проходом сети.
+        """
+        speed_muls = speed_muls or [1.0] * len(texts)
+        return [self.synth_chunk(t, voice, speed_mul=m) for t, m in zip(texts, speed_muls)]
+
+    def cache_key(self) -> str:
+        """Всё, что меняет звук куска, кроме текста и голоса (для кэша синтеза)."""
+        return self.name
+
     # Удобный признак «в тексте есть что произносить».
     @staticmethod
     def has_speech(text: str) -> bool:

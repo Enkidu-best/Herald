@@ -15,6 +15,7 @@ import re
 import shutil
 import sys
 import tempfile
+import time
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
@@ -62,13 +63,18 @@ class ConvertOptions:
     audio_format: str = DEFAULT_FORMAT
     expand_numbers: bool = True
     use_stress: bool = True
-    gap_sec: float = 0.35
-    para_gap_sec: float = 0.6
+    # Паузы (доработки 3.0, настраиваются в окне): после предложения, после
+    # абзаца и между репликами диалога - эта заметно длиннее, на слух это
+    # смена говорящего
+    gap_sec: float = 0.4
+    para_gap_sec: float = 0.8
+    dialog_gap_sec: float = 1.1
     workers: int = 1                 # параллельные процессы для синтеза глав
     # Вся книга одним файлом. Синтез всё равно идёт по частям — так первые части
     # можно слушать сразу, а после «Стопа» готовое не пропадает; в конце части
     # склеиваются в один файл, а по отдельности удаляются.
     single_file: bool = False
+    use_cache: bool = True           # кэш синтеза по хешу текста (core/synthcache)
 
 
 @dataclass
@@ -95,23 +101,46 @@ def _prepare_text(text: str, stress_fmt: str | None, expand_numbers: bool,
     return t
 
 
-def _chunk_sentences(text: str, max_chars: int) -> list[str]:
-    chunks, cur = [], ""
+def _split_sentences(text: str, max_chars: int) -> list[tuple[str, bool]]:
+    """Предложения абзаца: [(текст, конец_предложения)].
+
+    Слишком длинное предложение режется по запятым и тире; у его внутренних
+    кусков второй признак False - это не конец предложения, пауза там короче.
+    """
+    out: list[tuple[str, bool]] = []
     for sent in sentenize(text):
         if len(sent) > max_chars:
-            for piece in _hard_split(sent, max_chars):
-                if cur:
-                    chunks.append(cur); cur = ""
-                chunks.append(piece)
-            continue
-        if len(cur) + len(sent) + 1 <= max_chars:
-            cur = (cur + " " + sent).strip()
+            pieces = _hard_split(sent, max_chars)
+            out += [(p, i == len(pieces) - 1) for i, p in enumerate(pieces)]
+        else:
+            out.append((sent, True))
+    return out
+
+
+def _chunk_sentences(text: str, max_chars: int) -> list[str]:
+    return [c for c, _m, _e in _pack_sentences(text, max_chars, 0.0)]
+
+
+def _pack_sentences(text: str, max_chars: int, gap: float):
+    """Предложения абзаца -> куски до max_chars: [(текст, отметки, конец_предл.)].
+
+    Отметки - ((позиция в тексте, пауза), …): где внутри куска кончается
+    предложение и какой там должна быть пауза. Модель читает кусок одним
+    вызовом и паузы ставит сама; потом конвейер доводит их до заданных
+    (_fit_inner_pauses).
+    """
+    chunks, cur, marks, cur_end = [], "", [], True
+    for sent, is_end in _split_sentences(text, max_chars):
+        if cur and len(cur) + len(sent) + 1 <= max_chars:
+            marks.append((len(cur), gap if cur_end else CLAUSE_GAP))
+            cur = cur + " " + sent
         else:
             if cur:
-                chunks.append(cur)
-            cur = sent
+                chunks.append((cur, tuple(marks), cur_end))
+            cur, marks = sent, []
+        cur_end = is_end
     if cur:
-        chunks.append(cur)
+        chunks.append((cur, tuple(marks), cur_end))
     return chunks
 
 
@@ -143,6 +172,8 @@ HEADING_SPEED_MUL = 0.88      # заголовок читается медлен
 # Заголовок, склеенный с первой фразой: замедляем мягче, иначе вместе с
 # названием главы растягивается и всё первое предложение.
 HEADING_MERGED_MUL = 0.94
+# Пауза внутри длинного предложения, разрезанного по запятой (не настраивается)
+CLAUSE_GAP = 0.25
 
 
 def _is_heading(p: str) -> bool:
@@ -151,21 +182,30 @@ def _is_heading(p: str) -> bool:
             and not p[0].islower())
 
 
-def _chunk_paragraphs(text: str, max_chars: int, gap: float,
-                      para_gap: float) -> list[tuple[str, float, float]]:
-    """[(кусок текста, пауза после него)]. Между абзацами пауза длиннее.
+def _is_replica(p: str) -> bool:
+    """Абзац - реплика диалога: начинается с тире («— Кто здесь?»)."""
+    p = p.lstrip()
+    return p[:1] in "—–" or p.startswith("- ")
+
+
+def _chunk_paragraphs(text: str, max_chars: int, gap: float, para_gap: float,
+                      dialog_gap: float | None = None):
+    """[(кусок текста, пауза после, множитель темпа, отметки пауз внутри)].
+
+    Три разные паузы (доработки 3.0): после предложения - gap, после абзаца -
+    para_gap, между репликами диалога - dialog_gap (по умолчанию заметно
+    длиннее: на слух это смена говорящего). Реплика - абзац, начинающийся с
+    тире; пауза «между репликами» - когда реплика идёт за репликой.
 
     Раньше вся глава резалась на куски одной лентой и между ними всегда стояла
-    одна и та же пауза 0,35 с. На слух это слипалось: заголовок переходил в
-    первый абзац без остановки, а смена абзаца ничем не отличалась от середины
-    предложения. Теперь конец абзаца звучит как конец абзаца.
+    одна и та же пауза 0,35 с, а внутри склеенных кусков пауз не было вовсе.
     """
-    out: list[tuple[str, float, float]] = []
+    if dialog_gap is None:
+        dialog_gap = para_gap
+    paras = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
+    out: list[tuple] = []
     head = ""                      # заголовок ждёт первую фразу главы
-    for para in re.split(r"\n\s*\n", text):
-        para = para.strip()
-        if not para:
-            continue
+    for pi, para in enumerate(paras):
         # Заголовок отправляем в модель ВМЕСТЕ с первым предложением, одним
         # вызовом. Отдельным куском он выходил ненадёжно сразу по двум причинам:
         # кусок короткий (модели не за что зацепиться) и первое слово в куске у
@@ -174,27 +214,34 @@ def _chunk_paragraphs(text: str, max_chars: int, gap: float,
         if _is_heading(para):
             head = para if para[-1] in ".!?…" else para + "."
             continue
-        parts = _chunk_sentences(para, max_chars)
-        muls = [1.0] * len(parts)
+        nxt = paras[pi + 1] if pi + 1 < len(paras) else ""
+        end_gap = dialog_gap if (_is_replica(para) and nxt and _is_replica(nxt)) else para_gap
+        parts = _pack_sentences(para, max_chars, gap)
+        items = []
+        for i, (c, marks, is_end) in enumerate(parts):
+            last = i == len(parts) - 1
+            items.append([c, end_gap if last else (gap if is_end else CLAUSE_GAP), 1.0, marks])
         if head:
-            if len(head) + 1 + len(parts[0]) <= max_chars:
-                parts[0] = head + " " + parts[0]
-                muls[0] = HEADING_MERGED_MUL
-            else:                  # первая фраза сама длинная — заголовок отдельно
-                out.append((head, para_gap, HEADING_SPEED_MUL))
+            first = items[0]
+            if len(head) + 1 + len(first[0]) <= max_chars:
+                shift = len(head) + 1
+                first[3] = ((len(head), para_gap),) + tuple((p + shift, g) for p, g in first[3])
+                first[0] = head + " " + first[0]
+                first[2] = HEADING_MERGED_MUL
+            else:                  # первая фраза сама длинная - заголовок отдельно
+                out.append((head, para_gap, HEADING_SPEED_MUL, ()))
             head = ""
-        for i, c in enumerate(parts):
-            out.append((c, gap if i < len(parts) - 1 else para_gap, muls[i]))
+        out += [tuple(it) for it in items]
     if head:                       # глава из одного заголовка
-        out.append((head, para_gap, HEADING_SPEED_MUL))
+        out.append((head, para_gap, HEADING_SPEED_MUL, ()))
     return _merge_short(out, max_chars)
 
 
 # Куски меньше этой доли от максимума склеиваем со следующими. Причина в
 # арифметике: на каждый вызов модель заново прогоняет весь образец (около 10 с),
 # поэтому кусок на 95 символов стоит почти столько же, сколько на 250, а звука
-# даёт втрое меньше. Замерено на книге: куски по 95 символов — синтез 162 с,
-# по 200+ — около 110 с при том же объёме звука.
+# даёт втрое меньше. Замерено на книге: куски по 95 символов - синтез 162 с,
+# по 200+ - около 110 с при том же объёме звука.
 MERGE_UNDER_FRACTION = 0.95
 MIN_CHUNK_CHARS = 45
 # Заголовок короче этого отдельным куском не оставляем: на 14 символах модели
@@ -203,25 +250,29 @@ MIN_HEADING_CHARS = 25
 
 
 def _merge_short(items, max_chars: int):
-    """Склеить куски короче MIN_CHUNK_CHARS со следующим.
+    """Склеить короткие куски со следующими.
 
     На огрызках вроде «Глава 5.» или «Открывая пустыню» F5 ведёт себя плохо:
     материала мало, и модель то глотает слово целиком, то мажет окончание.
-    Пауза между склеенными кусками сохраняется - просто она теперь внутри
-    одного вызова, и модель произносит их как одну фразу с остановкой.
+    Пауза между склеенными кусками не теряется: она становится отметкой внутри
+    куска, и конвейер потом доводит её до заданной (_fit_inner_pauses).
     """
-    out: list[tuple[str, float, float]] = []
+    out: list[tuple] = []
     limit = int(max_chars * MERGE_UNDER_FRACTION)
-    for text, gap, mul in items:
+    for it in items:
+        text, gap, mul = it[0], it[1], it[2]
+        marks = tuple(it[3]) if len(it) > 3 else ()
         prev_is_heading = out and out[-1][2] != 1.0
         if (out and not prev_is_heading and mul == 1.0
                 and len(out[-1][0]) < limit
                 and len(out[-1][0]) + len(text) + 2 <= max_chars):
-            prev, _g, pm = out[-1]
+            prev, pgap, pm, pmarks = out[-1]
             sep = " " if prev.endswith((".", "!", "?", "…", ",", ":", ";")) else ". "
-            out[-1] = (prev + sep + text, gap, pm)
+            shift = len(prev) + len(sep)
+            out[-1] = (prev + sep + text, gap, pm,
+                       pmarks + ((len(prev), pgap),) + tuple((p + shift, g) for p, g in marks))
         else:
-            out.append((text, gap, mul))
+            out.append((text, gap, mul, marks))
     return out
 
 
@@ -229,53 +280,39 @@ def _merge_short(items, max_chars: int):
 # F5 иногда мажет у самых границ куска: то последнее слово теряет окончание
 # («ветер» -> «веть»), то пропадает первое («Море к вечеру стихло» -> «стихло»).
 # Каждый синтез стартует со своего случайного шума, поэтому достаточно
-# переспросить — со второй попытки кусок обычно выходит чистым. Проверяем
-# ТОЛЬКО крайние слова: распознавание всего куска стоило бы дороже синтеза.
+# переспросить - со второй попытки кусок обычно выходит чистым. Повтор идёт с
+# бо́льшим запасом длительности (HEADROOM_STEPS): если модели не хватило
+# времени договорить, второй раз его хватит.
 TAIL_RETRIES = 2
-TAIL_QUIET = 0.45         # край тише этой доли от средней громкости — подозрительно
+HEADROOM_STEPS = (1.0, 1.15, 1.3)
 # Модель для проверки краёв. base (130 мс) оказалась слишком слабой: она врала
 # на краях («глова» вместо «глава», «гакма» вместо «как море»), и половина
-# кусков пересинтезировалась впустую. small — 310 мс и уже не путается, против
-# 1260 мс у large-v3-turbo. Плюс сравниваем слова НЕЧЁТКО: распознаватель имеет
-# право слегка переврать окончание, нам важно, что слово вообще прозвучало.
+# кусков пересинтезировалась впустую. small - 310 мс и уже не путается, против
+# 1260 мс у large-v3-turbo. Сравниваем слова строго на конце (окончание должно
+# совпасть: «правил» против «правило» - брак) и нечётко в начале.
 _ASR_MODEL = "mlx-community/whisper-small-mlx"
-# Края кусков (этап 2 «3.0»). STRICT_EDGES: конец проверяется ВСЕГДА и строго -
-# последнее слово должно совпасть вместе с окончанием («правил» против
-# «правило» прежняя нечёткая проверка пропускала: схожесть 0,92). END_PUNCT:
-# кусок без знака препинания в конце получает точку - без неё F5 чаще
-# недоговаривает последнее слово. False в обоих - прежнее поведение (для замера).
-STRICT_EDGES = True
+# END_PUNCT: кусок без знака препинания в конце получает точку - без неё F5
+# чаще недоговаривает последнее слово. False - прежнее поведение (для замера).
 END_PUNCT = True
 _END_MARKS = ".!?…;:,»\")—-"
 _WORD_SIMILAR = 0.75
 _asr_failed = False
-
-
-def _edges_suspicious(audio: np.ndarray, sr: int) -> bool:
-    """Дешёвый предфильтр: смазанный край звучит тише обычного.
-
-    Распознавание стоит около пятой части синтеза, а портится один кусок из
-    десяти. Поэтому сначала смотрим на громкость первой и последней четверти
-    секунды и зовём распознавание, только если где-то подозрительно тихо.
-    """
-    n = int(0.25 * sr)
-    if len(audio) < sr // 2:
-        return True
-    body = float(np.sqrt(np.mean(audio ** 2)))
-    if body <= 0:
-        return True
-    head = float(np.sqrt(np.mean(audio[:n] ** 2))) / body
-    tail = float(np.sqrt(np.mean(audio[-n:] ** 2))) / body
-    return head < TAIL_QUIET or tail < TAIL_QUIET
-
-
-def _last_word(s: str) -> str:
-    words = re.sub(r"[^\w ]", " ", s.lower().replace("+", "").replace("ё", "е")).split()
-    return words[-1] if words else ""
+# Сколько кусков считать за один проход сети (см. F5MLXEngine.synth_batch).
+# Замер на M4 (docs/Приёмка 3.1, «Скорость»), 12 кусков главы без переозвучек:
+# по одному - RTF 1,80, пачкой по 2 - 1,97 (медленнее: видеоядро и так занято,
+# а добивка до длинного куска - лишний счёт). Поэтому по одному; пачки
+# оставлены рабочими (результат совпадает до бита, test_speed) на случай
+# другого железа.
+BATCH_SIZE = 1
 
 
 def _words(s: str) -> list[str]:
     return re.sub(r"[^\w ]", " ", s.lower().replace("+", "").replace("ё", "е")).split()
+
+
+def _last_word(s: str) -> str:
+    w = _words(s)
+    return w[-1] if w else ""
 
 
 def _sounds_like(want: str, heard: list[str]) -> bool:
@@ -286,108 +323,401 @@ def _sounds_like(want: str, heard: list[str]) -> bool:
 
 
 def _ends_like(want: str, heard: list[str]) -> bool:
-    """Прозвучало ли последнее слово ЦЕЛИКОМ: похоже и с тем же окончанием."""
+    """Прозвучало ли последнее слово ЦЕЛИКОМ - сверяем его КОНЕЦ (3.1).
+
+    Сравнивать слово целиком мало: распознаватель по смыслу «дописывает»
+    недоговорённое («интри» -> «интриг»), и схожесть выходит высокой. Поэтому
+    требуем совпадения последних трёх букв (двух у слов короче пяти) - там и
+    живут съеденные глухие «г», «т», «ть». Смотрим два последних услышанных
+    слова: распознаватель иногда добавляет лишнее в конце.
+    """
     import difflib
+    k = 3 if len(want) >= 5 else 2
     for h in heard[-2:]:
         if h == want:
             return True
-        if (difflib.SequenceMatcher(None, want, h).ratio() >= _WORD_SIMILAR
-                and h[-2:] == want[-2:]):
+        if (h[-k:] == want[-k:]
+                and difflib.SequenceMatcher(None, want, h).ratio() >= 0.6):
             return True
     return False
 
 
-def _edges_ok(audio: np.ndarray, sr: int, text: str, head_only: bool = False,
-              lang: str = "ru") -> bool:
-    """Слышны ли первое и последнее слова куска - те самые, что в тексте."""
+def _with_end_punct(text: str) -> str:
+    if END_PUNCT and text.strip() and text.rstrip()[-1] not in _END_MARKS:
+        return text.rstrip() + "."
+    return text
+
+
+def _listen(audio: np.ndarray, sr: int, lang: str = "ru") -> list[tuple] | None:
+    """Распознать кусок целиком: [(слово, начало с, конец с)] или None.
+
+    Одно распознавание на кусок даёт сразу и проверку краёв, и места пауз
+    между предложениями (по меткам времени слов).
+    """
     global _asr_failed
-    if _asr_failed or len(audio) < sr:
-        return True
-    want = _words(text)
-    if not want:
-        return True
+    if _asr_failed or len(audio) < sr // 2:
+        return None
+    se = None
+    try:
+        # хвостовую тишину не даём: на ней Whisper сочиняет («продолжение
+        # следует») - и проверка последнего слова видит чужое слово
+        from .vad import speech_end
+        se = speech_end(audio, sr)
+        if se is not None:
+            audio = audio[:min(len(audio), int((se + 0.2) * sr))]
+    except Exception:
+        se = None                           # без VAD - распознаём целиком
     try:
         import contextlib
         import io
         import tempfile as _tf
         import soundfile as _sf
         import mlx_whisper
-
-        def heard(chunk):
-            with _tf.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-                _sf.write(f.name, chunk, sr)
-                # язык передаём явно: иначе whisper определяет его сам, и это
-                # ровно удваивает время проверки (2,4 с против 1,3 с)
-                with contextlib.redirect_stdout(io.StringIO()):
-                    r = mlx_whisper.transcribe(f.name, path_or_hf_repo=_ASR_MODEL,
-                                               language=lang, verbose=False)
+        with _tf.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+            _sf.write(f.name, audio, sr)
+        try:
+            # язык передаём явно: иначе whisper определяет его сам, и это
+            # ровно удваивает время проверки
+            with contextlib.redirect_stdout(io.StringIO()):
+                r = mlx_whisper.transcribe(f.name, path_or_hf_repo=_ASR_MODEL,
+                                           language=lang, verbose=False,
+                                           word_timestamps=True,
+                                           condition_on_previous_text=False)
+        finally:
             os.unlink(f.name)
-            return _words(r["text"])
-
-        # слова короче четырёх букв распознаватель путает сам — их не проверяем
-        if len(want[0]) >= 4:
-            # Начало слушаем коротко (2 с) и ВСЕГДА: пропажу первого слова по
-            # громкости не поймать — звук на месте, просто произносится уже
-            # следующее слово. Двух секунд хватает, и это дёшево.
-            got = heard(audio[:int(min(len(audio) / sr, 2.0) * sr)])
-            if got and not _sounds_like(want[0], got[:2]):
-                return False
-        if not head_only and len(want[-1]) >= 4:
-            edge = int(min(len(audio) / sr, 4.0) * sr)
-            got = heard(audio[-edge:])
-            ok = (_ends_like(want[-1], got) if STRICT_EDGES
-                  else _sounds_like(want[-1], got[-2:]))
-            if got and not ok:
-                return False
-        return True
+        out = []
+        for seg in r.get("segments", []):
+            for w in seg.get("words", []):
+                # слово, начатое уже в тишине после речи, - выдумка распознавателя
+                if se is not None and float(w["start"]) > se + 0.05:
+                    continue
+                for ww in _words(w.get("word", "")):
+                    out.append((ww, float(w["start"]), float(w["end"])))
+        return out
     except Exception as e:
-        _asr_failed = True                  # нет модели — дальше не проверяем
+        _asr_failed = True                  # нет модели - дальше не проверяем
         # без этой проверки съеденные края слов уже не перезаписываются
         log_problem("проверка краёв кусков (распознавание) недоступна, "
                     "съеденные окончания не будут переозвучиваться", e)
+        return None
+
+
+def _edges_verdict(heard: list[tuple] | None, text: str, audio_sec: float) -> bool:
+    """Слышны ли первое и последнее слова куска - те самые, что в тексте."""
+    if heard is None or audio_sec < 1.0:
         return True
+    want = _words(text)
+    got = [w for w, _s, _e in heard]
+    if not want or not got:
+        return bool(not want)
+    # слова короче четырёх букв распознаватель путает сам - их не проверяем
+    if len(want[0]) >= 4 and not _sounds_like(want[0], got[:2]):
+        return False
+    if len(want[-1]) >= 4:
+        # многоточие в конце - речь обрывается по тексту («Не выйде…»): слово
+        # не дописано самим автором, по буквам его не сверить - только «похоже»
+        trailing = text.rstrip().endswith(("...", "…"))
+        ok = (_sounds_like(want[-1], got[-2:]) if trailing
+              else _ends_like(want[-1], got))
+        if not ok:
+            return False
+    return True
+
+
+def _edges_ok(audio: np.ndarray, sr: int, text: str, head_only: bool = False,
+              lang: str = "ru") -> bool:
+    """Совместимость: проверка краёв одного куска."""
+    return _edges_verdict(_listen(audio, sr, lang), text, len(audio) / sr)
+
+
+# --- паузы ----------------------------------------------------------------
+# Паузу ищем как участок тишины: кадры по 10 мс тише SIL_REL от громкости речи
+# куска. Слово при этом не трогается: от конца речи до правки остаётся
+# KEEP_AFTER, до начала следующего слова - KEEP_BEFORE. Это не обрезка по
+# порогу: звук только раздвигается или сдвигается ВНУТРИ тишины.
+SIL_FRAME = 0.01
+SIL_REL = 0.03             # -30 дБ от громкости речи
+# Короче - это не пауза, а стык слов или смычка согласной внутри слова («г» в
+# «угла» - 50-120 мс тишины): растянуть такое - испортить слово. Не трогаем.
+MIN_INNER_SIL = 0.15
+KEEP_AFTER = 0.12
+KEEP_BEFORE = 0.06
+XFADE = 0.008
+LONG_PAUSE = 0.5           # абзац и смена говорящего - паузу ставим, даже если модель её не дала
+DIP_REL = 0.35             # ...но только в провал громкости между словами (-9 дБ от речи)
+
+
+def _frame_rms(audio: np.ndarray, sr: int) -> tuple[np.ndarray, float, int]:
+    """(громкость кадров по 10 мс, громкость речи куска, размер кадра)."""
+    win = max(1, int(SIL_FRAME * sr))
+    n = len(audio) // win
+    if n == 0:
+        return np.zeros(0), 0.0, win
+    rms = np.sqrt(np.mean(audio[:n * win].reshape(n, win) ** 2, axis=1))
+    return rms, float(np.percentile(rms, 90)), win
+
+
+def _silent_frames(audio: np.ndarray, sr: int) -> tuple[np.ndarray, int]:
+    rms, level, win = _frame_rms(audio, sr)
+    return rms < max(1e-4, level * SIL_REL), win
+
+
+def edge_silence(audio: np.ndarray, sr: int) -> tuple[float, float]:
+    """(тишина в начале, тишина в конце) куска, секунды."""
+    sil, win = _silent_frames(audio, sr)
+    if not len(sil) or sil.all():
+        return 0.0, len(audio) / sr
+    loud = np.where(~sil)[0]
+    return loud[0] * win / sr, (len(audio) - (loud[-1] + 1) * win) / sr
+
+
+def _set_pause(audio: np.ndarray, sr: int, start: int, end: int, target: float) -> np.ndarray:
+    """Тишину audio[start:end] сделать длиной target секунд (правка внутри неё)."""
+    L = end - start
+    T = int(target * sr)
+    ka, kb = int(KEEP_AFTER * sr), int(KEEP_BEFORE * sr)
+    p = start + min(ka, L // 2)
+    xf = int(XFADE * sr)
+    if T >= L:                                  # раздвинуть: вставить тишину
+        ins = np.zeros(T - L, dtype=np.float32)
+        a, b = audio[:p].copy(), audio[p:].copy()
+        k = min(xf, len(a), len(b))
+        if k > 1:
+            a[-k:] *= np.linspace(1, 0, k, dtype=np.float32)
+            b[:k] *= np.linspace(0, 1, k, dtype=np.float32)
+        return np.concatenate([a, ins, b])
+    cut = min(L - T, max(0, end - kb - p))      # сжать: вырезать середину тишины
+    if cut <= 0:
+        return audio
+    a, b = audio[:p].copy(), audio[p + cut:].copy()
+    k = min(xf, len(a), len(b))
+    if k > 1:
+        mix = a[-k:] * np.linspace(1, 0, k, dtype=np.float32) + b[:k] * np.linspace(0, 1, k, dtype=np.float32)
+        return np.concatenate([a[:-k], mix, b[k:]])
+    return np.concatenate([a, b])
+
+
+def _word_spans(text: str) -> list[tuple[str, int]]:
+    """Слова текста с позицией конца (для привязки отметок пауз к словам)."""
+    out = []
+    for m in re.finditer(r"[\w+]+", text):
+        for w in _words(m.group(0)):
+            out.append((w, m.end()))
+    return out
+
+
+def _fit_inner_pauses(audio: np.ndarray, sr: int, text: str, marks,
+                      heard: list[tuple] | None) -> tuple[np.ndarray, int]:
+    """Паузы между предложениями внутри куска - довести до заданных.
+
+    Модель читает кусок (2-4 предложения, иногда реплики разных героев) одним
+    вызовом и паузы ставит сама. Место каждой паузы находим по меткам времени
+    распознанных слов: конец последнего слова предложения и начало первого
+    слова следующего. Внутри этого промежутка берём самый длинный участок
+    тишины и делаем его нужной длины. Если слова не сопоставились или тишины
+    нет - пауза остаётся, как её поставила модель (ничего не ломаем).
+    Возвращает (звук, сколько пауз поправлено).
+    """
+    if not marks or not heard:
+        return audio, 0
+    import difflib
+    spans = _word_spans(text)
+    tw = [w for w, _e in spans]
+    hw = [w for w, _s, _e in heard]
+    sm = difflib.SequenceMatcher(None, tw, hw, autojunk=False)
+    t2h = {}
+    for blk in sm.get_matching_blocks():
+        # одиночное совпадение («не», «и») могло встать не туда, если модель
+        # пропустила или исказила слова рядом; доверяем только связкам из двух+
+        if blk.size < 2:
+            continue
+        for k in range(blk.size):
+            t2h[blk.a + k] = blk.b + k
+    sil, win = _silent_frames(audio, sr)
+    rms, level, _w = _frame_rms(audio, sr)
+    edits = []
+    for pos, target in marks:
+        a_idx = max((i for i, (_w, e) in enumerate(spans) if e <= pos), default=None)
+        if a_idx is None or a_idx + 1 >= len(spans):
+            continue
+        b_idx = a_idx + 1
+        # слово по краям паузы должно быть узнано; соседнее - допускаем, но не дальше
+        left = next((t2h[i] for i in (a_idx, a_idx - 1) if i in t2h), None)
+        right = next((t2h[i] for i in (b_idx, b_idx + 1) if i in t2h), None)
+        if left is None or right is None or right <= left:
+            continue
+        # ищем ПОСЛЕ конца слова (метки Whisper неточны на сотые - небольшой запас)
+        lo = int(max(0.0, heard[left][2] - 0.05) / SIL_FRAME)
+        hi = int(min(len(audio) / sr, heard[right][1] + 0.1) / SIL_FRAME)
+        best, cur = None, None
+        for f in range(max(0, lo), min(len(sil), hi)):
+            if sil[f]:
+                cur = (cur[0], f + 1) if cur else (f, f + 1)
+                if best is None or cur[1] - cur[0] > best[1] - best[0]:
+                    best = cur
+            else:
+                cur = None
+        if best is None or (best[1] - best[0]) * SIL_FRAME < MIN_INNER_SIL:
+            # Модель склеила абзацы или реплики вовсе без паузы («…немедленно!
+            # - Не могу»). Для длинной паузы (абзац, смена говорящего) тишину
+            # вставляем в самой тихой точке между двумя словами - но только
+            # если там правда провал громкости, а не середина звука.
+            if target < LONG_PAUSE:
+                continue
+            a0 = int(heard[left][2] / SIL_FRAME) - 2
+            b0 = int(heard[right][1] / SIL_FRAME) + 2
+            a0, b0 = max(0, a0), min(len(rms), b0)
+            if b0 - a0 < 1:
+                continue
+            f = a0 + int(np.argmin(rms[a0:b0]))
+            if rms[f] > level * DIP_REL:
+                continue
+            best = (f, f + 1)
+        edits.append((best[0] * win, best[1] * win, target))
+    for start, end, target in sorted(edits, reverse=True):   # с конца: начала не сдвигаются
+        audio = _set_pause(audio, sr, start, end, target)
+    return audio, len(edits)
+
+
+def _join(pieces: list[tuple[np.ndarray, float]], sr: int) -> np.ndarray:
+    """Склеить куски так, чтобы пауза между ними была ровно заданной.
+
+    Пауза = тишина в конце куска (его хвост, см. f5_mlx._finish_tail) +
+    вставка + тишина в начале следующего. Вставляем ровно столько, сколько
+    не хватает до заданной; после последнего куска - его пауза целиком.
+    """
+    out = []
+    for i, (audio, gap) in enumerate(pieces):
+        out.append(audio)
+        _lead, trail = edge_silence(audio, sr)
+        nxt_lead = edge_silence(pieces[i + 1][0], sr)[0] if i + 1 < len(pieces) else 0.0
+        add = max(0.0, gap - trail - nxt_lead)
+        out.append(np.zeros(int(sr * add), dtype=np.float32))
+    return np.concatenate(out) if out else np.zeros(int(sr * 0.2), dtype=np.float32)
+
+
+def _norm_items(chunks, gap_sec: float) -> list[tuple]:
+    """Строки, пары (текст, пауза), тройки (…, темп) и четвёрки (…, отметки)."""
+    items = []
+    for c in chunks:
+        if isinstance(c, str):
+            items.append((c, gap_sec, 1.0, ()))
+        elif len(c) == 2:
+            items.append((c[0], c[1], 1.0, ()))
+        elif len(c) == 3:
+            items.append((c[0], c[1], c[2], ()))
+        else:
+            items.append((c[0], c[1], c[2], tuple(tuple(m) for m in c[3])))
+    return items
+
+
+# Упреждение: пока окно проверяет края готовых кусков (распознавание) и
+# доводит паузы, видеоядро уже считает следующую пачку
+_PREFETCH = None
+
+
+def _prefetch_pool():
+    global _PREFETCH
+    if _PREFETCH is None:
+        from concurrent.futures import ThreadPoolExecutor
+        _PREFETCH = ThreadPoolExecutor(max_workers=1, thread_name_prefix="prefetch")
+    return _PREFETCH
 
 
 def _synth_chunks(eng: TTSEngine, voice: str, chunks, sr: int,
                   gap_sec: float, on_chunk=None, should_stop=None,
-                  lang: str = "ru", pause_gate=None) -> np.ndarray:
-    # принимаем простые строки, пары (текст, пауза) и тройки (…, множитель темпа)
-    items = []
-    for c in chunks:
-        if isinstance(c, str):
-            items.append((c, gap_sec, 1.0))
-        elif len(c) == 2:
-            items.append((c[0], c[1], 1.0))
-        else:
-            items.append(tuple(c))
-    pieces: list[np.ndarray] = []
-    for text, gap, mul in items:
-        # «Пауза»: ждём здесь, между кусками, не выходя из процесса — модель
+                  lang: str = "ru", pause_gate=None, batch_size: int | None = None,
+                  use_cache: bool = True, stats: dict | None = None,
+                  pipelined: bool = True) -> np.ndarray:
+    """Куски -> звук части: пачками, с упреждением, кэшем и проверкой краёв.
+
+    stats (если передан) пополняется: fresh_sec - звука посчитано заново,
+    cached - кусков из кэша, retries - переозвучек, pauses_fit - пауз внутри
+    кусков доведено до заданных.
+    """
+    from . import synthcache
+    items = _norm_items(chunks, gap_sec)
+    texts = [_with_end_punct(t) for t, _g, _m, _k in items]
+    muls = [m for _t, _g, m, _k in items]
+    st = stats if stats is not None else {}
+    for k in ("fresh_sec", "cached", "retries", "pauses_fit"):
+        st.setdefault(k, 0)
+    B = max(1, int(batch_size or BATCH_SIZE))
+    groups = [list(range(i, min(i + B, len(items)))) for i in range(0, len(items), B)]
+    vdir = default_voices_dir()
+    ekey = eng.cache_key()
+    keys = [synthcache.key(ekey, vdir, voice, t, m) for t, m in zip(texts, muls)]
+
+    def produce(g):
+        """Звук пачки: из кэша или синтезом. Работает в потоке упреждения."""
+        out = {}
+        todo = []
+        for i in g:
+            hit = synthcache.get(keys[i]) if use_cache else None
+            if hit is not None:
+                out[i] = (hit[0], hit[1], True, False)
+            else:
+                todo.append(i)
+        if todo:
+            waves = eng.synth_batch([texts[i] for i in todo], voice, [muls[i] for i in todo])
+            risks = list(getattr(eng, "last_cut_risk", None) or [False] * len(todo))
+            for i, w, r in zip(todo, waves, risks):
+                out[i] = (w, None, False, r)
+        return out
+
+    pool = _prefetch_pool()
+    pieces: list[tuple[np.ndarray, float]] = []
+    fut = None
+    for gi, g in enumerate(groups):
+        # «Пауза»: ждём здесь, между пачками, не выходя из процесса - модель
         # остаётся загруженной, готовые куски на месте, продолжение мгновенное
         if pause_gate is not None:
             pause_gate()
-        # проверяем ПЕРЕД куском: один кусок считается секунды, ждать не придётся
         if should_stop is not None and should_stop():
             raise Cancelled()
-        if END_PUNCT and text.strip() and text.rstrip()[-1] not in _END_MARKS:
-            text = text.rstrip() + "."
-        audio = eng.synth_chunk(text, voice, speed_mul=mul)
-        for _try in range(TAIL_RETRIES):
-            if not len(audio):
+        got = fut.result() if fut is not None else produce(g)
+        fut = None
+        if pipelined and gi + 1 < len(groups):
+            fut = pool.submit(produce, groups[gi + 1])
+        heard: dict[int, list | None] = {}
+        need = []
+        for i in g:
+            audio, words, cached, risk = got[i]
+            if cached:
+                st["cached"] += 1
+                heard[i] = words
+                continue
+            heard[i] = _listen(audio, sr, lang) if len(audio) else None
+            if len(audio) and (risk or not _edges_verdict(heard[i], texts[i], len(audio) / sr)):
+                need.append(i)
+        for attempt in range(1, TAIL_RETRIES + 1):
+            if not need:
                 break
-            # Начало проверяем всегда. Конец - всегда в строгом режиме (по
-            # громкости съеденное окончание не видно: звук есть, слова нет),
-            # в прежнем - только при подозрительно тихом крае.
-            head_only = False if STRICT_EDGES else not _edges_suspicious(audio, sr)
-            if _edges_ok(audio, sr, text, lang=lang, head_only=head_only):
-                break
-            audio = eng.synth_chunk(text, voice, speed_mul=mul)
-        if len(audio):
-            pieces.append(audio)
-            pieces.append(np.zeros(int(sr * gap), dtype=np.float32))
-        if on_chunk:
-            on_chunk()
-    return np.concatenate(pieces) if pieces else np.zeros(int(sr * 0.2), dtype=np.float32)
+            st["retries"] += len(need)
+            hm = HEADROOM_STEPS[min(attempt, len(HEADROOM_STEPS) - 1)]
+            waves = eng.synth_batch([texts[i] for i in need], voice, [muls[i] for i in need],
+                                    [hm] * len(need))
+            risks = list(getattr(eng, "last_cut_risk", None) or [False] * len(need))
+            still = []
+            for i, w, r in zip(need, waves, risks):
+                got[i] = (w, None, False, r)
+                heard[i] = _listen(w, sr, lang) if len(w) else None
+                if len(w) and (r or not _edges_verdict(heard[i], texts[i], len(w) / sr)):
+                    still.append(i)
+            need = still
+        for i in g:
+            audio, _w, cached, _r = got[i]
+            if not cached and len(audio):
+                st["fresh_sec"] += len(audio) / sr
+                if use_cache and i not in need:      # в кэш - только принятый кусок
+                    synthcache.put(keys[i], audio, sr, heard[i])
+            if len(audio):
+                audio, nfit = _fit_inner_pauses(audio, sr, texts[i], items[i][3], heard[i])
+                st["pauses_fit"] += nfit
+                pieces.append((audio, items[i][1]))
+            if on_chunk:
+                on_chunk()
+    return _join(pieces, sr)
 
 
 # --- параллельные рабочие процессы --------------------------------------
@@ -406,11 +736,9 @@ def _worker_init(engine_id: str, eng_kwargs: dict, threads: int) -> None:
 
 
 def _worker_render(payload: tuple) -> tuple:
-    ci, title, chunks, voice, sr, gap_sec, para_gap, workdir = payload
+    ci, title, chunks, voice, sr, gap_sec, _para_gap, workdir = payload
     eng = _W["eng"]
     audio = _synth_chunks(eng, voice, chunks, sr, gap_sec)
-    tail = np.zeros(int(sr * para_gap), dtype=np.float32)
-    audio = np.concatenate([audio, tail])
     wav_path = os.path.join(workdir, f"ch{ci:04d}.wav")
     dur = write_wav(audio, sr, wav_path)
     return ci, wav_path, dur, title
@@ -424,7 +752,7 @@ def _worker_render(payload: tuple) -> tuple:
 # тем же отпечатком. Книга досчиталась — «.herald» удаляется целиком.
 STATE_DIR = ".herald"
 STATE_FILE = "state.json"
-STATE_VERSION = 1
+STATE_VERSION = 2               # 2: паузы и хвосты кусков (доработки 3.0)
 
 
 def settings_fingerprint(engine: str, eng_kwargs: dict, voice: str,
@@ -444,7 +772,8 @@ def settings_fingerprint(engine: str, eng_kwargs: dict, voice: str,
         "voice": voice, "voice_files": vinfo,
         "opts": {k: getattr(opts, k) for k in (
             "minutes_per_file", "hd_filter", "audio_format", "expand_numbers",
-            "use_stress", "gap_sec", "para_gap_sec", "single_file")},
+            "use_stress", "gap_sec", "para_gap_sec", "dialog_gap_sec",
+            "single_file")},
     }
     return hashlib.sha1(json.dumps(data, sort_keys=True, ensure_ascii=False,
                                    default=str).encode("utf-8")).hexdigest()
@@ -542,6 +871,13 @@ def cleanup_stale_temp(max_age_hours: float = 24.0) -> int:
             log_problem(f"не удалось удалить старый временный файл {p}", e, show=False)
     if n:
         log_info(f"удалено старых временных файлов и папок: {n}")
+    try:
+        from . import synthcache
+        k = synthcache.prune()
+        if k:
+            log_info(f"кэш синтеза: удалено старых кусков {k}")
+    except Exception as e:
+        log_problem("кэш синтеза не почистился", e, show=False)
     return n
 
 
@@ -554,6 +890,7 @@ def convert_book(path: str, *, engine: str = "f5", eng_kwargs: dict | None = Non
                  should_stop: Callable[[], bool] | None = None,
                  pause_gate: Callable[[], None] | None = None,
                  part_progress: Callable[[int, int, float], None] | None = None,
+                 on_rtf: Callable[[float], None] | None = None,
                  ) -> ConvertResult:
     """Озвучить книгу. Главы выдаются потоково: как только глава готова, её mp3
     сразу пишется рядом и вызывается on_chapter(index, title, mp3_path) - можно
@@ -562,6 +899,8 @@ def convert_book(path: str, *, engine: str = "f5", eng_kwargs: dict | None = Non
     pause_gate() зовётся перед каждым куском и может ждать сколько угодно -
     это «Пауза». part_progress(k, m, доля) сообщает, как далеко озвучена
     текущая часть k из m (общий прогресс по книге идёт через progress).
+    on_rtf(rtf) - настоящий RTF: секунды счёта на секунду НОВОГО звука, без
+    пауз пользователя и без кусков из кэша. Зовётся после каждой части.
     """
     opts = options or ConvertOptions()
     eng_kwargs = eng_kwargs or {}
@@ -597,8 +936,8 @@ def convert_book(path: str, *, engine: str = "f5", eng_kwargs: dict | None = Non
                 f"{v} ({n})" for v, n in list(unified.values())[:40]))
             print(f"ℹ Ударения: у {len(unified)} слов вне словаря выровнено по книге "
                   f"({sum(n for _w, n in unified.values())} мест)", file=sys.stderr)
-    prepared = [(ch.title, _chunk_paragraphs(body, meta.max_chunk_chars,
-                                             opts.gap_sec, opts.para_gap_sec))
+    prepared = [(ch.title, _chunk_paragraphs(body, meta.max_chunk_chars, opts.gap_sec,
+                                             opts.para_gap_sec, opts.dialog_gap_sec))
                 for ch, body in zip(chapters, bodies)]
 
     # настройки голоса: тембр применяем при кодировании, темп — при синтезе.
@@ -702,6 +1041,15 @@ def convert_book(path: str, *, engine: str = "f5", eng_kwargs: dict | None = Non
             # модель грузим, только если есть что считать: продолжение, где всё
             # готово, не должно ждать загрузки 1,3 ГБ
             eng = _loaded_engine(engine, eng_kwargs) if len(reused) < len(prepared) else None
+            stats: dict = {}
+            paused = [0.0]
+
+            def gate():
+                """«Пауза» не должна попадать в замер скорости."""
+                if pause_gate is not None:
+                    t = time.monotonic()
+                    pause_gate()
+                    paused[0] += time.monotonic() - t
             for ci, (title, chunks) in enumerate(prepared, 1):
                 if ci in reused:
                     emit(ci, reused[ci], reuse=True)
@@ -720,10 +1068,22 @@ def convert_book(path: str, *, engine: str = "f5", eng_kwargs: dict | None = Non
                         f"Озвучиваю: часть {ci} из {len(prepared)}")
                     if part_progress:
                         part_progress(ci, len(prepared), in_part / max(1, len(chunks)))
+                t0, p0, f0 = time.monotonic(), paused[0], stats.get("fresh_sec", 0)
                 audio = _synth_chunks(eng, voice, chunks, sr, opts.gap_sec, on_chunk=bump,
                                       should_stop=should_stop, lang=doc_lang,
-                                      pause_gate=pause_gate)
-                audio = np.concatenate([audio, np.zeros(int(sr * opts.para_gap_sec), dtype=np.float32)])
+                                      pause_gate=gate, use_cache=opts.use_cache,
+                                      stats=stats)
+                spent = time.monotonic() - t0 - (paused[0] - p0)
+                fresh = stats.get("fresh_sec", 0) - f0
+                if fresh > 5:
+                    rtf = spent / fresh
+                    log_info(f"часть {ci}: RTF {rtf:.2f} (счёт {spent:.0f} с на "
+                             f"{fresh:.0f} с нового звука; из кэша кусков: "
+                             f"{stats.get('cached', 0)}, переозвучек: "
+                             f"{stats.get('retries', 0)}, пауз доведено: "
+                             f"{stats.get('pauses_fit', 0)})")
+                    if on_rtf:
+                        on_rtf(rtf)
                 wp = os.path.join(workdir, f"part{ci:04d}.flac")
                 emit(ci, RenderedChapter(title or f"Часть {ci}", wp, write_wav(audio, sr, wp)),
                      sum(len(c[0]) for c in chunks))
@@ -857,16 +1217,24 @@ def preview_sample(path: str, *, engine: str = "f5", eng_kwargs: dict | None = N
 
     text = _prepare_text(ch.text, getattr(eng, "stress_format", None),
                          opts.expand_numbers, opts.use_stress, doc_lang)
-    sents = sentenize(text)
+    # берём абзацы из середины целиком: так в пробнике слышны и паузы абзацев,
+    # и паузы между репликами диалога - те же, что будут в книге
+    paras = [p for p in re.split(r"\n\s*\n", text) if p.strip()]
     budget = int(minutes * 60 * CHARS_PER_SEC)
-    mid = len(sents) // 2
-    picked, total, i = [], 0, mid
-    while i < len(sents) and total < budget:
-        picked.append(sents[i]); total += len(sents[i]); i += 1
-    if not picked:
-        picked = sents[:1]
-    chunks = _chunk_paragraphs(" ".join(picked), eng.max_chunk_chars,
-                               opts.gap_sec, opts.para_gap_sec)
+    picked, total, i = [], 0, len(paras) // 2
+    while i < len(paras) and total < budget:
+        para = paras[i]
+        if total + len(para) > budget * 1.3:       # огромный абзац - по предложениям
+            for sent in sentenize(para):
+                if total >= budget:
+                    break
+                picked.append(sent); total += len(sent)
+            break
+        picked.append(para); total += len(para); i += 1
+    if not picked and paras:
+        picked = sentenize(paras[0])[:1]
+    chunks = _chunk_paragraphs("\n\n".join(picked), eng.max_chunk_chars,
+                               opts.gap_sec, opts.para_gap_sec, opts.dialog_gap_sec)
 
     say(0.2, "Озвучиваю пробный фрагмент…")
     done = [0]
@@ -874,7 +1242,7 @@ def preview_sample(path: str, *, engine: str = "f5", eng_kwargs: dict | None = N
         done[0] += 1
         say(0.2 + 0.7 * done[0] / max(1, len(chunks)), "Озвучиваю пробный фрагмент…")
     audio = _synth_chunks(eng, voice, chunks, sr, opts.gap_sec, on_chunk=bump,
-                          lang=doc_lang)
+                          lang=doc_lang, use_cache=opts.use_cache)
 
     # временную папку пробника удаляет вызывающий (см. окно) или чистка при
     # запуске — она старше суток не живёт

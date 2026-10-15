@@ -55,6 +55,9 @@ class SileroEngine(TTSEngine):
     def list_voices(self) -> list[Voice]:
         return list(VOICES)
 
+    def cache_key(self) -> str:
+        return f"{self.name}|{MODEL_FILENAME}"
+
     # --- загрузка -------------------------------------------------------
     def _model_path(self) -> str:
         return os.path.join(self.model_dir, MODEL_FILENAME)

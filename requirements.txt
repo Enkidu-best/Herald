@@ -37,6 +37,7 @@ pillow
 # --- GUI (для настольного приложения) ---
 customtkinter
 tkinterdnd2
+pyobjc-framework-AVFoundation; sys_platform == "darwin"   # мини-плеер готовой части
 
 # Примечание: ставить в отдельный venv (см. setup_mac.command), чтобы не трогать
 # глобальный torch 2.14 (им пользуются Scribe и Anonymizer). torchcodec удаляется

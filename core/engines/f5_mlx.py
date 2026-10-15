@@ -68,8 +68,8 @@ LANG_MODELS: dict[str, dict] = {
            "target_bps": 16.1},
 }
 
-# Другие веса той же архитектуры F5 (для сравнения на слух, этап 1 «3.0»). По
-# умолчанию по-прежнему Misha24-10 accent_tune — одобренный голос. ESpeech-TTS-1
+# Другие веса той же архитектуры F5 По умолчанию -
+# Misha24-10 accent_tune (B16, выбран вслепую). ESpeech - запасной (C16), лицензия свободная. ESpeech-TTS-1
 # (Apache-2.0) дообучена на русском, понимает «+», словарь тот же; выложена как
 # .pt из обучения, поэтому один раз конвертируется в .safetensors в кэш.
 MODEL_VARIANTS: dict[str, dict] = {
@@ -101,18 +101,23 @@ EPSS_STEPS: dict[int, tuple[int, ...]] = {
     7:  (0, 2, 4, 6, 8, 16, 24, 32),
     6:  (0, 2, 4, 6, 8, 16, 32),          # вариант 6a из статьи (6b заметно хуже)
     5:  (0, 2, 4, 6, 8, 32),              # у статьи здесь уже разваливается голос
+    # 32 - все шаги подряд, как равномерное расписание исходной F5 (эталон,
+    # пресет «Высокое»): 33 точки дают ровно 32 вызова сети
+    32: tuple(range(33)),
 }
 
 # Запас времени на кусок. Если его не дать, модель не укладывается и жертвует
 # КРАЯМИ: чаще всего пропадает первое слово («Проба голоса. Море к вечеру…»
 # звучит как «Море к вечеру…»), иногда рвётся последнее. Замерено на куске в
 # 173 символа: запас 1.04 — первое слово теряется 5 раз из 5, запас 1.22 — ни
-# разу (английской модели и этого мало, её страхует проверка в pipeline). Лишнее время уходит в тишину, которую тут же срезает _trim_tail, так
-# что за надёжность мы не платим ни длиной книги, ни временем счёта.
+# разу (английской модели и этого мало, её страхует проверка в pipeline). Лишнее
+# время модель заполняет тишиной; после конца речи от неё остаётся ровно
+# TAIL_KEEP_SEC (см. _finish_tail), остальное отбрасывается. Если проверка
+# краёв всё же услышала недоговорённое слово, кусок пересчитывается с ещё
+# большим запасом (headroom_mul в synth_batch).
 DURATION_HEADROOM = 1.22
 SHORT_CHUNK_CHARS = 80        # короче этого куски получают запас побольше
 SHORT_HEADROOM = 1.30         # на коротком куске модель торопится сильнее
-TRIM_SILENCE_DB = 0.004       # ниже этого уровня хвост считаем тишиной
 CFG_STRENGTH = 2.0            # как cfg_strength в f5_tts.infer.utils_infer
 SWAY_COEF = -1.0              # как sway_sampling_coef там же
 
@@ -244,58 +249,59 @@ def _chunk_by_bytes(text: str, max_bytes: int) -> list[str]:
     return chunks or [text.strip()]
 
 
-# Как обрезать хвост куска. «vad» (по умолчанию): конец речи по Silero VAD плюс
-# запас, но НЕ раньше прежнего среза по громкости - то есть звука оставляем
-# только больше, - и плавное затухание. «rms» - прежнее поведение (для замера).
-TAIL_MODE = "vad"
-TAIL_PAD_SEC = 0.12            # после конца речи по VAD
-FADE_OUT_SEC = 0.025           # затухание в конце куска: без него - щелчок
+# Хвост куска (доработки 3.0). Порога громкости здесь больше НЕТ: тихие
+# безударные окончания («ждать», «интриг», «выйдет») падали ниже порога и
+# отрезались вместе с тишиной. Теперь:
+#   * конец речи ищет Silero VAD (а не громкость);
+#   * после него ВСЕГДА остаётся TAIL_KEEP_SEC звука модели - затухание слова и
+#     немного тишины; если модель столько не дала, хвост дописывается нулями;
+#   * в самом конце - короткое затухание FADE_OUT_SEC (против щелчка), оно
+#     ложится на тишину, а не на слово.
+# Паузу между кусками конвейер потом доводит до заданной (pipeline._pause_fit).
+TAIL_KEEP_SEC = 0.25           # звука после конца речи (200-300 мс по заданию)
+FADE_OUT_SEC = 0.02            # затухание в самом конце куска: без него - щелчок
 FADE_IN_SEC = 0.005            # и короткое нарастание в начале
+# Речь, дошедшая до самого конца отведённого времени, - признак, что модели
+# не хватило длительности: слово могло оборваться. Такой кусок помечается, и
+# конвейер пересчитывает его с бо́льшим запасом.
+CUT_RISK_SEC = 0.06
+# «Якорь тишины» в конце окна (3.1, лечение съеденных окончаний). Диагноз:
+# F5 растягивает речь на ВСЁ отведённое время - сколько ни дай запаса, тишины
+# после последнего слова не остаётся (замер: 6 мс при запасе +40 %), и глухая
+# согласная на конце («интриг», «ждать») упирается в край окна. Поэтому в
+# конец окна кладём ИЗВЕСТНУЮ тишину - как образец кладётся в начало. F5
+# обучена дописывать речь между известными кусками, и ей приходится закончить
+# слово до тишины, с нормальным затуханием согласной. 0 - выключено (как в 3.0).
+TAIL_ANCHOR_SEC = 0.3
 
 
-def _trim_tail(wave: np.ndarray) -> np.ndarray:
-    """Срезать тишину в конце куска - не задевая речь - и сгладить края.
+def _finish_tail(wave: np.ndarray) -> tuple[np.ndarray, bool]:
+    """Хвост куска: речь + ровно TAIL_KEEP_SEC после неё, края сглажены.
 
-    Модели даётся чуть больше времени, чем нужно (страховка от обрыва слова), и
-    остаток она заполняет тишиной. Если её не убрать, каждый кусок тащит за
-    собой лишний хвост: паузы разъезжаются, а книга становится длиннее без
-    всякой пользы. Паузы всё равно ставит пайплайн - ровные и одинаковые.
-
-    Раньше конец искался по порогу громкости, и это давало две общие для всех
-    вариантов F5 беды, которые слышны на слух:
-      * тихое безударное окончание падало ниже порога и отрезалось вместе с
-        тишиной («как правил» вместо «как правило»);
-      * срез шёл без затухания: сигнал в точке среза не нулевой, дальше пауза из
-        нулей - ступенька, то есть щелчок «в конце фразы».
-    Теперь конец речи ищет Silero VAD, срез не раньше прежнего, а края сглажены.
+    Возвращает (звук, оборвано_ли): второе - True, если речь шла до самого
+    конца отведённого времени (модели не хватило длительности).
     """
     if not len(wave):
-        return wave
-    win = 240                                   # 10 мс при 24 кГц
-    n = len(wave) // win
-    last = 0
-    for i in range(n):
-        if np.sqrt(np.mean(wave[i * win:(i + 1) * win] ** 2)) > TRIM_SILENCE_DB:
-            last = i
-    end = min(len(wave), (last + 1) * win + win * 4)   # оставляем 40 мс на затухание
-    if TAIL_MODE == "rms":
-        return wave[:end]
+        return wave, False
+    se = None
     try:
         from ..vad import speech_end
         se = speech_end(wave, SAMPLE_RATE)
-        if se is not None:
-            end = max(end, min(len(wave), int((se + TAIL_PAD_SEC) * SAMPLE_RATE)))
     except Exception as e:
         from ..log import log_problem
-        log_problem("VAD недоступен, хвост режу по громкости", e, show=False)
-    out = wave[:end].copy()
+        log_problem("VAD недоступен, хвост куска оставлен целиком", e, show=False)
+    cut_risk = se is not None and se >= len(wave) / SAMPLE_RATE - CUT_RISK_SEC
+    end = len(wave) if se is None else int((se + TAIL_KEEP_SEC) * SAMPLE_RATE)
+    out = wave[:min(end, len(wave))].astype(np.float32, copy=True)
     k = min(len(out), int(FADE_OUT_SEC * SAMPLE_RATE))
     if k > 1:
         out[-k:] *= np.linspace(1.0, 0.0, k, dtype=np.float32) ** 2
     k = min(len(out), int(FADE_IN_SEC * SAMPLE_RATE))
     if k > 1:
         out[:k] *= np.linspace(0.0, 1.0, k, dtype=np.float32)
-    return out
+    if end > len(out):                       # модель не дала хвоста - дописываем тишину
+        out = np.concatenate([out, np.zeros(end - len(out), dtype=np.float32)])
+    return out, cut_risk
 
 
 def _cross_fade(waves: list[np.ndarray], sr: int) -> np.ndarray:
@@ -314,6 +320,35 @@ def _cross_fade(waves: list[np.ndarray], sr: int) -> np.ndarray:
         mixed = out[-k:] * fade_out + nxt[:k] * fade_in
         out = np.concatenate([out[:-k], mixed, nxt[k:]])
     return out
+
+
+def _attention_with_mask(self, x, mask=None, rope=None):
+    """Attention.__call__ из f5-tts-mlx с исправленной маской.
+
+    В библиотеке ветка с маской не работала никогда: `mask.expand(...)` - у
+    массивов MLX такого метода нет (это из torch), и пачка кусков разной длины
+    падала. Здесь маска просто расширяется по осям - (B, 1, 1, n) - и дальше
+    всё как в оригинале. Без маски путь не меняется ни на одну операцию.
+    """
+    import mlx.core as mx
+    from f5_tts_mlx.dit import apply_rotary_pos_emb
+    batch, seq_len, _ = x.shape
+    query = self.to_q(x).reshape(batch, seq_len, self.heads, -1).transpose(0, 2, 1, 3)
+    key = self.to_k(x).reshape(batch, seq_len, self.heads, -1).transpose(0, 2, 1, 3)
+    value = self.to_v(x).reshape(batch, seq_len, self.heads, -1).transpose(0, 2, 1, 3)
+    if rope is not None:
+        freqs, xpos_scale = rope
+        q_s, k_s = (xpos_scale, xpos_scale ** -1.0) if xpos_scale is not None else (1.0, 1.0)
+        query = apply_rotary_pos_emb(query, freqs, q_s)
+        key = apply_rotary_pos_emb(key, freqs, k_s)
+    attn_mask = mask[:, None, None, :] if mask is not None else None
+    x = mx.fast.scaled_dot_product_attention(q=query, k=key, v=value,
+                                             scale=self._scale_factor, mask=attn_mask)
+    x = x.transpose(0, 2, 1, 3).reshape(batch, seq_len, -1).astype(query.dtype)
+    x = self.to_out(x)
+    if mask is not None:
+        x = x * mask[:, :, None]
+    return x
 
 
 class F5MLXEngine(F5Engine):
@@ -363,6 +398,18 @@ class F5MLXEngine(F5Engine):
         self._vocoder = None
         self._vocab: dict[str, int] = {}
         # все операции MLX идут через общий поток _MLX_POOL (см. выше)
+
+    def cache_key(self) -> str:
+        """Всё, что меняет звук куска, кроме текста и голоса (для кэша синтеза).
+
+        TAIL_KEEP_SEC и FADE_OUT_SEC тоже здесь: поменялась обработка хвоста -
+        старые куски из кэша не годятся.
+        """
+        cfg = LANG_MODELS[self.language]
+        return "|".join(str(x) for x in (
+            self.name, cfg["repo"], cfg["ckpt"], self.variant, self.language, self.steps, self.schedule,
+            self.dtype, self.quant_bits, round(self.speed, 4), self.max_total_sec,
+            DURATION_HEADROOM, SHORT_HEADROOM, TAIL_KEEP_SEC, FADE_OUT_SEC))
 
     # --- подготовка локальной папки модели с ожидаемыми именами файлов ---
     def _prepare_model_dir(self) -> str:
@@ -422,6 +469,8 @@ class F5MLXEngine(F5Engine):
 
     def _load_in_thread(self) -> None:
         import f5_tts_mlx.cfm as cfm
+        import f5_tts_mlx.dit as dit
+        dit.Attention.__call__ = _attention_with_mask      # см. _attention_with_mask
         from pathlib import Path
         mdir = self._prepare_model_dir()
         # подменяем загрузчик, чтобы взять нашу локальную папку с верным именем файла
@@ -498,116 +547,218 @@ class F5MLXEngine(F5Engine):
 
     # --- синтез ---------------------------------------------------------
     def synth_chunk(self, text: str, voice: str, speed_mul: float = 1.0,
-                    **kw) -> np.ndarray:
-        self.ensure_loaded()
-        if not self.has_speech(text):
-            return np.zeros(0, dtype=np.float32)
+                    headroom_mul: float = 1.0, **kw) -> np.ndarray:
+        return self.synth_batch([text], voice, [speed_mul], [headroom_mul])[0]
 
+    def synth_batch(self, texts: list[str], voice: str,
+                    speed_muls: list[float] | None = None,
+                    headroom_muls: list[float] | None = None) -> list[np.ndarray]:
+        """Несколько кусков за ОДИН проход сети (пачкой), по звуку на кусок.
+
+        Куски разной длины добиваются до самого длинного, лишнее закрывается
+        маской внимания - результат каждого куска тот же, что и по одному
+        (проверяется в test_speed.py). headroom_mul > 1 - дать модели ещё
+        больше времени (повтор куска с недоговорённым концом).
+        """
+        self.ensure_loaded()
+        n = len(texts)
+        speed_muls = list(speed_muls or [1.0] * n)
+        headroom_muls = list(headroom_muls or [1.0] * n)
+        self.last_cut_risk = [False] * n
         audio, ref_text, out_gain, self._pace = self._get_ref(voice)
         ref_frames = audio.shape[0] // HOP_LENGTH
-        parts = _chunk_by_bytes(text.strip(), self._max_gen_bytes(ref_frames, ref_text))
-        waves: list[np.ndarray] = []
-        for part in parts:
+        max_bytes = self._max_gen_bytes(ref_frames, ref_text)
+        jobs: list[tuple[int, str]] = []          # (номер куска, под-кусок)
+        for i, text in enumerate(texts):
+            if self.has_speech(text):
+                jobs += [(i, part) for part in _chunk_by_bytes(text.strip(), max_bytes)]
+        waves: dict[int, list[np.ndarray]] = {i: [] for i in range(n)}
+        if jobs:
             try:
-                waves.append(self._synth_one(audio, ref_frames, ref_text, part, speed_mul))
+                outs = _in_mlx_thread(
+                    self._synth_in_thread, audio, ref_frames, ref_text,
+                    [p for _i, p in jobs], [speed_muls[i] for i, _p in jobs],
+                    [headroom_muls[i] for i, _p in jobs])
             except Exception as e:
                 from ..log import log_problem
-                log_problem("[F5-MLX] пропущен кусок", e)
-        wave = _cross_fade([w for w in waves if len(w)], SAMPLE_RATE)
-        if len(wave):
-            wave = wave * out_gain
-            if not np.all(np.isfinite(wave)):
-                wave = np.nan_to_num(wave, nan=0.0, posinf=0.0, neginf=0.0)
-        return np.asarray(wave, dtype=np.float32).reshape(-1)
+                log_problem("[F5-MLX] пачка кусков не озвучилась", e)
+                outs = [(np.zeros(0, dtype=np.float32), False)] * len(jobs)
+            for (i, _p), (w, risk) in zip(jobs, outs):
+                waves[i].append(w)
+                self.last_cut_risk[i] = self.last_cut_risk[i] or risk
+        result = []
+        for i in range(n):
+            wave = _cross_fade([w for w in waves[i] if len(w)], SAMPLE_RATE)
+            if len(wave):
+                wave = wave * out_gain
+                if not np.all(np.isfinite(wave)):
+                    wave = np.nan_to_num(wave, nan=0.0, posinf=0.0, neginf=0.0)
+            result.append(np.asarray(wave, dtype=np.float32).reshape(-1))
+        return result
 
-    def _synth_one(self, audio, ref_frames: int, ref_text: str, gen_text: str,
-                   speed_mul: float = 1.0) -> np.ndarray:
-        return _in_mlx_thread(self._synth_in_thread, audio, ref_frames,
-                              ref_text, gen_text, speed_mul)
+    def _gen_frames(self, ref_frames: int, ref_text: str, gen_text: str,
+                  speed_mul: float, headroom_mul: float) -> int:
+        """Длительность (в кадрах мела) - формула F5: по байтам utf-8, плюс запас.
 
-    def _synth_in_thread(self, audio, ref_frames: int, ref_text: str,
-                         gen_text: str, speed_mul: float = 1.0) -> np.ndarray:
-        import mlx.core as mx
-
-        # длительность — формула F5: по длине текста в БАЙТАХ utf-8, плюс запас.
-        # Запас нужен против «съеденных» слов: если отведённого времени впритык,
-        # модель не успевает договорить и обрывает последнее слово (а иногда
-        # комкает первое). Лишнее время она просто заполняет тишиной, которую
-        # всё равно съедает пауза между кусками, так что цена запаса нулевая.
+        Запас нужен против «съеденных» слов: если отведённого времени впритык,
+        модель не успевает договорить и обрывает последнее слово (а иногда
+        комкает первое). Лишнее время она просто заполняет тишиной.
+        """
         local_speed = (0.3 if len(gen_text.encode("utf-8")) < 10
                        else self.speed * speed_mul * self._pace)
         # короткому куску (заголовок, реплика) нужен запас побольше: материала
         # мало, модель торопится и проглатывает последнее слово
         headroom = (SHORT_HEADROOM if len(gen_text) < SHORT_CHUNK_CHARS
-                    else DURATION_HEADROOM)
-        duration = ref_frames + int(ref_frames / len(ref_text.encode("utf-8"))
-                                    * len(gen_text.encode("utf-8")) / local_speed
-                                    * headroom)
-        tokens = convert_char_to_tokens([ref_text + gen_text])
+                    else DURATION_HEADROOM) * headroom_mul
+        return ref_frames + int(ref_frames / len(ref_text.encode("utf-8"))
+                                * len(gen_text.encode("utf-8")) / local_speed * headroom)
 
-        mel = self._sample_mel(audio, tokens[0], duration)
-        mel = mel[:, ref_frames:, :]          # отбрасываем часть образца (в мел-домене)
-        wave = self._vocoder(mel.astype(mx.float32))
-        mx.eval(wave)
-        return _trim_tail(np.asarray(wave, dtype=np.float32).reshape(-1))
+    def _synth_in_thread(self, audio, ref_frames: int, ref_text: str,
+                         gen_texts: list[str], speed_muls: list[float],
+                         headroom_muls: list[float]) -> list[tuple[np.ndarray, bool]]:
+        import mlx.core as mx
+        durs = [self._gen_frames(ref_frames, ref_text, g, sm, hm)
+                for g, sm, hm in zip(gen_texts, speed_muls, headroom_muls)]
+        tokens = convert_char_to_tokens([ref_text + g for g in gen_texts])
+        tail = int(TAIL_ANCHOR_SEC * SAMPLE_RATE / HOP_LENGTH)
+        mel, lens = self._sample_mel(audio, tokens, durs, tails=[tail] * len(gen_texts))
+        out = []
+        for b in range(len(gen_texts)):
+            m = mel[b:b + 1, ref_frames:lens[b], :]   # отбрасываем часть образца (в мел-домене)
+            wave = self._vocoder(m.astype(mx.float32))
+            mx.eval(wave)
+            out.append(_finish_tail(np.asarray(wave, dtype=np.float32).reshape(-1)))
+        return out
 
     # --- решение ОДУ (метод Эйлера) с батчевым CFG -----------------------
-    def _sample_mel(self, audio, tokens: list[str], duration: int):
+    def _sample_mel(self, audio, tokens: list[list[str]], durations: list[int],
+                    noise: list | None = None, tails: list[int] | None = None):
         """Тот же расчёт, что F5TTS.sample(method="euler"), но экономнее.
 
         Отличия только в организации счёта, не в математике:
-          * условный и безусловный проходы CFG идут одним батчем (2, n, d) -
-            вместо двух отдельных вызовов сети на каждом шаге;
+          * условный и безусловный проходы CFG идут одним батчем;
+          * несколько кусков идут одним батчем (2 x кусков): разная длина
+            добивается до самой большой, добавка закрыта маской - в свёртке
+            позиций и во внимании, как в batch-режиме исходной F5;
           * эмбеддинг текста и rope считаются один раз на кусок, а не на каждом
             шаге (от шага они не зависят);
-          * не копится вся траектория - нужен только последний шаг;
-          * длительность - обычный int, поэтому не нужен патч mx.random.normal.
+          * не копится вся траектория - нужен только последний шаг.
+        noise - начальный шум по куску (для теста: тот же шум по одному и пачкой).
+        tails - сколько кадров известной тишины поставить в конец окна куска
+        (см. TAIL_ANCHOR_SEC); в результате они заменены самой тишиной.
+        Возвращает (мел (B, n, 100), настоящие длины кусков вместе с тишиной).
         """
         import mlx.core as mx
+        import mlx.nn as nn
         d = self._f5.transformer
         dt = getattr(mx, self.dtype)
+        B = len(tokens)
 
         cond = self._f5._mel_spec(audio)                      # (1, n_ref, 100)
         if cond.ndim == 2:
             cond = mx.expand_dims(cond, axis=0)
         ref_len = cond.shape[1]
-        n = max(ref_len + 1, int(duration))
+        # длина текста не должна превышать длину мела - как lens в F5TTS.sample
+        gen_end = [max(ref_len + 1, int(dur), len(tok)) for dur, tok in zip(durations, tokens)]
+        tails = list(tails or [0] * B)
+        lens = [g + t for g, t in zip(gen_end, tails)]
+        n = max(lens)
+        tl = max(len(t) for t in tokens)
+        # -1 - «пусто»: внутри text_embed станет заполнителем 0 и закроется маской
+        idx = mx.array([[self._vocab.get(c, 0) for c in t] + [-1] * (tl - len(t))
+                        for t in tokens], dtype=mx.int32)
 
-        idx = mx.array([[self._vocab.get(c, 0) for c in tokens]], dtype=mx.int32)
-        # длина текста не должна превышать длину мела — как lens в F5TTS.sample
-        n = max(n, idx.shape[1])
-
-        step_cond = mx.pad(cond, [(0, 0), (0, n - ref_len), (0, 0)]).astype(dt)
+        if any(tails):
+            # тишина в мел-домене - как у нулевого звука (образец кончается так же)
+            sil = self._f5._mel_spec(mx.zeros(((max(tails) + 2) * HOP_LENGTH,)))
+            if sil.ndim == 2:
+                sil = mx.expand_dims(sil, axis=0)
+            rows = []
+            for g, t in zip(gen_end, tails):
+                parts = [cond, mx.zeros((1, g - ref_len, 100))]
+                if t:
+                    parts.append(sil[:, :t, :])
+                if n - g - t:
+                    parts.append(mx.zeros((1, n - g - t, 100)))
+                rows.append(mx.concatenate(parts, axis=1))
+            step_cond = mx.concatenate(rows, axis=0).astype(dt)
+        else:
+            step_cond = mx.broadcast_to(
+                mx.pad(cond, [(0, 0), (0, n - ref_len), (0, 0)]), (B, n, 100)).astype(dt)
         # безусловный проход видит нулевое аудио-условие
         zero_cond = mx.zeros_like(step_cond)
+        same = all(L == n for L in lens)
+        mask = None if same else mx.concatenate([mx.arange(n)[None, :] < L for L in lens] * 2,
+                                                axis=0)          # (2B, n)
 
-        # текст и rope от шага не зависят — считаем один раз
-        te_keep = d.text_embed(idx, n, drop_text=False).astype(dt)
-        te_drop = d.text_embed(idx, n, drop_text=True).astype(dt)
+        # текст и rope от шага не зависят - считаем один раз. Каждый кусок -
+        # на СВОЕЙ длине, потом добивка нулями: в текстовом эмбеддинге F5 есть
+        # глобальная нормировка (GRN) по всей длине, и общая добивка меняла бы
+        # результат короткого куска (поймано test_speed)
+        if same:
+            te_keep = d.text_embed(idx, n, drop_text=False).astype(dt)
+            te_drop = d.text_embed(idx, n, drop_text=True).astype(dt)
+        else:
+            def te(drop):
+                rows = []
+                for b, L in enumerate(lens):
+                    e = d.text_embed(idx[b:b + 1, :len(tokens[b])], L, drop_text=drop)
+                    rows.append(mx.pad(e, [(0, 0), (0, n - L), (0, 0)]))
+                return mx.concatenate(rows, axis=0).astype(dt)
+            te_keep, te_drop = te(False), te(True)
         rope = d.rotary_embed.forward_from_seq_len(n)
+        ie = d.input_embed
 
-        x = mx.random.normal((1, n, 100)).astype(dt)
+        conv = ie.conv_pos_embed.conv1d.layers           # Conv1d, Mish, Conv1d, Mish
+        m3 = None if mask is None else mask[..., None]
 
+        def embed(xc, c, te):
+            # Свёртка позиций с маской после КАЖДОГО слоя. В библиотеке маска
+            # стоит только до и после всей пары свёрток, и добивка короткого
+            # куска протекала между ними в его последние кадры - туда, где
+            # окончание (поймано test_speed: расхождение мела 13 против 0).
+            h = ie.proj(mx.concatenate((xc, c, te), axis=-1))
+            y = h * m3
+            for layer in conv:
+                y = layer(y)
+                if isinstance(layer, nn.Mish):
+                    y = y * m3
+            return y + h
+
+        if noise is None:
+            x = mx.random.normal((B, n, 100)).astype(dt)
+        else:
+            x = mx.stack([mx.pad(z[:L], [(0, n - min(L, z.shape[0])), (0, 0)])
+                          for z, L in zip(noise, lens)]).astype(dt)
         t = self._timesteps()
 
         def flow(xc, tc):
-            time = mx.broadcast_to(tc.astype(dt), (2,))
+            time = mx.broadcast_to(tc.astype(dt), (2 * B,))
             tvec = d.time_embed(time)
-            h = mx.concatenate([
-                d.input_embed(xc, step_cond, te_keep, drop_audio_cond=False),
-                d.input_embed(xc, zero_cond, te_drop, drop_audio_cond=True),
-            ], axis=0)
+            if mask is None:
+                h = mx.concatenate([
+                    d.input_embed(xc, step_cond, te_keep, drop_audio_cond=False),
+                    d.input_embed(xc, zero_cond, te_drop, drop_audio_cond=True),
+                ], axis=0)
+            else:
+                h = embed(mx.concatenate([xc, xc], axis=0), mx.concatenate([step_cond, zero_cond], axis=0),
+                          mx.concatenate([te_keep, te_drop], axis=0))
             for blk in d.transformer_blocks:
-                h = blk(h, tvec, mask=None, rope=rope)
+                h = blk(h, tvec, mask=mask, rope=rope)
             out = d.proj_out(d.norm_out(h, tvec))
-            pred, null = out[0:1], out[1:2]
+            pred, null = out[:B], out[B:]
             return pred + (pred - null) * CFG_STRENGTH
 
         flow = mx.compile(flow)
         for i in range(t.shape[0] - 1):
             x = x + (t[i + 1] - t[i]).astype(dt) * flow(x, t[i])
+        if any(tails):
+            # известные участки - как в F5TTS.sample: на выходе ровно то, что дали
+            known = mx.stack([(mx.arange(n) >= g) & (mx.arange(n) < g + t)
+                              for g, t in zip(gen_end, tails)], axis=0)[:, :, None]
+            x = mx.where(known, step_cond, x)
         mx.eval(x)
-        return x
+        return x, lens
 
     def _timesteps(self):
         """Моменты времени для шагов ОДУ (после sway sampling, как в F5)."""

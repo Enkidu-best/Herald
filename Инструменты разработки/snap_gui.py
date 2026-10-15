@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Снимки окна в обеих темах для docs/Приёмка 3.0 (Озвучка, Голоса, Настройки).
+"""Снимки окна в обеих темах для docs/Приёмка 3.1 (Озвучка, Голоса, Настройки).
 
 Окно поднимается поверх полноэкранного VS Code (fullScreenAuxiliary) и
 снимается по номеру окна: screencapture -l<CGWindowID>.
@@ -72,8 +72,12 @@ names = {"light": "светлая", "dark": "тёмная"}
 # «Голоса» и «Настройки» - в обычном состоянии
 for mode in ("light", "dark"):
     app.set_theme(mode); pump(0.5)
-    app.show("voices")
-    app.select_fx_voice(next(v.id for v in app._all_voices() if not v.ready and v.language == "ru"))
+    app.show("voices"); pump(0.3)
+    me = cfg.get("voice") or next(v.id for v in app._all_voices() if not v.ready and v.language == "ru")
+    app.pick_voice(me); pump(0.3)
+    # наведение на соседнюю строку - чтобы на снимке было видно подсветку
+    other = next(k for k in app._voice_row_widgets if k != me)
+    app._voice_row_widgets[other].configure(fg_color=app._voice_row_color(other, True))
     shot(f"голоса - {names[mode]}")
     app.show("settings"); shot(f"настройки - {names[mode]}")
 # «Озвучка» - в момент работы: этап, части, кнопки
@@ -85,9 +89,20 @@ app.part_label.configure(text="Часть 5 из 27 - 40%")
 app._t0 = time.time() - (3 * 3600 + 12 * 60)
 app.status.configure(text="Шаг 2 из 3 · Озвучка - часть 5 из 27, 22 % · осталось ~11 ч 20 мин")
 app._progress = lambda *a: None
+app._live_rtf = 2.05
+app.status.configure(text="Шаг 2 из 3 · Озвучка - часть 5 из 27, 22 % · осталось ~11 ч 20 мин · RTF 2,05")
+rows = [w for w in app.rows.winfo_children() if isinstance(w, G.PartRow)]
+if rows:                                   # мини-плеер у первой части, на паузе
+    app.listen(rows[0]); pump(0.3)
+    app.player.pause(); app.player.seek(72.0)
 for mode in ("light", "dark"):
     app.set_theme(mode); pump(0.5)
-    app.show("book"); shot(f"озвучка - {names[mode]}")
+    app.show("book")
+    if rows and rows[0].transport is None:
+        rows[0].open_transport(app.player)
+    rows and rows[0].sync(app.player)
+    shot(f"озвучка - {names[mode]}")
+app._close_player()
 app.running = False
 G.save_config(cfg)
 ctk.set_appearance_mode(cfg.get('theme', 'system'))

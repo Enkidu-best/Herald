@@ -427,6 +427,22 @@ class F5Engine(TTSEngine):
     REF_MIN_LOGPROB = -0.6      # средняя уверенность Whisper по фразе
     REF_MAX_COMPRESSION = 2.4   # повторы («ля-ля-ля») - признак галлюцинации
     REF_MAX_LINE_CAPS = 0.12    # заглавные посреди фразы - строки стихов
+    # Звук образца (3.1). Обрезанный верх и срезанные вершины волны клон
+    # наследует: у «Вячеслава 2» (32 кбит/с, верх до 8 кГц) вышли шум, металл
+    # и хрип. Эти правила, как и текстовые, - только для АВТОМАТИЧЕСКОГО отбора
+    # нового образца: голос, уже выбранный на слух, ими не перепроверяется.
+    REF_MIN_CEILING = 9500.0    # Гц: выше этого должен быть хоть какой-то спектр
+    REF_MAX_CLIPPED = 2e-4      # доля отсчётов в срезанных вершинах
+
+    def _signal_problem(self, cand: dict | None) -> str | None:
+        """Почему звук фрагмента не годится в образец (или None)."""
+        if not cand:
+            return None
+        if cand["clipped"] > self.REF_MAX_CLIPPED:
+            return f"срезанные вершины волны ({cand['clipped']:.4f})"
+        if cand["ceiling"] < self.REF_MIN_CEILING:
+            return f"обрезан верх ({cand['ceiling'] / 1000:.1f} кГц)"
+        return None
 
     def _ref_text_problem(self, text: str, conf: list) -> str | None:
         """Почему фрагмент не годится в образец (или None, если годится)."""
@@ -572,9 +588,10 @@ class F5Engine(TTSEngine):
                         score -= TEMBRE_W * dev + TEMBRE_CLEAN * dirt
                     # негодный текст образца - фрагмент не берём, пока есть
                     # хоть один годный (иначе берём лучший и предупреждаем)
-                    problem = self._ref_text_problem(text, conf)
+                    problem = (self._signal_problem(cand)
+                               or self._ref_text_problem(text, conf))
                     if problem:
-                        kind = re.sub(r"\s*\(?[-\d.,%]+\)?", "", problem).strip()
+                        kind = re.sub(r"\s*\(?[-\d.,%]+\)?", "", problem.split(" (")[0]).strip()
                         rejected[kind] = rejected.get(kind, 0) + 1
                         score -= 1000.0
                     if best is None or score > best[0]:

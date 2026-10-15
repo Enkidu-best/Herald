@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Прогон окна без человека: открыть, потыкать, поймать ошибки (окно 3.0).
+"""Прогон окна без человека: открыть, потыкать, поймать ошибки (окно 3.1).
 
 Родился из истории, где одну и ту же кнопку ломали трижды подряд, а замечал
 это только пользователь. Тест поднимает настоящее окно, дёргает обработчики и
@@ -129,12 +129,40 @@ def main() -> int:
     vid = next(v.id for v in app._all_voices() if not v.ready)
     before = load_fx(default_voices_dir(), vid)
 
-    def fx_open():
-        app.select_fx_voice(vid)
+    def no_sound_button():
+        texts = []
+
+        def walk(w):
+            for c in w.winfo_children():
+                if isinstance(c, ctk.CTkButton):
+                    texts.append(c.cget("text"))
+                walk(c)
+        walk(app.voice_rows)
+        must("Звучание" not in texts, f"кнопки в списке голосов: {texts}")
+    check("кнопки «Звучание» больше нет", no_sound_button)
+
+    def row_click():
+        app.show("voices")
         app.update()
-        must(app._fx_voice == vid and app.fx_title.cget("text"), "не открылось")
+        row = app._voice_row_widgets[vid]
+        # настоящий щелчок мышью - по подписи с именем внутри строки
+        name = [c for c in row.winfo_children() if isinstance(c, ctk.CTkLabel)][1]
+        inner = getattr(name, "_label", name)
+        inner.event_generate("<Button-1>", x=2, y=2)
+        app.update()
+        must(app._fx_voice == vid and app.fx_title.cget("text"), "настройки не открылись")
+        must(app.current_voice() == vid, f"голос не выбран: {app.current_voice()}")
         must(str(app.fx_play_btn.cget("state")) == "normal", "«Прослушать» выключена")
-    check("звучание голоса открывается справа", fx_open)
+        row = app._voice_row_widgets[vid]
+        must(row.cget("fg_color") == T.ACCENT_SOFT, "выбранная строка не подсвечена")
+        other = next(k for k in app._voice_row_widgets if k != vid)
+        orow = app._voice_row_widgets[other]
+        app._voice_row_widgets[other] = orow
+        orow.configure(fg_color=app._voice_row_color(other, True))
+        must(orow.cget("fg_color") == T.SURFACE2, "наведение не подсвечивает")
+        must(app._voice_row_color(other, False) == "transparent", "подсветка не гаснет")
+    check("строка голоса: щелчок выбирает и открывает настройки, наведение подсвечивает",
+          row_click)
 
     def fx_save():
         sl, _l, _u = app._fx_vars["bass"]
@@ -187,19 +215,61 @@ def main() -> int:
 
     def profiles_switch():
         from core import profiles
+        must(list(profiles.PROFILES) == ["main", "espeech", "draft"], list(profiles.PROFILES))
+        must(len(app._profile_radios) == 3, "в Настройках не три движка")
+        clone = next(v for v in app._voices if not v.ready)
+        app.voice_var.set(clone.label())
         for key in profiles.PROFILES:
             app.profile_var.set(key)
             app._on_profile()
             app.update()
             engine, kw = app._eng_choice()
-            ready = not profiles.get(key).clone
-            must(all(v.ready == ready for v in app._voices), f"{key}: не те голоса")
-            must(engine == ("silero" if ready else "f5mlx"), f"{key}: движок {engine}")
+            must(engine == "f5mlx" and kw == profiles.get(key).kwargs, f"{key}: {engine} {kw}")
+            must(kw.get("steps") != 32, "32 шага в окне")
         app.profile_var.set("main")
         app._on_profile()
         e, kw = app._eng_choice()
         must(kw.get("steps") == 16 and "variant" not in kw, f"основной: {kw}")
-    check("четыре движка в Настройках и нужные голоса", profiles_switch)
+        ready = next(v for v in app._voices if v.ready)
+        app.voice_var.set(ready.label())
+        must(app._eng_choice()[0] == "silero", "готовый голос - не Silero")
+        must(app._rtf() == profiles.SILERO.rtf, "прогноз для Silero")
+        app.voice_var.set(clone.label())
+        must(any(v.ready for v in app._voices) and any(not v.ready for v in app._voices),
+             "в списке озвучки не все голоса")
+    check("три движка в Настройках (B16, C16, черновик), Silero - выбором голоса",
+          profiles_switch)
+    app.voice_var.set(next(v.label() for v in app._voices if v.id == cfg_backup.get("voice"))
+                      if any(v.id == cfg_backup.get("voice") for v in app._voices)
+                      else app.voice_var.get())
+
+    print("паузы:")
+
+    def pauses():
+        o = app._conv_options()
+        must((o.gap_sec, o.para_gap_sec, o.dialog_gap_sec) == (0.4, 0.8, 1.1) or
+             cfg_backup.get("pauses"), f"по умолчанию: {o.gap_sec}, {o.para_gap_sec}, {o.dialog_gap_sec}")
+        sl, _v = app._pause_vars["dialog_gap_sec"]
+        sl.set(1.5)
+        app._on_pause("dialog_gap_sec")
+        must(abs(app._conv_options().dialog_gap_sec - 1.5) < 1e-6, "пауза не дошла до озвучки")
+        must(abs(app.cfg["pauses"]["dialog_gap_sec"] - 1.5) < 1e-6, "пауза не запомнилась")
+        app._pauses_reset()
+        o = app._conv_options()
+        must((round(o.gap_sec, 2), round(o.para_gap_sec, 2), round(o.dialog_gap_sec, 2))
+             == (0.4, 0.8, 1.1), "«Как было» не вернула значения")
+    check("три паузы в Настройках: по умолчанию 0,4 / 0,8 / 1,1, доходят до озвучки", pauses)
+
+    def rtf_live():
+        app._set_busy(True, "тест")
+        app._got_rtf(2.05)
+        app._show_progress(0.3, "Озвучиваю: часть 1 из 2")
+        t = app.status.cget("text")
+        app._set_busy(False)
+        must("RTF 2,05" in t, t)
+        must(abs(app.cfg["rtf"]["main"] - 2.05) < 0.5, app.cfg.get("rtf"))
+        must("замерено" in app.tech_label.cget("text"), "замер не показан в Настройках")
+    check("честный RTF: в строке состояния и в Настройках", rtf_live)
     app.profile_var.set(cfg_backup.get("profile", "main"))
     app._on_profile()
 
@@ -294,6 +364,47 @@ def main() -> int:
         app._clear_parts()
         must(rows and vis == len(rows), f"видно {vis} из {len(rows)}")
     check("части видны после смены темы на другой странице", parts_survive_theme)
+
+    def mini_player():
+        import numpy as np
+        import soundfile as sf
+        import tempfile
+        d = tempfile.mkdtemp(prefix="herald_fx_")
+        files = []
+        for i in range(2):
+            f = os.path.join(d, f"часть{i}.wav")
+            sf.write(f, np.zeros(24000 * 5, dtype=np.float32), 24000)
+            files.append(f)
+        app._add_part("Часть 1", files[0], "")
+        app._add_part("Часть 2", files[1], "")
+        app.update()
+        rows = [w for w in app.rows.winfo_children() if isinstance(w, G.PartRow)]
+        r1, r2 = rows[-2], rows[-1]
+        app.listen(r1)
+        app.update()
+        must(r1.transport is not None and app.player.playing, "не заиграло")
+        must(r1.time_lbl.cget("text").endswith("/ 0:05"), r1.time_lbl.cget("text"))
+        app.player.toggle()
+        r1.sync(app.player)
+        must(not app.player.playing and r1._shown_playing is False, "пауза не встала")
+        r1.seek.set(0.6)
+        r1.seek._command(0.6)
+        must(abs(app.player.position - 3.0) < 0.3, f"перемотка: {app.player.position}")
+        must(r1.time_lbl.cget("text").startswith("0:03"), r1.time_lbl.cget("text"))
+        app.player.toggle()
+        must(app.player.playing, "играть после паузы")
+        r1.stop_btn.invoke()
+        must(not app.player.playing and app.player.position < 0.05, "стоп не вернул в начало")
+        app.listen(r2)
+        app.update()
+        must(r1.transport is None and r2.transport is not None, "играет не одна часть")
+        must(app.player.path == files[1] and app.player.playing, "вторая часть не играет")
+        app.on_close.__func__                     # обработчик закрытия есть
+        must(app.protocol("WM_DELETE_WINDOW"), "закрытие окна не перехвачено")
+        app._close_player()
+        must(not app.player.playing and r2.transport is None, "звук не остановился")
+        app._clear_parts()
+    check("мини-плеер: играть/пауза, стоп, время, перемотка, одна часть за раз", mini_player)
 
     def parts_list():
         n0 = app._n_parts
