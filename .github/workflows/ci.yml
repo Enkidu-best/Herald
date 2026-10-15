@@ -41,6 +41,9 @@ jobs:
         run: python "Инструменты разработки/test_stress.py"
       - name: Пробник Silero и клон F5 на процессоре
         run: python "Инструменты разработки/smoke_pc.py"
+      - name: Журнал Herald (при сбое)
+        if: failure()
+        run: cat ~/.local/state/Herald/log/herald.log || true
 
   windows:
     name: Windows · процессор
@@ -71,3 +74,7 @@ jobs:
         run: python "Инструменты разработки/smoke_pc.py"
       - name: Ссылка на ускорение NVIDIA (без скачивания)
         run: python -c "from core.cuda_pack import wheel_url; print(wheel_url())"
+      - name: Журнал Herald (при сбое)
+        if: failure()
+        shell: pwsh
+        run: Get-Content "$env:LOCALAPPDATA\Herald\Logs\herald.log" -ErrorAction SilentlyContinue

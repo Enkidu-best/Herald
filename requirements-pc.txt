@@ -22,11 +22,15 @@ pydub
 
 # --- распознавание (проверка кусков, расшифровка образца), VAD ---
 faster-whisper>=1.1
-onnxruntime
 
 # --- русская подготовка текста ---
-ruaccent
-silero-stress
+# Версии закреплены - проверенная связка с Mac. На свежей transformers 5.19
+# расстановка ударений RUAccent на раннерах GitHub не сработала вовсе.
+ruaccent==1.5.8.3
+transformers==5.17.0
+tokenizers==0.23.2
+onnxruntime==1.30.0
+silero-stress==1.5
 ru-normalizr
 num2words
 razdel
