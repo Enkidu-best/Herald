@@ -48,6 +48,7 @@ BOOK_EXT = (".txt", ".md", ".docx", ".epub", ".fb2", ".zip", ".pdf")
 SINGLE_FILE = "Один файл (без частей)"
 REVEAL_TEXT = osutil.REVEAL_TEXT
 STRICT_COST = 1.55         # строгая проверка слов: счёт дольше (замер 3.2: +50-58 %)
+SOUND_COST = 1.2           # проверка по звуку: счёт дольше (замер 3.3)
 FILE_LENGTHS = ["10 минут", "15 минут", "20 минут", "30 минут", "45 минут",
                 "60 минут", SINGLE_FILE]
 # При «Одном файле» синтез всё равно идёт частями по столько минут - ради
@@ -732,18 +733,22 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         bs = ctk.CTkFrame(cs, fg_color="transparent")
         bs.pack(fill="x", padx=18, pady=16)
         T.section(bs, "Проверка").pack(fill="x")
-        self.strict_var = ctk.BooleanVar(value=bool(self.cfg.get("strict_words", True)))
-        self.strict_chk = ctk.CTkCheckBox(
-            bs, text="Строгая проверка слов (дольше)", variable=self.strict_var,
+        self.sound_var = ctk.BooleanVar(value=bool(self.cfg.get("sound_check", True)))
+        self.sound_chk = ctk.CTkCheckBox(
+            bs, text="Проверка слов по звуку", variable=self.sound_var,
             font=T.font(14), fg_color=T.ACCENT, hover_color=T.ACCENT_HOVER,
             border_color=T.BORDER_STRONG, text_color=T.TEXT, command=self._on_strict)
-        self.strict_chk.pack(anchor="w", pady=(8, 0))
-        T.label(bs, "Каждый кусок распознаётся целиком; если слово в середине пропало или "
-                    "неразборчиво, кусок пересчитывается с другим зерном (до двух раз) и "
-                    "берётся лучший. Пропавших слов вчетверо меньше, но счёт примерно в "
-                    "полтора раза дольше. Края кусков проверяются всегда.",
+        self.sound_chk.pack(anchor="w", pady=(8, 0))
+        T.label(bs, "Текст книги укладывается на звук моделью без языковой догадки: "
+                    "съеденное, смазанное или заменённое слово («ногой» -> «новой») видно "
+                    "по звуку, и кусок пересчитывается с другим зерном (до двух раз); "
+                    "берётся вариант с лучшим худшим словом. Края кусков проверяются всегда.",
                 12, color=T.MUTED, anchor="w", justify="left", wraplength=640).pack(
             fill="x", padx=(30, 0))
+        # строгая проверка 3.2 (текст Whisper против текста книги) убрана из окна
+        # в 3.3: на слух выигрыша не дала, а время +50 %; проверка по звуку лучше
+        # на размеченном наборе (9 из 10 мест против 7 из 10)
+        self.strict_var = ctk.BooleanVar(value=False)
 
         c2 = T.card(page)
         c2.pack(fill="x", padx=28, pady=(0, 14))
@@ -809,6 +814,7 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
 
     def _on_strict(self):
         self.cfg["strict_words"] = bool(self.strict_var.get())
+        self.cfg["sound_check"] = bool(self.sound_var.get())
         save_config(self.cfg)
         self._check_resume()
         self.show_estimate()
@@ -829,7 +835,8 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         got = self.cfg.get("rtf", {}).get(self._rtf_key())
         if got:
             return float(got)
-        return profiles.rtf_for(p, self._accel) * (STRICT_COST if self.strict_var.get() else 1.0)
+        return (profiles.rtf_for(p, self._accel) * (STRICT_COST if self.strict_var.get() else 1.0)
+                * (SOUND_COST if self.sound_var.get() else 1.0))
 
     def _show_accel(self, accel: str):
         """Чем считается озвучка; на процессоре - честное предупреждение."""
@@ -879,7 +886,7 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
     def _rtf_key(self) -> str:
         """Замер RTF - на профиль И число шагов: при смене шагов старый не годится."""
         p = self.profile()
-        strict = "s" if self.strict_var.get() else "n"
+        strict = ("s" if self.strict_var.get() else "n") + ("z" if self.sound_var.get() else "")
         return f"{p.key}:{p.kwargs.get('steps', '')}:{self._accel}:{strict}"
 
     def _got_rtf(self, rtf: float):
@@ -1395,7 +1402,8 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         return ConvertOptions(make_m4b=False, make_chapter_mp3=True,
                               minutes_per_file=self.file_minutes(),
                               audio_format=self.fmt_var.get(), single_file=self.single_file(),
-                              strict_words=bool(self.strict_var.get()), **pauses)
+                              strict_words=bool(self.strict_var.get()),
+                              sound_check=bool(self.sound_var.get()), **pauses)
 
     def _ready(self) -> bool:
         if not self.book_path or not os.path.isfile(self.book_path):
@@ -1415,7 +1423,7 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
             r.configure(state=st)
         for sl, _v in self._pause_vars.values():
             sl.configure(state=st)
-        self.strict_chk.configure(state=st)
+        self.sound_chk.configure(state=st)
         self._pause_flag.clear()
         self.pause_btn.configure(text="Пауза", state="disabled")
         T.restyle(self.pause_btn, "default", "pause")

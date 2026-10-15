@@ -73,6 +73,8 @@ def main() -> int:
     ap.add_argument("--no-mp3", action="store_true", help="не сохранять отдельные mp3 по главам")
     ap.add_argument("--no-numbers", action="store_true", help="не разворачивать числа в слова")
     ap.add_argument("--no-stress", action="store_true", help="не расставлять ударения")
+    ap.add_argument("--no-word-check", action="store_true",
+                    help="не проверять слова по звуку (быстрее на ~20 %%, съеденные слова не пересчитываются)")
     ap.add_argument("--speed", type=float, default=None, help="F5: темп речи (>1 быстрее; ~1.2 по умолч.)")
     ap.add_argument("--nfe", type=int, default=None,
                     help="шагов синтеза (меньше=быстрее). f5mlx/f5torch: 12 по умолчанию, ещё 7/16")
@@ -143,7 +145,7 @@ def main() -> int:
         os.makedirs(args.out, exist_ok=True)   # иначе пробник считался, а записать было некуда
     opts = ConvertOptions(make_m4b=args.m4b, make_chapter_mp3=not args.no_mp3,
                           expand_numbers=not args.no_numbers, use_stress=not args.no_stress,
-                          workers=args.workers)
+                          workers=args.workers, sound_check=not args.no_word_check)
     rc = 0
     for path in args.inputs:
         if not os.path.isfile(path):

@@ -270,17 +270,21 @@ def main() -> int:
              == (0.4, 0.8, 1.1), "«Как было» не вернула значения")
     check("три паузы в Настройках: по умолчанию 0,4 / 0,8 / 1,1, доходят до озвучки", pauses)
 
-    def strict():
-        must(app.strict_var.get() is True or cfg_backup.get("strict_words") is False,
-             "строгая проверка слов по умолчанию включена")
-        app.strict_var.set(False); app._on_strict()
-        must(app._conv_options().strict_words is False, "выключение не дошло до озвучки")
+    def checks():
+        """3.3: проверка по звуку включена по умолчанию; строгой 3.2 в окне нет."""
+        must(app.sound_var.get() is True or cfg_backup.get("sound_check") is False,
+             "проверка по звуку по умолчанию включена")
+        must(not hasattr(app, "strict_chk"), "строгая проверка 3.2 убрана из окна")
+        o = app._conv_options()
+        must(o.sound_check == app.sound_var.get() and o.strict_words is False,
+             "настройки не дошли до озвучки")
+        app.sound_var.set(False); app._on_strict()
         cheap = app._rtf()
-        app.strict_var.set(True); app._on_strict()
-        must(app._conv_options().strict_words is True, "включение не дошло до озвучки")
-        must(app._rtf() > cheap * 1.3 or app.cfg.get("rtf", {}).get(app._rtf_key()),
-             "прогноз со строгой проверкой дольше")
-    check("«Строгая проверка слов (дольше)»: по умолчанию включена, доходит до озвучки", strict)
+        must(app._conv_options().sound_check is False, "проверка по звуку не выключается")
+        app.sound_var.set(True); app._on_strict()
+        must(app._rtf() > cheap or app.cfg.get("rtf", {}).get(app._rtf_key()),
+             "прогноз с проверкой по звуку дольше")
+    check("проверка слов по звуку включена, строгой 3.2 в окне нет", checks)
 
     def rtf_live():
         app._set_busy(True, "тест")

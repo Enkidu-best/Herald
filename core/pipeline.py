@@ -78,7 +78,12 @@ class ConvertOptions:
     # Строгая проверка слов всего куска (3.2): пропавшие и неразборчивые слова в
     # середине - пересинтез с другим зерном. Замер: пропавших слов 9 -> 2, но
     # счёт на 50-58 % дольше, поэтому это настройка (по умолчанию включена).
-    strict_words: bool = True
+    strict_words: bool = False
+    # Проверка слов ПО ЗВУКУ (3.3): текст книги выравнивается по звуку моделью
+    # без языковой догадки (core/align); съеденное, смазанное или заменённое
+    # слово - пересчёт куска с другим зерном. Заменяет строгую проверку 3.2,
+    # которая сравнивала текст Whisper с текстом книги и ловила не то.
+    sound_check: bool = True
 
 
 @dataclass
@@ -300,8 +305,22 @@ _ASR_MODEL = "small"          # core/asr: MLX на Mac, faster-whisper на Wind
 # слова, - нужен large-v3-turbo. Сверка по последним буквам, как для окончаний:
 # распознаватель «дописывает» обрубленное по смыслу (урок 3.1).
 _ASR_FULL = "turbo"
-STRICT_WORDS = True
+STRICT_WORDS = False          # 3.3: выключена - на слух выигрыша не дала, а время +50 %
+SOUND_CHECK = True            # 3.3: проверка слов по звуку (core/align)
 WORD_RETRIES = 2
+_align_failed = False
+
+
+def _sound_words(audio: np.ndarray, sr: int, text: str):
+    """Оценки слов по звуку или None, если модель выравнивания недоступна."""
+    if _align_failed:
+        return None
+    try:
+        from .align import aligner
+        return aligner().score(audio, sr, text)
+    except Exception as e:
+        _sound_failed(e)
+        return None
 # END_PUNCT: кусок без знака препинания в конце получает точку - без неё F5
 # чаще недоговаривает последнее слово. False - прежнее поведение (для замера).
 END_PUNCT = True
@@ -684,6 +703,21 @@ def _join(pieces: list[tuple[np.ndarray, float]], sr: int) -> np.ndarray:
     return np.concatenate(out) if out else np.zeros(int(sr * 0.2), dtype=np.float32)
 
 
+def _synth_by_sentences(eng, voice: str, text: str, mul: float, sr: int,
+                        gap: float) -> np.ndarray:
+    """Кусок по предложениям: каждое - отдельным вызовом, склейка с паузой.
+
+    Лечение стойкого пропуска фразы в длинном куске (3.3). Дороже обычного
+    пересчёта (образец прогоняется на каждое предложение), поэтому - только
+    когда пересчёт с другим зерном не помог.
+    """
+    sents = [s for s, _end in _split_sentences(text, 280)] or [text]
+    if len(sents) < 2:
+        return eng.synth_batch([text], voice, [mul])[0]
+    waves = eng.synth_batch([_with_end_punct(s) for s in sents], voice, [mul] * len(sents))
+    return _join([(w, gap) for w in waves if len(w)], sr)
+
+
 def _norm_items(chunks, gap_sec: float) -> list[tuple]:
     """Строки, пары (текст, пауза), тройки (…, темп) и четвёрки (…, отметки)."""
     items = []
@@ -716,7 +750,8 @@ def _synth_chunks(eng: TTSEngine, voice: str, chunks, sr: int,
                   gap_sec: float, on_chunk=None, should_stop=None,
                   lang: str = "ru", pause_gate=None, batch_size: int | None = None,
                   use_cache: bool = True, stats: dict | None = None,
-                  pipelined: bool = True, strict_words: bool | None = None) -> np.ndarray:
+                  pipelined: bool = True, strict_words: bool | None = None,
+                  sound_check: bool | None = None, on_piece=None) -> np.ndarray:
     """Куски -> звук части: пачками, с упреждением, кэшем и проверкой краёв.
 
     stats (если передан) пополняется: fresh_sec - звука посчитано заново,
@@ -726,6 +761,11 @@ def _synth_chunks(eng: TTSEngine, voice: str, chunks, sr: int,
     from . import synthcache
     if strict_words is None:
         strict_words = STRICT_WORDS
+    if sound_check is None:
+        sound_check = SOUND_CHECK
+    # по звуку проверяется только клон F5: готовые голоса Silero слов не
+    # глотают, а выравнивание шло бы дольше их собственного счёта
+    sound_check = sound_check and _clone(eng)
     items = _norm_items(chunks, gap_sec)
     texts = [_with_end_punct(t) for t, _g, _m, _k in items]
     muls = [m for _t, _g, m, _k in items]
@@ -773,15 +813,28 @@ def _synth_chunks(eng: TTSEngine, voice: str, chunks, sr: int,
         model = _ASR_FULL if strict_words else _ASR_MODEL
 
         def judge(i, audio, risk):
-            """(годится, оценка): оценка - чем больше, тем лучше дубль."""
+            """(годится, оценка): оценка - чем больше, тем лучше дубль.
+
+            По звуку оценка дубля - его САМОЕ ПЛОХОЕ слово (а не среднее): из
+            пересчётов берётся тот, где худшее слово звучит лучше всего."""
             h = _listen(audio, sr, lang, model) if len(audio) else None
             edges = not risk and _edges_verdict(h, texts[i], len(audio) / sr)
             bad = _bad_words(h, texts[i]) if strict_words else []
+            worst = 0.0
+            if sound_check and len(audio) and lang == "ru":
+                ws = _sound_words(audio, sr, texts[i])
+                if ws:
+                    from .align import is_bad
+                    bad = bad + [w.word for w in ws if is_bad(w)]
+                    worst = min(w.post_mean for w in ws)
+                    # времена слов по выравниванию точнее, чем у Whisper: по ним
+                    # и паузы внутри куска (слова те же, что в тексте)
+                    h = [(x, w.start, w.end) for w in ws for x in _words(w.word)]
             if bad or not edges:
                 heard_txt = " ".join(w for w, _s, _e in (h or []))
                 log_info(f"проверка куска: края {'да' if edges else 'НЕТ'}, слова не так: "
-                         f"{bad} | услышано: {heard_txt[:300]}")
-            return h, edges and not bad, (edges, -len(bad)), edges, bad
+                         f"{bad} | слова: {heard_txt[:300]}")
+            return h, edges and not bad, (edges, worst, -len(bad)), edges, bad
 
         best: dict[int, tuple] = {}
         need = []
@@ -800,23 +853,41 @@ def _synth_chunks(eng: TTSEngine, voice: str, chunks, sr: int,
             if not ok:
                 need.append((i, edges))
         tried = set()
-        for attempt in range(1, max(TAIL_RETRIES, WORD_RETRIES if strict_words else 0) + 1):
+        first_bad = {i: set(best[i][3]) for i, _e in need}
+        last_bad = dict(first_bad)
+        for attempt in range(1, max(TAIL_RETRIES, WORD_RETRIES if (strict_words or sound_check)
+                                    else 0) + 1):
             if not need:
                 break
             st["retries"] += len(need)
             tried.update(i for i, _e in need)
+            # Стойкий пропуск (3.3): если после пересчёта с другим зерном под
+            # подозрением ТЕ ЖЕ слова, третий раз зерно не поможет - модель
+            # выкидывает фразу из длинного куска («Раз мы здесь» пропадало во
+            # всех дублях). Тогда кусок читается по предложениям, каждое
+            # отдельно, и склеивается с обычными паузами.
+            split = [i for i, e in need if sound_check and e and attempt >= 2
+                     and last_bad.get(i, set()) & first_bad.get(i, set())]
+            reseed = [(i, e) for i, e in need if i not in split]
             # край съеден - даём больше времени; слово в середине - просто
             # другое зерно (каждый синтез стартует со своего шума)
             hms = [HEADROOM_STEPS[min(attempt, len(HEADROOM_STEPS) - 1)] if not e else 1.0
-                   for _i, e in need]
-            idx = [i for i, _e in need]
-            waves = eng.synth_batch([texts[i] for i in idx], voice, [muls[i] for i in idx], hms)
+                   for _i, e in reseed]
+            idx = [i for i, _e in reseed]
+            waves = (eng.synth_batch([texts[i] for i in idx], voice, [muls[i] for i in idx], hms)
+                     if idx else [])
             risks = list(getattr(eng, "last_cut_risk", None) or [False] * len(idx))
+            for i in split:
+                idx.append(i)
+                waves.append(_synth_by_sentences(eng, voice, texts[i], muls[i], sr, gap_sec))
+                risks.append(False)
+                st["split"] = st.get("split", 0) + 1
             still = []
             for i, w, r in zip(idx, waves, risks):
                 if not len(w):
                     continue
                 h, ok, score, edges, bad = judge(i, w, r)
+                last_bad[i] = set(bad)
                 if score > best[i][0]:
                     best[i] = (score, w, h, bad)
                 if not ok:
@@ -835,6 +906,8 @@ def _synth_chunks(eng: TTSEngine, voice: str, chunks, sr: int,
                 st["fresh_sec"] += len(audio) / sr
                 if use_cache:                        # лучший из дублей - окончательный
                     synthcache.put(keys[i], audio, sr, heard[i])
+            if on_piece is not None and len(audio):
+                on_piece(texts[i], audio)          # стенды: звук куска до пауз
             if len(audio):
                 audio, nfit = _fit_inner_pauses(audio, sr, texts[i], items[i][3], heard[i])
                 st["pauses_fit"] += nfit
@@ -897,7 +970,7 @@ def settings_fingerprint(engine: str, eng_kwargs: dict, voice: str,
         "opts": {k: getattr(opts, k) for k in (
             "minutes_per_file", "hd_filter", "audio_format", "expand_numbers",
             "use_stress", "gap_sec", "para_gap_sec", "dialog_gap_sec",
-            "single_file", "strict_words")},
+            "single_file", "strict_words", "sound_check")},
     }
     return hashlib.sha1(json.dumps(data, sort_keys=True, ensure_ascii=False,
                                    default=str).encode("utf-8")).hexdigest()
@@ -1013,11 +1086,36 @@ def _model_msg(engine: str, kw: dict | None) -> str:
             from .engines.f5_mlx import LANG_MODELS
             cfg = LANG_MODELS.get((kw or {}).get("language", "ru"), LANG_MODELS["ru"])
             if not isinstance(try_to_load_from_cache(cfg["repo"], cfg["ckpt"]), str):
-                return ("Скачиваю модели (первый запуск, около 3 ГБ - это может занять "
+                return ("Скачиваю модели (первый запуск, около 4,5 ГБ - это может занять "
                         "полчаса)…")
     except Exception:
         pass                          # не узнали - просто обычная надпись
     return "Готовлю модель синтеза…"
+
+
+def _clone(eng) -> bool:
+    return str(getattr(eng, "name", "")).startswith("f5")
+
+
+def _prepare_sound_check(say, kw: dict | None) -> None:
+    """Модель проверки слов по звуку - загрузить до первого куска. Иначе после
+    обновления с 3.2 первый кусок молча ждал бы скачивания 1,3 ГБ."""
+    if (kw or {}).get("language", "ru") != "ru" or _align_failed:
+        return
+    try:
+        from huggingface_hub import try_to_load_from_cache
+        from .align import MODEL, aligner
+        if not isinstance(try_to_load_from_cache(MODEL, "config.json"), str):
+            say(0.05, "Скачиваю модель проверки слов (один раз, 1,3 ГБ)…")
+        aligner().load()
+    except Exception as e:
+        _sound_failed(e)
+
+
+def _sound_failed(e: Exception) -> None:
+    global _align_failed
+    _align_failed = True
+    log_problem("проверка слов по звуку недоступна, куски не перепроверяются", e)
 
 
 # --- вся книга -----------------------------------------------------------
@@ -1180,6 +1278,8 @@ def convert_book(path: str, *, engine: str = "f5", eng_kwargs: dict | None = Non
             # модель грузим, только если есть что считать: продолжение, где всё
             # готово, не должно ждать загрузки 1,3 ГБ
             eng = _loaded_engine(engine, eng_kwargs) if len(reused) < len(prepared) else None
+            if eng is not None and opts.sound_check and _clone(eng):
+                _prepare_sound_check(say, eng_kwargs)
             stats: dict = {}
             paused = [0.0]
 
@@ -1212,6 +1312,7 @@ def convert_book(path: str, *, engine: str = "f5", eng_kwargs: dict | None = Non
                                       should_stop=should_stop, lang=doc_lang,
                                       pause_gate=gate, use_cache=opts.use_cache,
                                       strict_words=opts.strict_words,
+                                      sound_check=opts.sound_check,
                                       stats=stats)
                 spent = time.monotonic() - t0 - (paused[0] - p0)
                 fresh = stats.get("fresh_sec", 0) - f0
@@ -1354,6 +1455,8 @@ def preview_sample(path: str, *, engine: str = "f5", eng_kwargs: dict | None = N
         log_problem(f"не прочитался темп голоса «{voice}», пробник обычным темпом", e)
     eng = _loaded_engine(engine, eng_kwargs)
     sr = eng.sample_rate
+    if opts.sound_check and _clone(eng):
+        _prepare_sound_check(say, {"language": doc_lang})
 
     text = _prepare_text(ch.text, getattr(eng, "stress_format", None),
                          opts.expand_numbers, opts.use_stress, doc_lang)
@@ -1383,7 +1486,7 @@ def preview_sample(path: str, *, engine: str = "f5", eng_kwargs: dict | None = N
         say(0.2 + 0.7 * done[0] / max(1, len(chunks)), "Озвучиваю пробный фрагмент…")
     audio = _synth_chunks(eng, voice, chunks, sr, opts.gap_sec, on_chunk=bump,
                           lang=doc_lang, use_cache=opts.use_cache,
-                          strict_words=opts.strict_words)
+                          strict_words=opts.strict_words, sound_check=opts.sound_check)
 
     # временную папку пробника удаляет вызывающий (см. окно) или чистка при
     # запуске — она старше суток не живёт

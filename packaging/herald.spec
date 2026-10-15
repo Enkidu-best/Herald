@@ -28,7 +28,7 @@ for dist in ("torch", "torchaudio", "transformers", "tokenizers", "huggingface-h
         print("без метаданных:", dist, e)
 datas += [(os.path.join(ROOT, "assets"), "assets"),
           (os.path.join(ROOT, "core", "engines", "f5net", "LICENSE"), os.path.join("core", "engines", "f5net"))]
-hidden += ["theme", "player", "core", "core.osutil", "core.asr", "core.cuda_pack",
+hidden += ["theme", "player", "core", "core.osutil", "core.asr", "core.align", "core.cuda_pack",
            "core.engines.f5_torch", "core.engines.f5net.dit", "core.engines.f5net.modules",
            "sounddevice", "scipy.signal"]
 excludes = ["mlx", "mlx_whisper", "f5_tts", "f5_tts_mlx", "vocos_mlx", "AVFoundation", "Foundation",

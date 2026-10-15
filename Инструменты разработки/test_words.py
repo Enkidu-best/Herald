@@ -44,6 +44,24 @@ def main() -> int:
     must(not _ends_like("интриг", "нескончаемых интри".split()), "«интри» вместо «интриг» - дефект")
     must(_edges_verdict(h("в голову не выйди"), "- В г+олову: - Не в+ыйде...", 5.0),
          "оборванное автором слово («выйде…») сверяется мягко")
+    print("Проверка по звуку (3.3, случаи из размеченного набора):")
+    # «думаешь» -> «думать» ловится через соседа: «-ться» модель склеила со
+    # следующим «что» (на его месте слышно «ся», -13) - кусок всё равно помечен
+    from core.align import WordScore, is_bad
+    def w(word, heard, post):
+        return WordScore(word, word.lower(), 0, 0, 0, 0, 0, 0, "", [], post, 0, heard, 0)
+    for word, heard, post in [("ногой", "новое", -1.02), ("что", "ся", -13.1),
+                              ("на", "", -7.14), ("нажатий", "наж", -4.96), ("он", "о", -4.69)]:
+        must(is_bad(w(word, heard, post)), f"«{word}» -> «{heard}» ({post}): ошибка Андрея поймана")
+    for word, heard, post in [("абориген", "обреген", -1.79), ("судна", "судно", -1.04),
+                              ("сетчатку", "сичатку", -1.07), ("щёлкнул", "щелкнул", -0.3)]:
+        must(not is_bad(w(word, heard, post)),
+             f"«{word}» -> «{heard}» ({post}): безударные гласные - не ошибка")
+    from core.pipeline import _clone
+    must(_clone(type("E", (), {"name": "f5mlx"})()) and _clone(type("E", (), {"name": "f5torch"})()),
+         "клон F5 проверяется по звуку")
+    must(not _clone(type("E", (), {"name": "silero"})()),
+         "готовые голоса Silero по звуку не проверяются (дольше их счёта)")
     print("\nOK: сверка слов" if not fails else f"\nПРОВАЛ: {len(fails)}")
     return 1 if fails else 0
 
