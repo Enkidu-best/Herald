@@ -344,7 +344,9 @@ def _ends_like(want: str, heard: list[str]) -> bool:
     """
     import difflib
     k = 3 if len(want) >= 5 else 2
-    for h in heard[-2:]:
+    # до двух лишних слов после последнего: на тишине в конце Whisper дописывает
+    # («продолжение следует») - замер 3.2
+    for h in heard[-4:]:
         if h == want:
             return True
         if (h[-k:] == want[-k:]
@@ -476,11 +478,38 @@ def _bad_words(heard: list[tuple] | None, text: str) -> list[str]:
             if len(w) < 4 or not _known_word(raw[a0 + k]):
                 continue
             h = got[b0 + k] if tag == "replace" and b0 + k < b1 else ""
-            n = 3 if len(w) >= 5 else 2
-            if not (h and h[-n:] == w[-n:]
-                    and difflib.SequenceMatcher(None, w, h).ratio() >= 0.6):
+            if not (h and _same_word(w, h)):
                 bad.append(w)
     return bad
+
+
+_VOWELS = set("аеёиоуыэюяй")
+
+
+def _same_word(w: str, h: str) -> bool:
+    """Слово в СЕРЕДИНЕ куска прозвучало? (3.2, по замеру ложных срабатываний)
+
+    Распознаватель путает безударные окончания («носителя» -> «носители»,
+    «серией нажатий» -> «серии нажатия»): это не дефект синтеза, а его
+    слух. Поэтому засчитываем, если слово очень похоже (>= 0,8) или у слова
+    тот же согласный «скелет» - гласные (и «й») не различаются.
+    Пропавшее слово (нет пары вовсе) и невнятное (мало похоже) - не засчитано.
+    """
+    import difflib
+    r = difflib.SequenceMatcher(None, w, h).ratio()
+    if r >= 0.8:
+        return True
+    return r >= 0.6 and _skeleton(w) == _skeleton(h)
+
+
+def _skeleton(x: str) -> str:
+    """Согласный «скелет» слова: подряд идущие гласные (и «й») - одна «*»."""
+    out = []
+    for c in x:
+        c = "*" if c in _VOWELS else c
+        if not (c == "*" and out and out[-1] == "*"):
+            out.append(c)
+    return "".join(out)
 
 
 def _edges_ok(audio: np.ndarray, sr: int, text: str, head_only: bool = False,
@@ -748,6 +777,10 @@ def _synth_chunks(eng: TTSEngine, voice: str, chunks, sr: int,
             h = _listen(audio, sr, lang, model) if len(audio) else None
             edges = not risk and _edges_verdict(h, texts[i], len(audio) / sr)
             bad = _bad_words(h, texts[i]) if strict_words else []
+            if bad or not edges:
+                heard_txt = " ".join(w for w, _s, _e in (h or []))
+                log_info(f"проверка куска: края {'да' if edges else 'НЕТ'}, слова не так: "
+                         f"{bad} | услышано: {heard_txt[:300]}")
             return h, edges and not bad, (edges, -len(bad)), edges, bad
 
         best: dict[int, tuple] = {}
@@ -767,7 +800,7 @@ def _synth_chunks(eng: TTSEngine, voice: str, chunks, sr: int,
             if not ok:
                 need.append((i, edges))
         tried = set()
-        for attempt in range(1, max(TAIL_RETRIES, WORD_RETRIES) + 1):
+        for attempt in range(1, max(TAIL_RETRIES, WORD_RETRIES if strict_words else 0) + 1):
             if not need:
                 break
             st["retries"] += len(need)

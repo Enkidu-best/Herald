@@ -46,6 +46,7 @@ def main() -> int:
     import core.pipeline as P
     if a.no_retries:
         P.TAIL_RETRIES = 0
+        P.WORD_RETRIES = 0
 
     from core.engines import clone_engine
     eng = get_engine(clone_engine(), language="ru", steps=a.steps, schedule="epss")
