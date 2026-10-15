@@ -5,7 +5,7 @@
 FROM ubuntu:24.04
 ENV DEBIAN_FRONTEND=noninteractive PYTHONUNBUFFERED=1 PYTHONUTF8=1
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        python3 python3-venv python3-pip python3-tk ffmpeg libportaudio2 ca-certificates \
+        python3 python3-venv python3-pip python3-dev python3-tk build-essential ffmpeg libportaudio2 ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 RUN python3 -m venv /venv
 ENV PATH=/venv/bin:$PATH

@@ -39,6 +39,8 @@ jobs:
         run: python "Инструменты разработки/test_pauses.py" --fast
       - name: Сверка слов (без модели)
         run: python "Инструменты разработки/test_words.py"
+      - name: Числа и сокращения (ru-normalizr)
+        run: python "Инструменты разработки/test_normalize.py"
       - name: Ударения
         run: python "Инструменты разработки/test_stress.py"
       - name: Пробник Silero и клон F5 на процессоре
@@ -72,6 +74,8 @@ jobs:
         run: python "Инструменты разработки/test_pauses.py" --fast
       - name: Сверка слов (без модели)
         run: python "Инструменты разработки/test_words.py"
+      - name: Числа и сокращения (ru-normalizr)
+        run: python "Инструменты разработки/test_normalize.py"
       - name: Ударения
         run: python "Инструменты разработки/test_stress.py"
       - name: Пробник Silero и клон F5 на процессоре

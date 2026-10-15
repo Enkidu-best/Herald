@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import os as _os, sys as _sys
+import sys
 _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
 
 fails: list[str] = []
@@ -48,4 +49,7 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    rc = main()
+    sys.stdout.flush()
+    # без разбора объектов onnxruntime/MLX: на Mac он падает с «recursive_mutex»
+    _os._exit(rc)

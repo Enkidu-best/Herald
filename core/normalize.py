@@ -247,6 +247,34 @@ _RNZ_FAILED = False
 _END_PUNCT = ".!?…:;,»\")"
 
 
+def _load_ru_normalizr():
+    """ru-normalizr, проверенный на пробной фразе.
+
+    На Linux arm64 быстрый словарь pymorphy3 (пакет DAWG2) собирается из
+    исходников и выходит нерабочим: «unpack requires a buffer of 4 bytes»
+    (поймано в Docker 3.2). Тогда переключаем pymorphy3 на чисто питоновский
+    словарь DAWG2-Python - тот же формат, просто медленнее - и пробуем снова.
+    """
+    import sys
+
+    def make():
+        import ru_normalizr as R
+        opts = R.NormalizeOptions(enable_letter_abbreviation_expansion=True,
+                                  enable_initials_expansion=True)
+        f = lambda t: R.normalize(t, opts)  # noqa: E731
+        f("Профессор МГУ выступил в 1990 году.")       # проба: словарь читается
+        return f
+    try:
+        return make()
+    except Exception as e:
+        _log_once("быстрый словарь pymorphy3 не работает, беру медленный (DAWG2-Python)", e)
+        for name in [m for m in sys.modules if m.split(".")[0] in
+                     ("dawg", "pymorphy3", "ru_normalizr")]:
+            del sys.modules[name]
+        sys.modules["dawg"] = None                     # import dawg -> ImportError
+        return make()
+
+
 def _ru_normalizr(text: str) -> str:
     """ru-normalizr по абзацам; при сбое или без пакета - текст как есть.
 
@@ -260,10 +288,7 @@ def _ru_normalizr(text: str) -> str:
         return text
     try:
         if _RNZ is None:
-            import ru_normalizr as R
-            opts = R.NormalizeOptions(enable_letter_abbreviation_expansion=True,
-                                      enable_initials_expansion=True)
-            _RNZ = lambda t: R.normalize(t, opts)  # noqa: E731
+            _RNZ = _load_ru_normalizr()
         parts = re.split(r"(\n\s*\n)", text)
         out = []
         for p in parts:
