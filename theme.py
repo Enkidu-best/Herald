@@ -9,6 +9,7 @@
 Иконки лежат в assets/icons как чёрные PNG-маски (отрисованы из Lucide один
 раз) и перекрашиваются здесь под цвет и тему.
 """
+import sys
 from pathlib import Path
 
 import customtkinter as ctk
@@ -35,7 +36,8 @@ BAD_SOFT = ("#fbe7e5", "#2e1a19")
 
 RADIUS = 10
 RADIUS_SM = 8
-FAMILY = ".AppleSystemUIFont"      # системный шрифт macOS (= -apple-system в LKD)
+# системный шрифт: macOS (= -apple-system в LKD), Windows, Linux
+FAMILY = {"darwin": ".AppleSystemUIFont", "win32": "Segoe UI"}.get(sys.platform, "DejaVu Sans")
 
 ICONS = Path(__file__).with_name("assets") / "icons"
 

@@ -30,10 +30,10 @@ import tkinterdnd2
 
 import theme as T
 from core import VERSION, APP_NAME, APP_TAGLINE, ABOUT
-from core import keepawake, profiles
+from core import keepawake, profiles, osutil
 from core.assemble import FORMATS, DEFAULT_FORMAT, polish_wav_to_mp3, HD_FILTER
 from core.chapters import part_name
-from core.engines import get_engine
+from core.engines import get_engine, clone_engine, accel_label
 from core.engines.f5 import default_voices_dir
 from core.engines.silero import VOICES as SILERO_VOICES
 from core.log import log_problem, LOG_PATH
@@ -46,6 +46,8 @@ from player import Player, fmt_time
 
 BOOK_EXT = (".txt", ".md", ".docx", ".epub", ".fb2", ".zip", ".pdf")
 SINGLE_FILE = "Один файл (без частей)"
+REVEAL_TEXT = osutil.REVEAL_TEXT
+STRICT_COST = 1.6          # строгая проверка слов: счёт дольше (замер 3.2: +62 %)
 FILE_LENGTHS = ["10 минут", "15 минут", "20 минут", "30 минут", "45 минут",
                 "60 минут", SINGLE_FILE]
 # При «Одном файле» синтез всё равно идёт частями по столько минут - ради
@@ -62,11 +64,11 @@ VOICE_NAME_LIMIT = 24
 
 # --- мелочи ----------------------------------------------------------------
 def _open_path(path: str):
-    subprocess.run(["open", path], check=False)
+    osutil.open_path(path)
 
 
 def _reveal(path: str):
-    subprocess.run(["open", "-R", path], check=False)
+    osutil.reveal(path)
 
 
 def _fmt_hms(sec: float) -> str:
@@ -161,8 +163,10 @@ class PartRow(ctk.CTkFrame):
                 acts, "Слушать", "play", height=28, size=13, width=96,
                 command=lambda: self.on_listen(self) if self.on_listen else _open_path(path))
             self.listen_btn.pack(side="left", padx=(0, 4))
-            T.button(acts, "", "folder-open", kind="ghost", height=28,
-                     command=lambda: _reveal(path)).pack(side="left")
+            # одна кнопка папки на часть (3.2): «Показать в Finder» рядом с плеером
+            self.reveal_btn = T.button(acts, REVEAL_TEXT, "folder-open", kind="ghost",
+                                       height=28, size=13, command=lambda: _reveal(path))
+            self.reveal_btn.pack(side="left")
         else:
             T.chip(acts, "не записалась", "bad").pack()
         ctk.CTkFrame(self, height=1, fg_color=T.BORDER, corner_radius=0).grid(
@@ -252,6 +256,7 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         self._active_row: PartRow | None = None
         self._live_rtf: float | None = None
         self._pause_vars: dict = {}
+        self._accel = "mlx" if osutil.IS_APPLE_SILICON else "cpu"
 
         self._build_menu()
         self.grid_columnconfigure(2, weight=1)
@@ -275,6 +280,15 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         self.dnd_bind("<<Drop>>", self.on_drop)
         self.after(100, self._drain)
         threading.Thread(target=cleanup_stale_temp, daemon=True).start()
+
+        def detect():                     # torch грузится секунды - не в главном потоке
+            try:
+                a = accel_label()
+            except Exception as e:
+                log_problem("не удалось определить, чем считать озвучку", e, show=False)
+                a = "cpu"
+            self.ui(lambda: self._show_accel(a))
+        threading.Thread(target=detect, daemon=True).start()
 
     def on_close(self):
         """Закрытие окна: звук мини-плеера останавливается вместе с окном."""
@@ -500,9 +514,6 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         hdr.pack(fill="x", padx=16, pady=(10, 6))
         self.parts_title = T.label(hdr, "Готовые части", 15, bold=True, anchor="w")
         self.parts_title.pack(side="left")
-        self.folder_btn = T.button(hdr, "Папка", "folder-open", kind="ghost", height=30, size=13,
-                                   width=100, command=self.open_book_folder)
-        self.folder_btn.pack(side="right")
         self.rows = ctk.CTkScrollableFrame(self.info, fg_color="transparent", corner_radius=0)
         self.rows.pack(fill="both", expand=True, padx=1, pady=(0, 6))
         self.no_parts = T.label(self.rows, "Пока ни одной. Части появятся здесь по мере "
@@ -568,6 +579,9 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         T.section(o, "Движок").pack(fill="x")
         self.profile_chip = T.chip(o, "", "acc")
         self.profile_chip.pack(anchor="w", pady=(6, 2))
+        self.accel_hint = T.label(o, "", 12, color=T.MUTED, anchor="w", justify="left",
+                                  wraplength=290)
+        self.accel_hint.pack(fill="x")
         T.label(o, "Движок и паузы меняются в Настройках.", 12, color=T.MUTED,
                 anchor="w").pack(fill="x")
 
@@ -713,6 +727,24 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         T.button(bp, "Как было", "refresh-cw", kind="ghost", height=28, size=13, width=120,
                  command=self._pauses_reset).pack(anchor="w", pady=(6, 0))
 
+        cs = T.card(page)
+        cs.pack(fill="x", padx=28, pady=(0, 14))
+        bs = ctk.CTkFrame(cs, fg_color="transparent")
+        bs.pack(fill="x", padx=18, pady=16)
+        T.section(bs, "Проверка").pack(fill="x")
+        self.strict_var = ctk.BooleanVar(value=bool(self.cfg.get("strict_words", True)))
+        self.strict_chk = ctk.CTkCheckBox(
+            bs, text="Строгая проверка слов (дольше)", variable=self.strict_var,
+            font=T.font(14), fg_color=T.ACCENT, hover_color=T.ACCENT_HOVER,
+            border_color=T.BORDER_STRONG, text_color=T.TEXT, command=self._on_strict)
+        self.strict_chk.pack(anchor="w", pady=(8, 0))
+        T.label(bs, "Каждый кусок распознаётся целиком; если слово в середине пропало или "
+                    "неразборчиво, кусок пересчитывается с другим зерном (до двух раз) и "
+                    "берётся лучший. Пропавших слов почти вдвое меньше, но счёт примерно в "
+                    "полтора раза дольше. Края кусков проверяются всегда.",
+                12, color=T.MUTED, anchor="w", justify="left", wraplength=640).pack(
+            fill="x", padx=(30, 0))
+
         c2 = T.card(page)
         c2.pack(fill="x", padx=28, pady=(0, 14))
         b2 = ctk.CTkFrame(c2, fg_color="transparent")
@@ -723,12 +755,21 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         self.tech_label.pack(fill="x", pady=(6, 8))
         row = ctk.CTkFrame(b2, fg_color="transparent")
         row.pack(fill="x")
+        # Ускорение NVIDIA (Windows): видно, только если есть видеокарта, а
+        # считается на процессоре - torch с CUDA докачивается отдельно (~2,5 ГБ)
+        self.nv_box = ctk.CTkFrame(b2, fg_color="transparent")
+        self.nv_note = T.label(self.nv_box, "Найдена видеокарта NVIDIA. Чтобы озвучка шла на ней, "
+                                            "нужна сборка torch с CUDA (около 2,5 ГБ, скачивается "
+                                            "отдельно, чтобы не раздувать установщик).",
+                               12, color=T.MUTED, anchor="w", justify="left", wraplength=640)
+        self.nv_note.pack(fill="x")
+        self.nv_btn = T.button(self.nv_box, "Скачать ускорение NVIDIA", "upload", height=30,
+                               size=13, width=240, command=self._nvidia_download)
+        self.nv_btn.pack(anchor="w", pady=(6, 8))
         T.button(row, "Журнал проблем", "circle-alert", height=30, size=13, width=170,
                  command=lambda: _open_path(LOG_PATH) if os.path.exists(LOG_PATH)
                  else messagebox.showinfo("Журнал", "Журнал пока пуст - проблем не было.")
                  ).pack(side="left")
-        T.button(row, "Папка голосов", "folder-open", height=30, size=13, width=160,
-                 command=lambda: _open_path(default_voices_dir())).pack(side="left", padx=6)
 
         c3 = T.card(page)
         c3.pack(fill="x", padx=28, pady=(0, 22))
@@ -743,7 +784,7 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
     def _update_tech(self):
         p = self.profile()
         kw = ", ".join(f"{k}={v}" for k, v in p.kwargs.items()) or "-"
-        got = self.cfg.get("rtf", {}).get(p.key)
+        got = self.cfg.get("rtf", {}).get(self._rtf_key())
         measured = (f"замерено при последней озвучке: {got:.2f}" if got
                     else "замера ещё не было - оценка по стенду")
         self.tech_label.configure(text=(
@@ -766,6 +807,12 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
             save_config(self.cfg)
             self._check_resume()
 
+    def _on_strict(self):
+        self.cfg["strict_words"] = bool(self.strict_var.get())
+        save_config(self.cfg)
+        self._check_resume()
+        self.show_estimate()
+
     def _pauses_reset(self):
         for key, _t, dflt, _lo, _hi in PAUSES:
             self._pause_vars[key][0].set(dflt)
@@ -774,20 +821,72 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         save_config(self.cfg)
 
     def _rtf(self) -> float:
-        """RTF для прогноза: замеренный на этом Mac, если был, иначе по стенду."""
+        """RTF для прогноза: замеренный на этом компьютере, если был, иначе по стенду."""
         v = self._voice_obj()
         if v is not None and v.ready:
             return profiles.SILERO.rtf
         p = self.profile()
-        got = self.cfg.get("rtf", {}).get(p.key)
-        return float(got) if got else p.rtf
+        got = self.cfg.get("rtf", {}).get(self._rtf_key())
+        if got:
+            return float(got)
+        return profiles.rtf_for(p, self._accel) * (STRICT_COST if self.strict_var.get() else 1.0)
+
+    def _show_accel(self, accel: str):
+        """Чем считается озвучка; на процессоре - честное предупреждение."""
+        self._accel = accel
+        try:
+            from core import cuda_pack
+            show_nv = (osutil.IS_WIN and accel == "cpu" and not cuda_pack.ready()
+                       and osutil.has_nvidia())
+        except Exception:
+            show_nv = False
+        if show_nv and not self.nv_box.winfo_manager():
+            self.nv_box.pack(fill="x", before=self.tech_label)
+        if accel == "cpu":
+            self.accel_hint.configure(
+                text="Считается на процессоре: книга - сутки и больше. Быстро на "
+                     "процессоре работают готовые голоса Silero (страница «Голоса»).",
+                text_color=T.WARN)
+        else:
+            self.accel_hint.configure(text="Считается: " + profiles.ACCEL_TITLE.get(accel, accel),
+                                      text_color=T.MUTED)
+        self.show_estimate()
+
+    def _nvidia_download(self):
+        from core import cuda_pack
+        self.nv_btn.configure(state="disabled", text="Скачиваю…")
+
+        def prog(got, total):
+            pct = int(got * 100 / total) if total else 0
+            self.ui(lambda: self.nv_btn.configure(text=f"Ускорение NVIDIA: {pct}%"))
+
+        def work():
+            try:
+                cuda_pack.download(prog)
+                self.ui(lambda: (self.nv_btn.configure(text="Готово"),
+                                 self.nv_note.configure(text="Ускорение скачано. Перезапустите "
+                                                             "Herald - озвучка пойдёт на видеокарте.",
+                                                        text_color=T.OK)))
+            except Exception as e:
+                log_problem("ускорение NVIDIA не скачалось", e, show=False)
+                self.ui(lambda: (self.nv_btn.configure(state="normal",
+                                                       text="Скачать ускорение NVIDIA"),
+                                 self.nv_note.configure(text=f"Не скачалось: {e}",
+                                                        text_color=T.BAD)))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _rtf_key(self) -> str:
+        """Замер RTF - на профиль И число шагов: при смене шагов старый не годится."""
+        p = self.profile()
+        strict = "s" if self.strict_var.get() else "n"
+        return f"{p.key}:{p.kwargs.get('steps', '')}:{self._accel}:{strict}"
 
     def _got_rtf(self, rtf: float):
         """Настоящий RTF от конвейера: показать и запомнить для прогноза."""
         self._live_rtf = rtf
         v = self._voice_obj()
         if v is not None and not v.ready:
-            key = self.profile().key
+            key = self._rtf_key()
             old = self.cfg.setdefault("rtf", {}).get(key)
             # сглаживаем: одна часть с кэшем или переозвучками не должна дёргать прогноз
             self.cfg["rtf"][key] = round(rtf if not old else 0.7 * old + 0.3 * rtf, 3)
@@ -813,7 +912,7 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
     def _all_voices(self) -> list[_V]:
         out = []
         try:
-            for v in get_engine("f5mlx").list_voices():
+            for v in get_engine(clone_engine()).list_voices():
                 out.append(_V(v.id, v.id, v.language, False))
         except Exception as e:
             log_problem("не удалось прочитать список голосов", e)
@@ -877,7 +976,8 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         self._voice_row_widgets = {}
         allv = self._all_voices()
         groups = [("Клоны (ваши дикторы)", [v for v in allv if not v.ready]),
-                  ("Готовые (быстро, без клонирования)", [v for v in allv if v.ready])]
+                  ("Готовые Silero (быстро, без клонирования; лицензия некоммерческая)",
+                   [v for v in allv if v.ready])]
         fxdir = default_voices_dir()
         chosen = self.current_voice()
         for gtitle, vs in groups:
@@ -887,7 +987,7 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
                     fill="x", padx=14)
             for v in vs:
                 row = ctk.CTkFrame(self.voice_rows, fg_color="transparent", corner_radius=8,
-                                   cursor="pointinghand")
+                                   cursor=osutil.HAND)
                 row.pack(fill="x", padx=8, pady=1)
                 row.grid_columnconfigure(1, weight=1)
                 ic = ctk.CTkLabel(row, text="", image=T.icon("mic", T.MUTED, 18))
@@ -1020,7 +1120,7 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
                         kw = dict(prof.kwargs)
                         if lang != "ru":
                             kw.pop("variant", None)
-                        eng = get_engine("f5mlx", language=lang, speed=fx.speed, **kw)
+                        eng = get_engine(clone_engine(), language=lang, speed=fx.speed, **kw)
                         text = self.FX_PHRASE.get(lang, self.FX_PHRASE["ru"])
                     audio = eng.synth_chunk(text, vid)
                     raw = os.path.join(tempfile.mkdtemp(prefix="herald_fx_"), "raw.wav")
@@ -1030,7 +1130,15 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
                 chain = ",".join(x for x in (HD_FILTER, fx.filter_chain()) if x)
                 subprocess.run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
                                 "-i", raw, "-af", chain, out], check=True)
-                subprocess.run(["afplay", out], check=False)
+                # тем же плеером, что и части (afplay есть только на Mac)
+                fxp = Player()
+                if fxp.load(out):
+                    fxp.play()
+                    while fxp.playing:
+                        time.sleep(0.2)
+                    fxp.stop()
+                else:
+                    _open_path(out)
             except Exception as e:
                 log_problem("прослушивание голоса не удалось", e, show=False)
                 self.ui(lambda: messagebox.showerror("Ошибка", str(e)))
@@ -1059,7 +1167,7 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
 
         def work():
             try:
-                vid = get_engine("f5mlx").prepare_reference(p, name=name.strip())
+                vid = get_engine(clone_engine()).prepare_reference(p, name=name.strip())
                 self.ui(lambda: (self._set_busy(False, f"Голос готов: {vid}"),
                                  self.cfg.update(voice=vid), self.refresh_voices(),
                                  self._refresh_voice_rows(), self.select_fx_voice(vid)))
@@ -1163,15 +1271,6 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
             f"{lang} · {parts} · звука {_fmt_hms(audio_sec)}\n"
             f"Ждать около {_fmt_hms(wait)} · на диске ~{size}.{night}"))
         self._check_resume()
-
-    def open_book_folder(self):
-        if not self.book_path:
-            return
-        try:
-            d = output_dir_for(self.book_path)
-        except Exception:
-            d = os.path.dirname(self.book_path)
-        _open_path(d if os.path.isdir(d) else os.path.dirname(self.book_path))
 
     # --- список частей ---
     def _clear_parts(self):
@@ -1284,7 +1383,7 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         kw = dict(self.profile().kwargs)
         if v is not None and v.language != "ru":
             kw.pop("variant", None)
-        return "f5mlx", kw
+        return clone_engine(), kw
 
     # совместимость с тестами и CLI
     def _eng_kwargs(self) -> dict:
@@ -1295,7 +1394,7 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         return ConvertOptions(make_m4b=False, make_chapter_mp3=True,
                               minutes_per_file=self.file_minutes(),
                               audio_format=self.fmt_var.get(), single_file=self.single_file(),
-                              **pauses)
+                              strict_words=bool(self.strict_var.get()), **pauses)
 
     def _ready(self) -> bool:
         if not self.book_path or not os.path.isfile(self.book_path):
@@ -1315,6 +1414,7 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
             r.configure(state=st)
         for sl, _v in self._pause_vars.values():
             sl.configure(state=st)
+        self.strict_chk.configure(state=st)
         self._pause_flag.clear()
         self.pause_btn.configure(text="Пауза", state="disabled")
         T.restyle(self.pause_btn, "default", "pause")
@@ -1379,6 +1479,8 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
             text = f"Шаг 2 из 3 · Озвучка - {detail}, {int(fr * 100)} %{left}{rtf}"
         elif step == 3:
             text = f"Шаг 3 из 3 · {what}" if fr < 1 else "Готово"
+        elif msg.startswith("Скачиваю модели"):
+            text = f"Шаг 1 из 3 · {msg}"      # первый запуск: честно, что идёт скачивание
         else:
             text = f"Шаг 1 из 3 · {what}"
         self.status.configure(text=text)
@@ -1589,12 +1691,23 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
 
 
 def main():
+    osutil.fix_streams()               # у оконной сборки Windows нет консоли
+    osutil.setup_path()                # ffmpeg из установщика, Homebrew на Mac
+    if osutil.IS_WIN:
+        try:
+            from core import cuda_pack
+            cuda_pack.activate()       # ускорение NVIDIA, если докачано
+        except Exception as e:
+            log_problem("ускорение NVIDIA не подключилось", e, show=False)
     T.apply()
     cfg = load_config()
     ctk.set_appearance_mode(cfg.get("theme", "system"))
     app = App()
     sys.stderr = App._StderrToLog(app, sys.stderr)
     app.mainloop()
+    # Выход без разбора объектов Metal (MLX) и onnxruntime: изредка он падал с
+    # «recursive_mutex lock failed» (опыт Scribe 2.4)
+    os._exit(0)
 
 
 if __name__ == "__main__":

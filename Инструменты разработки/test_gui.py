@@ -229,7 +229,7 @@ def main() -> int:
         app.profile_var.set("main")
         app._on_profile()
         e, kw = app._eng_choice()
-        must(kw.get("steps") == 16 and "variant" not in kw, f"основной: {kw}")
+        must(kw.get("steps") == 12 and "variant" not in kw, f"основной: {kw}")
         ready = next(v for v in app._voices if v.ready)
         app.voice_var.set(ready.label())
         must(app._eng_choice()[0] == "silero", "готовый голос - не Silero")
@@ -242,6 +242,16 @@ def main() -> int:
     app.voice_var.set(next(v.label() for v in app._voices if v.id == cfg_backup.get("voice"))
                       if any(v.id == cfg_backup.get("voice") for v in app._voices)
                       else app.voice_var.get())
+
+    def accel():
+        app._show_accel("cpu")
+        t = app.accel_hint.cget("text")
+        must("сутки" in t and "Silero" in t, t)
+        wait_cpu = app._rtf()
+        app._show_accel("mlx")
+        must("Apple" in app.accel_hint.cget("text"), app.accel_hint.cget("text"))
+        must(wait_cpu > app._rtf() * 5, f"прогноз на процессоре {wait_cpu} против {app._rtf()}")
+    check("чем считается: на процессоре - предупреждение и честный прогноз", accel)
 
     print("паузы:")
 
@@ -260,6 +270,18 @@ def main() -> int:
              == (0.4, 0.8, 1.1), "«Как было» не вернула значения")
     check("три паузы в Настройках: по умолчанию 0,4 / 0,8 / 1,1, доходят до озвучки", pauses)
 
+    def strict():
+        must(app.strict_var.get() is True or cfg_backup.get("strict_words") is False,
+             "строгая проверка слов по умолчанию включена")
+        app.strict_var.set(False); app._on_strict()
+        must(app._conv_options().strict_words is False, "выключение не дошло до озвучки")
+        cheap = app._rtf()
+        app.strict_var.set(True); app._on_strict()
+        must(app._conv_options().strict_words is True, "включение не дошло до озвучки")
+        must(app._rtf() > cheap * 1.3 or app.cfg.get("rtf", {}).get(app._rtf_key()),
+             "прогноз со строгой проверкой дольше")
+    check("«Строгая проверка слов (дольше)»: по умолчанию включена, доходит до озвучки", strict)
+
     def rtf_live():
         app._set_busy(True, "тест")
         app._got_rtf(2.05)
@@ -267,7 +289,7 @@ def main() -> int:
         t = app.status.cget("text")
         app._set_busy(False)
         must("RTF 2,05" in t, t)
-        must(abs(app.cfg["rtf"]["main"] - 2.05) < 0.5, app.cfg.get("rtf"))
+        must(abs(app.cfg["rtf"][app._rtf_key()] - 2.05) < 0.5, app.cfg.get("rtf"))
         must("замерено" in app.tech_label.cget("text"), "замер не показан в Настройках")
     check("честный RTF: в строке состояния и в Настройках", rtf_live)
     app.profile_var.set(cfg_backup.get("profile", "main"))
@@ -405,6 +427,28 @@ def main() -> int:
         must(not app.player.playing and r2.transport is None, "звук не остановился")
         app._clear_parts()
     check("мини-плеер: играть/пауза, стоп, время, перемотка, одна часть за раз", mini_player)
+
+    def no_duplicate_folders():
+        """3.2: у части одна кнопка папки; в шапке списка и в Настройках дублей нет."""
+        def buttons(w):
+            out = []
+            for c in w.winfo_children():
+                if isinstance(c, ctk.CTkButton):
+                    out.append(c)
+                out += buttons(c)
+            return out
+        app._add_part("Часть 1", os.path.abspath(book), "")
+        app.update()
+        row = [w for w in app.rows.winfo_children() if isinstance(w, G.PartRow)][-1]
+        others = [b for b in buttons(row) if b is not row.listen_btn]
+        must(others == [row.reveal_btn], f"кроме «Слушать» у части кнопок: {len(others)}")
+        must(row.reveal_btn.cget("text") == G.REVEAL_TEXT, row.reveal_btn.cget("text"))
+        texts = [b.cget("text") for b in buttons(app.info)]
+        must("Папка" not in texts, f"кнопка «Папка» над списком частей: {texts}")
+        texts = [b.cget("text") for b in buttons(app.pages["settings"])]
+        must("Папка голосов" not in texts, "дубль «Папка голосов» в Настройках")
+        app._clear_parts()
+    check("кнопки папки без дублей", no_duplicate_folders)
 
     def parts_list():
         n0 = app._n_parts

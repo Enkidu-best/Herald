@@ -351,6 +351,18 @@ def _attention_with_mask(self, x, mask=None, rope=None):
     return x
 
 
+def timesteps(steps: int, schedule: str = "epss") -> np.ndarray:
+    """Моменты времени шагов ОДУ после sway sampling - общие для MLX и torch."""
+    if schedule == "epss":
+        sched = EPSS_STEPS.get(steps)
+        if sched is None:                      # нет такой таблицы - берём ближайшую
+            sched = EPSS_STEPS[min(EPSS_STEPS, key=lambda k: abs(k - steps))]
+        t = np.array([v / 32.0 for v in sched], dtype=np.float32)
+    else:
+        t = np.linspace(0, 1, steps, dtype=np.float32)   # равномерно, как torch-версия
+    return (t + SWAY_COEF * (np.cos(np.pi / 2 * t) - 1 + t)).astype(np.float32)
+
+
 class F5MLXEngine(F5Engine):
     name = "f5mlx"
     sample_rate = SAMPLE_RATE
@@ -763,11 +775,4 @@ class F5MLXEngine(F5Engine):
     def _timesteps(self):
         """Моменты времени для шагов ОДУ (после sway sampling, как в F5)."""
         import mlx.core as mx
-        if self.schedule == "epss":
-            sched = EPSS_STEPS.get(self.steps)
-            if sched is None:                      # нет такой таблицы — берём ближайшую
-                sched = EPSS_STEPS[min(EPSS_STEPS, key=lambda k: abs(k - self.steps))]
-            t = mx.array([v / 32.0 for v in sched], dtype=mx.float32)
-        else:
-            t = mx.linspace(0, 1, self.steps)      # равномерно, как torch-версия
-        return t + SWAY_COEF * (mx.cos(mx.pi / 2 * t) - 1 + t)
+        return mx.array(timesteps(self.steps, self.schedule))

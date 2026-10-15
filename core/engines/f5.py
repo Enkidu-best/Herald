@@ -44,8 +44,6 @@ PROBE_SECONDS = 25        # столько слушаем в каждой про
 START_BONUS = 6.0         # небольшая фора началу записи при выборе образца
 TEMBRE_W = 25.0           # вес совпадения тембра образца со средним по записи
 TEMBRE_CLEAN = 30.0       # штраф за верх ГРЯЗНЕЕ, чем в среднем по записи
-WHISPER_MLX = "mlx-community/whisper-large-v3-turbo"   # быстрый и точный на M-чипе
-WHISPER_FALLBACK = "small"                              # если MLX недоступен
 
 
 def default_voices_dir() -> str:
@@ -649,33 +647,20 @@ class F5Engine(TTSEngine):
         return None
 
     def _transcribe_segments(self, wav_path: str) -> list[tuple[float, float, str]]:
-        """Фразы с таймкодами. Сначала быстрый MLX-turbo, иначе faster-whisper."""
-        try:
-            import mlx_whisper
-            # язык НЕ навязываем: whisper определяет его сам и делает это точно.
-            # Раньше здесь стояло language="ru", и английская запись
-            # расшифровывалась русскими буквами («Шоан Антони, е-learning reel»),
-            # а с таким текстом образца клон получался никуда не годный.
-            r = mlx_whisper.transcribe(wav_path, path_or_hf_repo=WHISPER_MLX,
-                                       verbose=False)
-            self.detected_language = r.get("language") or "ru"
-            # уверенность распознавания по фразам - для отбора образца
-            self.seg_conf = {(round(s["start"], 2), round(s["end"], 2)):
-                             (s.get("avg_logprob", 0.0), s.get("compression_ratio", 1.0))
-                             for s in r["segments"]}
-            return [(s["start"], s["end"], s["text"]) for s in r["segments"]]
-        except Exception as e:
-            from ..log import log_problem
-            log_problem("быстрая расшифровка (MLX) недоступна, беру запасную", e,
-                        show=False)
-            from faster_whisper import WhisperModel
-            m = WhisperModel(WHISPER_FALLBACK, device="cpu", compute_type="int8")
-            segs, info = m.transcribe(wav_path)
-            self.detected_language = getattr(info, "language", None) or "ru"
-            segs = list(segs)
-            self.seg_conf = {(round(s.start, 2), round(s.end, 2)):
-                             (s.avg_logprob, s.compression_ratio) for s in segs}
-            return [(s.start, s.end, s.text) for s in segs]
+        """Фразы с таймкодами: Whisper large-v3-turbo (core/asr - MLX на Mac,
+        faster-whisper на Windows и Linux)."""
+        from .. import asr
+        # язык НЕ навязываем: whisper определяет его сам и делает это точно.
+        # Раньше здесь стояло language="ru", и английская запись
+        # расшифровывалась русскими буквами («Шоан Антони, е-learning reel»),
+        # а с таким текстом образца клон получался никуда не годный.
+        r = asr.transcribe(wav_path, "turbo")
+        self.detected_language = r.get("language") or "ru"
+        # уверенность распознавания по фразам - для отбора образца
+        self.seg_conf = {(round(s["start"], 2), round(s["end"], 2)):
+                         (s.get("avg_logprob", 0.0), s.get("compression_ratio", 1.0))
+                         for s in r["segments"]}
+        return [(s["start"], s["end"], s["text"]) for s in r["segments"]]
 
     def _transcribe_text(self, wav_path: str) -> str:
         try:

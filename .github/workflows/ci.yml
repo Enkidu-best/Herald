@@ -1,0 +1,73 @@
+name: Проверки (Windows, Linux)
+
+on:
+  push:
+    branches: [main, "dev/**"]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: "utf-8"
+  HERALD_HOME_NOTE: "голоса для клона делаются тут же из Silero - чужих образцов в репозитории нет"
+
+jobs:
+  linux:
+    name: Linux · процессор
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: ffmpeg, PortAudio, Tk
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg libportaudio2 python3-tk
+      - name: torch для процессора
+        run: pip install torch==2.6.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cpu
+      - name: Зависимости
+        run: pip install -r requirements-pc.txt
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/huggingface
+            ~/.cache/torch
+          key: hf-linux-herald-v1
+      - name: Чем считается
+        run: python cli.py --engine-info
+      - name: Паузы (без модели)
+        run: python "Инструменты разработки/test_pauses.py" --fast
+      - name: Ударения
+        run: python "Инструменты разработки/test_stress.py"
+      - name: Пробник Silero и клон F5 на процессоре
+        run: python "Инструменты разработки/smoke_pc.py"
+
+  windows:
+    name: Windows · процессор
+    runs-on: windows-latest
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: ffmpeg
+        run: choco install ffmpeg -y --no-progress
+      - name: Зависимости
+        run: pip install -r requirements-pc.txt
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~\.cache\huggingface
+            ~\.cache\torch
+          key: hf-windows-herald-v1
+      - name: Чем считается
+        run: python cli.py --engine-info
+      - name: Паузы (без модели)
+        run: python "Инструменты разработки/test_pauses.py" --fast
+      - name: Ударения
+        run: python "Инструменты разработки/test_stress.py"
+      - name: Пробник Silero и клон F5 на процессоре
+        run: python "Инструменты разработки/smoke_pc.py"
+      - name: Ссылка на ускорение NVIDIA (без скачивания)
+        run: python -c "from core.cuda_pack import wheel_url; print(wheel_url())"

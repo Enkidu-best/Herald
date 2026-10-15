@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Скорость (Herald 3.1, раздел 3): профили, пачки, кэш синтеза.
 
-  * профили: основной B16 и запасной C16 - по 16 вызовов сети, черновик - 7;
+  * профили: основной - 12 вызовов сети (3.2), ESpeech - 16, черновик - 7;
     32 шагов в окне нет;
   * пачка = по одному: два куска разной длины одним проходом дают тот же мел,
     что и по отдельности (тот же начальный шум; добивка закрыта маской);
@@ -42,15 +42,17 @@ def main() -> int:
     import core.engines.f5_mlx as F
 
     print("Профили:")
-    want = {"main": 16, "espeech": 16, "draft": 7}
+    want = {"main": 12, "espeech": 16, "draft": 7}
     for key, n in want.items():
         p = profiles.PROFILES[key]
         e = get_engine("f5mlx", language="ru", **p.kwargs)
         calls = e._timesteps().shape[0] - 1
         must(calls == n, f"«{p.title}»: вызовов сети {calls}")
     must(profiles.DEFAULT_PROFILE == "main" and "variant" not in profiles.get(None).kwargs,
-         "по умолчанию - B16 (Misha, 16 шагов)")
+         "по умолчанию - Misha на 12 шагах (выбор Андрея 15.10)")
     must(set(profiles.PROFILES) == set(want), "32 шага в окно не выведены")
+    must(not any(ch.isdigit() for p in profiles.PROFILES.values() for ch in p.title),
+         "в названиях профилей нет цифр")
 
     print("Пачка = по одному:")
     eng = get_engine("f5mlx", language="ru", steps=7, schedule="epss")

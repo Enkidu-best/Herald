@@ -29,7 +29,17 @@ os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 import argparse
 import sys
 
-from core.engines import get_engine, list_engines
+from core import osutil
+osutil.fix_streams()                   # собранный herald-cli.exe: вывод всегда в UTF-8
+osutil.setup_path()                    # ffmpeg из установщика
+if osutil.IS_WIN:
+    try:
+        from core import cuda_pack
+        cuda_pack.activate()
+    except Exception:
+        pass                           # без ускорения - на процессоре
+
+from core.engines import get_engine, list_engines, clone_engine, accel_label
 from core.engines.f5 import F5Engine
 from core.pipeline import convert_book, preview_sample, ConvertOptions, cleanup_stale_temp
 from core.readers import ScannedPdfError, ReaderError
@@ -46,8 +56,13 @@ def _progress(fr: float, msg: str) -> None:
 def main() -> int:
     ap = argparse.ArgumentParser(description="Озвучка текста в аудиокнигу (локально)")
     ap.add_argument("inputs", nargs="*", help="файлы: .txt .md .docx .epub .fb2 .pdf")
-    ap.add_argument("--engine", default="f5mlx",
-                    help="движок синтеза: f5mlx (быстрый, по умолчанию) | f5 (torch, медленный) | silero")
+    ap.add_argument("--engine", default="auto",
+                    help="движок синтеза: auto (по умолчанию: Apple Silicon - f5mlx, иначе f5torch "
+                         "на видеокарте NVIDIA или процессоре) | f5mlx | f5torch | silero")
+    ap.add_argument("--asr", default=None, metavar="ФАЙЛ",
+                    help="распознать аудиофайл и вывести текст (JSON) - для проверок")
+    ap.add_argument("--engine-info", action="store_true",
+                    help="показать, чем будет считаться озвучка на этом компьютере (JSON)")
     ap.add_argument("--voice", default=None, help="голос (Silero) или id образца (F5)")
     ap.add_argument("--ref", default=None, help="F5: аудио-образец голоса (подготовит и использует)")
     ap.add_argument("--preview", type=float, default=0, metavar="МИН",
@@ -60,7 +75,7 @@ def main() -> int:
     ap.add_argument("--no-stress", action="store_true", help="не расставлять ударения")
     ap.add_argument("--speed", type=float, default=None, help="F5: темп речи (>1 быстрее; ~1.2 по умолч.)")
     ap.add_argument("--nfe", type=int, default=None,
-                    help="шагов синтеза (меньше=быстрее). f5mlx: 7 по умолчанию, ещё 6/10/12/16")
+                    help="шагов синтеза (меньше=быстрее). f5mlx/f5torch: 12 по умолчанию, ещё 7/16")
     ap.add_argument("--schedule", default=None,
                     help="f5mlx: epss (прорежённое расписание, по умолчанию) | uniform (как torch)")
     ap.add_argument("--workers", type=int, default=1, help="параллельных процессов для глав (ускорение на многоядерном M4)")
@@ -68,6 +83,20 @@ def main() -> int:
                     help="только f5 (torch): cpu. mps на 16 ГБ упирается в память и медленнее - не советую")
     ap.add_argument("--list-voices", action="store_true", help="показать голоса движка")
     args = ap.parse_args()
+    if args.engine == "auto":
+        args.engine = clone_engine()
+    if args.asr:
+        import json
+        from core import asr
+        r = asr.transcribe(args.asr, "turbo", language="ru")
+        print(json.dumps({"text": r["text"], "language": r.get("language")}, ensure_ascii=False))
+        return 0
+    if args.engine_info:
+        import json
+        from core import asr
+        print(json.dumps({"engine": clone_engine(), "accel": accel_label(),
+                          "asr": asr.backend(), "platform": sys.platform}, ensure_ascii=False))
+        return 0
     cleanup_stale_temp()          # забытые временные папки прошлых запусков
 
     if args.list_voices:
@@ -86,7 +115,9 @@ def main() -> int:
             eng_kw["nfe_step"] = args.nfe
         if args.device is not None:
             eng_kw["device"] = args.device
-    elif args.engine == "f5mlx":
+    elif args.engine in ("f5mlx", "f5torch"):
+        from core import profiles
+        eng_kw.update(profiles.get(None).kwargs)        # основной: 12 шагов EPSS
         if args.speed is not None:
             eng_kw["speed"] = args.speed
         if args.nfe is not None:

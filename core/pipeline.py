@@ -75,6 +75,10 @@ class ConvertOptions:
     # склеиваются в один файл, а по отдельности удаляются.
     single_file: bool = False
     use_cache: bool = True           # кэш синтеза по хешу текста (core/synthcache)
+    # Строгая проверка слов всего куска (3.2): пропавшие и неразборчивые слова в
+    # середине - пересинтез с другим зерном. Замер: пропавших слов 9 -> 5, но
+    # счёт на 62 % дольше, поэтому это настройка (по умолчанию включена).
+    strict_words: bool = True
 
 
 @dataclass
@@ -290,7 +294,14 @@ HEADROOM_STEPS = (1.0, 1.15, 1.3)
 # кусков пересинтезировалась впустую. small - 310 мс и уже не путается, против
 # 1260 мс у large-v3-turbo. Сравниваем слова строго на конце (окончание должно
 # совпасть: «правил» против «правило» - брак) и нечётко в начале.
-_ASR_MODEL = "mlx-community/whisper-small-mlx"
+_ASR_MODEL = "small"          # core/asr: MLX на Mac, faster-whisper на Windows/Linux
+# Строгая проверка ВСЕГО куска (3.2): слово в середине пропало или искажено
+# («и огляделся», неразборчивое «вернётся»). Тут small мало - он сам путает
+# слова, - нужен large-v3-turbo. Сверка по последним буквам, как для окончаний:
+# распознаватель «дописывает» обрубленное по смыслу (урок 3.1).
+_ASR_FULL = "turbo"
+STRICT_WORDS = True
+WORD_RETRIES = 2
 # END_PUNCT: кусок без знака препинания в конце получает точку - без неё F5
 # чаще недоговаривает последнее слово. False - прежнее поведение (для замера).
 END_PUNCT = True
@@ -348,7 +359,8 @@ def _with_end_punct(text: str) -> str:
     return text
 
 
-def _listen(audio: np.ndarray, sr: int, lang: str = "ru") -> list[tuple] | None:
+def _listen(audio: np.ndarray, sr: int, lang: str = "ru",
+            model: str | None = None) -> list[tuple] | None:
     """Распознать кусок целиком: [(слово, начало с, конец с)] или None.
 
     Одно распознавание на кусок даёт сразу и проверку краёв, и места пауз
@@ -368,21 +380,16 @@ def _listen(audio: np.ndarray, sr: int, lang: str = "ru") -> list[tuple] | None:
     except Exception:
         se = None                           # без VAD - распознаём целиком
     try:
-        import contextlib
-        import io
         import tempfile as _tf
         import soundfile as _sf
-        import mlx_whisper
+        from . import asr
         with _tf.NamedTemporaryFile(suffix=".wav", delete=False) as f:
             _sf.write(f.name, audio, sr)
         try:
             # язык передаём явно: иначе whisper определяет его сам, и это
             # ровно удваивает время проверки
-            with contextlib.redirect_stdout(io.StringIO()):
-                r = mlx_whisper.transcribe(f.name, path_or_hf_repo=_ASR_MODEL,
-                                           language=lang, verbose=False,
-                                           word_timestamps=True,
-                                           condition_on_previous_text=False)
+            r = asr.transcribe(f.name, model or _ASR_MODEL, language=lang,
+                               word_timestamps=True)
         finally:
             os.unlink(f.name)
         out = []
@@ -422,6 +429,58 @@ def _edges_verdict(heard: list[tuple] | None, text: str, audio_sec: float) -> bo
         if not ok:
             return False
     return True
+
+
+_known_cache: dict = {}
+
+
+def _known_word(w: str) -> bool:
+    """Слово из словаря RUAccent (3,2 млн форм)? Выдуманные имена книги
+    («Экстервитом») распознаватель пишет как попало - их не сверяем, иначе
+    каждый кусок с таким именем пересчитывался бы впустую."""
+    if w in _known_cache:
+        return _known_cache[w]
+    try:
+        from .stress import _get_accentizer
+        acc = _get_accentizer()
+        ok = w in acc.accents or w in acc.omographs
+    except Exception:
+        ok = True
+    _known_cache[w] = ok
+    return ok
+
+
+def _bad_words(heard: list[tuple] | None, text: str) -> list[str]:
+    """Слова текста, которых нет в распознанном или у которых другой конец.
+
+    Сверяем только слова из словаря длиной от четырёх букв: короткие
+    распознаватель путает сам. Выравнивание - по последовательности слов
+    (difflib); в заменённом участке слова сопоставляются по порядку, и слово
+    засчитано, только если у него те же последние буквы (3, у коротких 2).
+    """
+    if heard is None:
+        return []
+    import difflib
+    want = _words(text)
+    # те же слова, но с «ё» - словарь RUAccent хранит их так
+    raw = re.sub(r"[^\w ]", " ", text.lower().replace("+", "")).split()
+    if len(raw) != len(want):
+        raw = want
+    got = [w for w, _s, _e in heard]
+    bad = []
+    sm = difflib.SequenceMatcher(None, want, got, autojunk=False)
+    for tag, a0, a1, b0, b1 in sm.get_opcodes():
+        if tag == "equal":
+            continue
+        for k, w in enumerate(want[a0:a1]):
+            if len(w) < 4 or not _known_word(raw[a0 + k]):
+                continue
+            h = got[b0 + k] if tag == "replace" and b0 + k < b1 else ""
+            n = 3 if len(w) >= 5 else 2
+            if not (h and h[-n:] == w[-n:]
+                    and difflib.SequenceMatcher(None, w, h).ratio() >= 0.6):
+                bad.append(w)
+    return bad
 
 
 def _edges_ok(audio: np.ndarray, sr: int, text: str, head_only: bool = False,
@@ -628,7 +687,7 @@ def _synth_chunks(eng: TTSEngine, voice: str, chunks, sr: int,
                   gap_sec: float, on_chunk=None, should_stop=None,
                   lang: str = "ru", pause_gate=None, batch_size: int | None = None,
                   use_cache: bool = True, stats: dict | None = None,
-                  pipelined: bool = True) -> np.ndarray:
+                  pipelined: bool = True, strict_words: bool | None = None) -> np.ndarray:
     """Куски -> звук части: пачками, с упреждением, кэшем и проверкой краёв.
 
     stats (если передан) пополняется: fresh_sec - звука посчитано заново,
@@ -636,6 +695,8 @@ def _synth_chunks(eng: TTSEngine, voice: str, chunks, sr: int,
     кусков доведено до заданных.
     """
     from . import synthcache
+    if strict_words is None:
+        strict_words = STRICT_WORDS
     items = _norm_items(chunks, gap_sec)
     texts = [_with_end_punct(t) for t, _g, _m, _k in items]
     muls = [m for _t, _g, m, _k in items]
@@ -680,6 +741,16 @@ def _synth_chunks(eng: TTSEngine, voice: str, chunks, sr: int,
         if pipelined and gi + 1 < len(groups):
             fut = pool.submit(produce, groups[gi + 1])
         heard: dict[int, list | None] = {}
+        model = _ASR_FULL if strict_words else _ASR_MODEL
+
+        def judge(i, audio, risk):
+            """(годится, оценка): оценка - чем больше, тем лучше дубль."""
+            h = _listen(audio, sr, lang, model) if len(audio) else None
+            edges = not risk and _edges_verdict(h, texts[i], len(audio) / sr)
+            bad = _bad_words(h, texts[i]) if strict_words else []
+            return h, edges and not bad, (edges, -len(bad)), edges, bad
+
+        best: dict[int, tuple] = {}
         need = []
         for i in g:
             audio, words, cached, risk = got[i]
@@ -687,29 +758,49 @@ def _synth_chunks(eng: TTSEngine, voice: str, chunks, sr: int,
                 st["cached"] += 1
                 heard[i] = words
                 continue
-            heard[i] = _listen(audio, sr, lang) if len(audio) else None
-            if len(audio) and (risk or not _edges_verdict(heard[i], texts[i], len(audio) / sr)):
-                need.append(i)
-        for attempt in range(1, TAIL_RETRIES + 1):
+            if not len(audio):
+                heard[i] = None
+                continue
+            h, ok, score, edges, bad = judge(i, audio, risk)
+            heard[i] = h
+            best[i] = (score, audio, h, bad)
+            if not ok:
+                need.append((i, edges))
+        tried = set()
+        for attempt in range(1, max(TAIL_RETRIES, WORD_RETRIES) + 1):
             if not need:
                 break
             st["retries"] += len(need)
-            hm = HEADROOM_STEPS[min(attempt, len(HEADROOM_STEPS) - 1)]
-            waves = eng.synth_batch([texts[i] for i in need], voice, [muls[i] for i in need],
-                                    [hm] * len(need))
-            risks = list(getattr(eng, "last_cut_risk", None) or [False] * len(need))
+            tried.update(i for i, _e in need)
+            # край съеден - даём больше времени; слово в середине - просто
+            # другое зерно (каждый синтез стартует со своего шума)
+            hms = [HEADROOM_STEPS[min(attempt, len(HEADROOM_STEPS) - 1)] if not e else 1.0
+                   for _i, e in need]
+            idx = [i for i, _e in need]
+            waves = eng.synth_batch([texts[i] for i in idx], voice, [muls[i] for i in idx], hms)
+            risks = list(getattr(eng, "last_cut_risk", None) or [False] * len(idx))
             still = []
-            for i, w, r in zip(need, waves, risks):
-                got[i] = (w, None, False, r)
-                heard[i] = _listen(w, sr, lang) if len(w) else None
-                if len(w) and (r or not _edges_verdict(heard[i], texts[i], len(w) / sr)):
-                    still.append(i)
+            for i, w, r in zip(idx, waves, risks):
+                if not len(w):
+                    continue
+                h, ok, score, edges, bad = judge(i, w, r)
+                if score > best[i][0]:
+                    best[i] = (score, w, h, bad)
+                if not ok:
+                    still.append((i, edges))
             need = still
+        st["retry_chunks"] = st.get("retry_chunks", 0) + len(tried)
+        for i, (score, w, h, bad) in best.items():
+            got[i] = (w, None, False, False)
+            heard[i] = h
+            st["bad_words"] = st.get("bad_words", 0) + len(bad)
+            if bad:
+                st.setdefault("bad_list", []).extend(bad)
         for i in g:
             audio, _w, cached, _r = got[i]
             if not cached and len(audio):
                 st["fresh_sec"] += len(audio) / sr
-                if use_cache and i not in need:      # в кэш - только принятый кусок
+                if use_cache:                        # лучший из дублей - окончательный
                     synthcache.put(keys[i], audio, sr, heard[i])
             if len(audio):
                 audio, nfit = _fit_inner_pauses(audio, sr, texts[i], items[i][3], heard[i])
@@ -773,7 +864,7 @@ def settings_fingerprint(engine: str, eng_kwargs: dict, voice: str,
         "opts": {k: getattr(opts, k) for k in (
             "minutes_per_file", "hd_filter", "audio_format", "expand_numbers",
             "use_stress", "gap_sec", "para_gap_sec", "dialog_gap_sec",
-            "single_file")},
+            "single_file", "strict_words")},
     }
     return hashlib.sha1(json.dumps(data, sort_keys=True, ensure_ascii=False,
                                    default=str).encode("utf-8")).hexdigest()
@@ -828,7 +919,7 @@ def resume_info(path: str, *, engine: str, eng_kwargs: dict, voice: str,
         if not st or st.get("finished"):
             return None
         kw = dict(eng_kwargs)
-        if engine in ("f5mlx", "f5") and "language" not in kw and language:
+        if engine in ("f5mlx", "f5", "f5torch") and "language" not in kw and language:
             kw["language"] = language
         if st.get("fingerprint") != settings_fingerprint(engine, kw, voice, options):
             return None
@@ -881,6 +972,21 @@ def cleanup_stale_temp(max_age_hours: float = 24.0) -> int:
     return n
 
 
+def _model_msg(engine: str, kw: dict | None) -> str:
+    """«Готовлю модель…» - а в первый раз честно: идёт скачивание моделей."""
+    try:
+        if engine in ("f5mlx", "f5torch") and not (kw or {}).get("variant"):
+            from huggingface_hub import try_to_load_from_cache
+            from .engines.f5_mlx import LANG_MODELS
+            cfg = LANG_MODELS.get((kw or {}).get("language", "ru"), LANG_MODELS["ru"])
+            if not isinstance(try_to_load_from_cache(cfg["repo"], cfg["ckpt"]), str):
+                return ("Скачиваю модели (первый запуск, около 3 ГБ - это может занять "
+                        "полчаса)…")
+    except Exception:
+        pass                          # не узнали - просто обычная надпись
+    return "Готовлю модель синтеза…"
+
+
 # --- вся книга -----------------------------------------------------------
 def convert_book(path: str, *, engine: str = "f5", eng_kwargs: dict | None = None,
                  voice: str, out_dir: str | None = None,
@@ -907,7 +1013,7 @@ def convert_book(path: str, *, engine: str = "f5", eng_kwargs: dict | None = Non
     out_dir = out_dir or os.path.dirname(os.path.abspath(path))
     # язык книги выбирает и модель синтеза, и нужны ли ударения
     doc_lang = detect_language(read_document(path).text or "")
-    if engine in ("f5mlx", "f5") and "language" not in eng_kwargs:
+    if engine in ("f5mlx", "f5", "f5torch") and "language" not in eng_kwargs:
         eng_kwargs = dict(eng_kwargs, language=doc_lang)
     meta = get_engine(engine, **eng_kwargs)      # без загрузки модели: только метаданные
     sr = meta.sample_rate
@@ -1028,7 +1134,7 @@ def convert_book(path: str, *, engine: str = "f5", eng_kwargs: dict | None = Non
     # снимается при «Стопе» и при сбое (выход из блока — в любом случае)
     with keep_awake():
         if workers == 1:
-            say(0.05, "Готовлю модель синтеза…")
+            say(0.05, _model_msg(engine, eng_kwargs))
             try:
                 vs = load_fx(default_voices_dir(), voice).speed
                 if vs != 1.0:
@@ -1072,6 +1178,7 @@ def convert_book(path: str, *, engine: str = "f5", eng_kwargs: dict | None = Non
                 audio = _synth_chunks(eng, voice, chunks, sr, opts.gap_sec, on_chunk=bump,
                                       should_stop=should_stop, lang=doc_lang,
                                       pause_gate=gate, use_cache=opts.use_cache,
+                                      strict_words=opts.strict_words,
                                       stats=stats)
                 spent = time.monotonic() - t0 - (paused[0] - p0)
                 fresh = stats.get("fresh_sec", 0) - f0
@@ -1200,9 +1307,9 @@ def preview_sample(path: str, *, engine: str = "f5", eng_kwargs: dict | None = N
         ch = max(chapters, key=lambda c: len(c.text))
 
     doc_lang = detect_language(doc.text or "")
-    if engine in ("f5mlx", "f5") and "language" not in (eng_kwargs or {}):
+    if engine in ("f5mlx", "f5", "f5torch") and "language" not in (eng_kwargs or {}):
         eng_kwargs = dict(eng_kwargs or {}, language=doc_lang)
-    say(0.05, "Готовлю модель синтеза…")
+    say(0.05, _model_msg(engine, eng_kwargs))
     # темп голоса подмешиваем в параметры, иначе кэш отдаст движок с прошлым
     try:
         from .engines.f5 import default_voices_dir
@@ -1242,7 +1349,8 @@ def preview_sample(path: str, *, engine: str = "f5", eng_kwargs: dict | None = N
         done[0] += 1
         say(0.2 + 0.7 * done[0] / max(1, len(chunks)), "Озвучиваю пробный фрагмент…")
     audio = _synth_chunks(eng, voice, chunks, sr, opts.gap_sec, on_chunk=bump,
-                          lang=doc_lang, use_cache=opts.use_cache)
+                          lang=doc_lang, use_cache=opts.use_cache,
+                          strict_words=opts.strict_words)
 
     # временную папку пробника удаляет вызывающий (см. окно) или чистка при
     # запуске — она старше суток не живёт

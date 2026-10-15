@@ -1,0 +1,45 @@
+# Herald на Windows и Linux (видеокарта NVIDIA или процессор). На Mac - requirements.txt.
+#
+# torch с PyPI: на Windows - сборка для процессора; на Linux PyPI даёт сборку с
+# CUDA (~2,5 ГБ). Для Linux без видеокарты:
+#   pip install torch==2.6.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cpu
+# Для видеокарты NVIDIA на Linux: --index-url https://download.pytorch.org/whl/cu124
+torch==2.6.0
+torchaudio==2.6.0
+numpy
+scipy
+soundfile
+safetensors
+huggingface_hub
+certifi
+
+# --- сеть F5 (копия в core/engines/f5net) и вокодер ---
+x-transformers
+vocos
+rjieba
+pypinyin
+pydub
+
+# --- распознавание (проверка кусков, расшифровка образца), VAD ---
+faster-whisper>=1.1
+onnxruntime
+
+# --- русская подготовка текста ---
+ruaccent
+silero-stress
+ru-normalizr
+num2words
+razdel
+
+# --- чтение форматов ---
+python-docx
+ebooklib
+beautifulsoup4
+lxml
+pymupdf
+pillow
+
+# --- окно и мини-плеер ---
+customtkinter
+tkinterdnd2
+sounddevice

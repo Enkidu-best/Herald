@@ -135,7 +135,9 @@ def full_part():
     from core.engines import get_engine
     from core.pipeline import _prepare_text, _chunk_paragraphs, _synth_chunks
     print("\nОзвучка диалога и замер настоящих пауз:")
-    eng = get_engine("f5mlx", language="ru", steps=16, schedule="epss")
+    from core import profiles
+    from core.engines import clone_engine
+    eng = get_engine(clone_engine(), language="ru", **profiles.get(None).kwargs)
     eng.ensure_loaded()
     text = _prepare_text(DIALOG_TEXT, "+", True, True, "ru")
     ch = _chunk_paragraphs(text, eng.max_chunk_chars, GAP, PARA, DIALOG)

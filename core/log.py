@@ -1,4 +1,4 @@
-"""Журнал проблем: ~/Library/Logs/Herald/herald.log.
+"""Журнал проблем: ~/Library/Logs/Herald/herald.log (Windows, Linux - core.osutil.log_dir).
 
 Раньше ошибки в десятках мест молча глотались (`except Exception: pass`), и
 сбой выглядел как «программа сделала что-то не то». Так, например, месяцами
@@ -14,7 +14,8 @@ import os
 import sys
 import traceback
 
-LOG_DIR = os.path.expanduser("~/Library/Logs/Herald")
+from .osutil import log_dir as _log_dir
+LOG_DIR = str(_log_dir())
 LOG_PATH = os.path.join(LOG_DIR, "herald.log")
 
 _logger: logging.Logger | None = None

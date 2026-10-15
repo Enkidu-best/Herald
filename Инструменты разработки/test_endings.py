@@ -104,7 +104,9 @@ def main() -> int:
     from core.pipeline import _prepare_text, _synth_chunks, _ends_like, _with_end_punct, _words
     from core.vad import speech_end
 
-    eng = get_engine("f5mlx", language="ru", steps=16, schedule="epss")
+    from core import profiles
+    from core.engines import clone_engine
+    eng = get_engine(clone_engine(), language="ru", **profiles.get(None).kwargs)
     eng.ensure_loaded()
     raw_store = []
     orig = F._finish_tail
