@@ -354,7 +354,7 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         self.theme_btn.configure(command=self._cycle_theme)
         self.theme_btn.pack(fill="x", pady=1)
         self._theme_label()
-        T.label(bottom, f"{APP_NAME} {VERSION}\nлокально на Apple MLX", 11, color=T.FAINT,
+        T.label(bottom, f"{APP_NAME} {VERSION}\nлокально {osutil.HERE}", 11, color=T.FAINT,
                 anchor="w", justify="left").pack(fill="x", padx=10, pady=(8, 0))
 
     def _nav_btn(self, parent, text, ic, key):
@@ -423,8 +423,8 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         head = ctk.CTkFrame(page, fg_color="transparent")
         head.grid(row=0, column=0, columnspan=2, sticky="ew", padx=28, pady=(22, 14))
         T.label(head, "Озвучка", 22, bold=True, anchor="w").pack(fill="x")
-        T.label(head, "Книга - в аудиокнигу голосом выбранного диктора. Всё считается на "
-                      "этом Mac; части появляются рядом с книгой по мере готовности.",
+        T.label(head, "Книга - в аудиокнигу голосом выбранного диктора. Всё считается "
+                      f"{osutil.HERE}; части появляются рядом с книгой по мере готовности.",
                 13, color=T.MUTED, anchor="w").pack(fill="x", pady=(2, 0))
 
         left = ctk.CTkFrame(page, fg_color="transparent")
@@ -844,8 +844,9 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
             self.nv_box.pack(fill="x", before=self.tech_label)
         if accel == "cpu":
             self.accel_hint.configure(
-                text="Считается на процессоре: книга - сутки и больше. Быстро на "
-                     "процессоре работают готовые голоса Silero (страница «Голоса»).",
+                text="Считается на процессоре: час звука - около суток счёта, книга - "
+                     "несколько суток. Быстро на процессоре работают готовые голоса "
+                     "Silero (страница «Голоса»).",
                 text_color=T.WARN)
         else:
             self.accel_hint.configure(text="Считается: " + profiles.ACCEL_TITLE.get(accel, accel),

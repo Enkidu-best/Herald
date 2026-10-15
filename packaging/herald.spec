@@ -45,9 +45,12 @@ a_cli = Analysis([os.path.join(ROOT, "cli.py")], **common)
 pyz_gui = PYZ(a_gui.pure)
 pyz_cli = PYZ(a_cli.pure)
 icon = os.path.join(SPECPATH, "herald.ico")
-exe_gui = EXE(pyz_gui, a_gui.scripts, [], exclude_binaries=True, name="Herald", console=False,
+# Режим UTF-8 у самого Python: без него в сборке для Windows open() без явной
+# кодировки писал cp1252, и русская расшифровка образца падала (поймано на раннере)
+utf8 = [("X utf8", None, "OPTION")]
+exe_gui = EXE(pyz_gui, a_gui.scripts, utf8, exclude_binaries=True, name="Herald", console=False,
               icon=icon, upx=False)
-exe_cli = EXE(pyz_cli, a_cli.scripts, [], exclude_binaries=True, name="herald-cli", console=True,
+exe_cli = EXE(pyz_cli, a_cli.scripts, utf8, exclude_binaries=True, name="herald-cli", console=True,
               icon=icon, upx=False)
 coll = COLLECT(exe_gui, exe_cli, a_gui.binaries, a_gui.datas, a_cli.binaries, a_cli.datas,
                strip=False, upx=False, name="Herald")

@@ -21,8 +21,9 @@ import os
 
 import numpy as np
 
+from . import f5_mlx as _m
 from .f5_mlx import (F5MLXEngine, LANG_MODELS, SAMPLE_RATE, HOP_LENGTH, CFG_STRENGTH,
-                     TAIL_ANCHOR_SEC, TARGET_RMS, _finish_tail, preprocess_ref_audio,
+                     TAIL_ANCHOR_SEC, TARGET_RMS, preprocess_ref_audio,
                      _ref_text_for_model, convert_char_to_tokens, timesteps)
 
 VOCOS_REPO = "charactr/vocos-mel-24khz"
@@ -136,7 +137,8 @@ class F5TorchEngine(F5MLXEngine):
                 mel, n = self._sample_mel_torch(audio, tokens, dur, tail)
                 m = mel[:, ref_frames:n, :]
                 wave = self._vocoder.decode(m.permute(0, 2, 1).float())
-                out.append(_finish_tail(wave.detach().cpu().numpy().astype(np.float32).reshape(-1)))
+                # через модуль, а не по имени: тест окончаний подменяет _finish_tail
+                out.append(_m._finish_tail(wave.detach().cpu().numpy().astype(np.float32).reshape(-1)))
         return out
 
     def _sample_mel_torch(self, audio, tokens: list[str], duration: int, tail: int,

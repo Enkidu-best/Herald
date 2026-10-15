@@ -166,7 +166,7 @@ class F5Engine(TTSEngine):
         ref_text = (ref_text or "").strip()
         if ref_text and ref_text[-1] not in ".!?…":
             ref_text += "."
-        open(txt_out, "w").write(ref_text)
+        open(txt_out, "w", encoding="utf-8").write(ref_text)
         self._save_source(name, audio_path)
         return name
 
@@ -691,7 +691,7 @@ class F5Engine(TTSEngine):
         txt = os.path.join(self.voices_dir, vid + ".txt")
         if not os.path.isfile(wav):
             raise ValueError(f"Образец голоса не найден: {vid}. Сначала загрузите образец.")
-        ref_text = open(txt).read().strip() if os.path.isfile(txt) else ""
+        ref_text = open(txt, encoding="utf-8").read().strip() if os.path.isfile(txt) else ""
         return vid, wav, ref_text
 
     # --- синтез ---------------------------------------------------------

@@ -171,11 +171,11 @@ def assemble_m4b(chapters: list[RenderedChapter], out_path: str, *,
     try:
         # список для concat-демуксера
         listfile = os.path.join(workdir, "list.txt")
-        with open(listfile, "w") as f:
+        with open(listfile, "w", encoding="utf-8") as f:
             for ch in chapters:
                 f.write(f"file '{ch.wav_path}'\n")
         metafile = os.path.join(workdir, "meta.txt")
-        with open(metafile, "w") as f:
+        with open(metafile, "w", encoding="utf-8") as f:
             f.write(_ffmetadata(chapters, title, author))
         cover = _prepare_cover(cover_bytes, cover_ext, title, author, workdir)
 

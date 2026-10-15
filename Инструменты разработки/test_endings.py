@@ -51,18 +51,31 @@ SR = 24000
 
 
 def heard_words(audio: np.ndarray) -> list[str]:
-    import mlx_whisper
+    """Судья - Whisper large-v3-turbo (core/asr: MLX на Mac, faster-whisper иначе)."""
     import soundfile as sf
+    from core import asr
     from core.pipeline import _words
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
         sf.write(f.name, audio, SR)
     try:
-        with contextlib.redirect_stdout(io.StringIO()):
-            r = mlx_whisper.transcribe(f.name, path_or_hf_repo=JUDGE, language="ru",
-                                       verbose=False, condition_on_previous_text=False)
+        r = asr.transcribe(f.name, "turbo", language="ru")
     finally:
         os.unlink(f.name)
     return _words(r["text"])
+
+
+def seed(n: int) -> None:
+    """Зерно случайности для движка этого компьютера (MLX или torch)."""
+    try:
+        import mlx.core as mx
+        mx.random.seed(n)
+    except ImportError:
+        pass
+    try:
+        import torch
+        torch.manual_seed(n)
+    except ImportError:
+        pass
 
 
 def old_rms_end(wave: np.ndarray) -> int:
@@ -98,7 +111,6 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--seeds", type=int, default=3)
     a = ap.parse_args()
-    import mlx.core as mx
     import core.engines.f5_mlx as F
     from core.engines import get_engine
     from core.pipeline import _prepare_text, _synth_chunks, _ends_like, _with_end_punct, _words
@@ -121,12 +133,12 @@ def main() -> int:
     for phrase, text in cases:
         stressed = _with_end_punct(_prepare_text(text, "+", True, True, "ru"))
         want = _words(phrase)[-1]
-        for seed in range(a.seeds):
-            mx.random.seed(100 + seed)
+        for sd in range(a.seeds):
+            seed(100 + sd)
             raw_store.clear()
             audio = eng.synth_chunk(stressed, VOICE)
             raw = raw_store[-1]
-            tag = f"«{text}» зерно {seed}"
+            tag = f"«{text}» зерно {sd}"
             se = speech_end(audio, SR)
             if se is None:
                 fails.append(f"{tag}: речи не найдено")
@@ -150,7 +162,7 @@ def main() -> int:
             ok = _ends_like(want, got)
             raw_ok += ok
             # итог конвейера: та же фраза так, как она попадёт в книгу
-            mx.random.seed(100 + seed)
+            seed(100 + sd)
             final = _synth_chunks(eng, VOICE, [(text, 0.3, 1.0)], SR, 0.3, use_cache=False)
             fgot = heard_words(final)
             fok = _ends_like(want, fgot)

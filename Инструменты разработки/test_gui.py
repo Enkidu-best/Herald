@@ -246,7 +246,7 @@ def main() -> int:
     def accel():
         app._show_accel("cpu")
         t = app.accel_hint.cget("text")
-        must("сутки" in t and "Silero" in t, t)
+        must("суток" in t and "Silero" in t, t)
         wait_cpu = app._rtf()
         app._show_accel("mlx")
         must("Apple" in app.accel_hint.cget("text"), app.accel_hint.cget("text"))

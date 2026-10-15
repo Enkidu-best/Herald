@@ -32,9 +32,10 @@ def main() -> int:
     ap.add_argument("--chunks", type=int, default=12)
     ap.add_argument("--batch", type=int, default=1)
     ap.add_argument("--no-pipeline", action="store_true")
-    ap.add_argument("--steps", type=int, default=16)
+    ap.add_argument("--steps", type=int, default=12)
     ap.add_argument("--voice", default="Вячеслав Герасимов")
     ap.add_argument("--out", default=None, help="сохранить звук (wav)")
+    ap.add_argument("--no-strict", action="store_true", help="без строгой проверки слов (как 3.1)")
     ap.add_argument("--no-retries", action="store_true",
                     help="без переозвучек: они случайны и забивают разницу в скорости")
     a = ap.parse_args()
@@ -46,7 +47,8 @@ def main() -> int:
     if a.no_retries:
         P.TAIL_RETRIES = 0
 
-    eng = get_engine("f5mlx", language="ru", steps=a.steps, schedule="epss")
+    from core.engines import clone_engine
+    eng = get_engine(clone_engine(), language="ru", steps=a.steps, schedule="epss")
     eng.ensure_loaded()
     if a.chunks_json:
         ch = [tuple(c) for c in json.load(open(a.chunks_json, encoding="utf-8"))][:a.chunks]
@@ -58,11 +60,12 @@ def main() -> int:
     st: dict = {}
     t0 = time.time()
     audio = _synth_chunks(eng, a.voice, ch, 24000, 0.4, use_cache=False, stats=st,
-                          batch_size=a.batch, pipelined=not a.no_pipeline)
+                          batch_size=a.batch, pipelined=not a.no_pipeline,
+                          strict_words=not a.no_strict)
     dt = time.time() - t0
     if a.out:
         sf.write(a.out, audio, 24000)
-    res = {"пачка": a.batch, "упреждение": not a.no_pipeline, "шаги": a.steps,
+    res = {"строгая_проверка": not a.no_strict, "пачка": a.batch, "упреждение": not a.no_pipeline, "шаги": a.steps,
            "голос": a.voice, "кусков": len(ch), "звук_с": round(st["fresh_sec"], 1),
            "счёт_с": round(dt, 1), "RTF": round(dt / max(st["fresh_sec"], 1e-6), 3),
            "переозвучек": st["retries"]}
