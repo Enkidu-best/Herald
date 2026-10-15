@@ -139,6 +139,8 @@ def main() -> int:
         ap.print_help()
         return 1
 
+    if args.out:
+        os.makedirs(args.out, exist_ok=True)   # иначе пробник считался, а записать было некуда
     opts = ConvertOptions(make_m4b=args.m4b, make_chapter_mp3=not args.no_mp3,
                           expand_numbers=not args.no_numbers, use_stress=not args.no_stress,
                           workers=args.workers)
