@@ -65,6 +65,19 @@ def _fw(kind: str):
     return _fw_models[kind]
 
 
+def _load16k(path: str):
+    """Звук для faster-whisper - через ffmpeg, а не через PyAV: свежая PyAV
+    несовместима с faster-whisper 1.2 (`metadata_errors`), и на чистой установке
+    распознавание не работало вовсе (поймано на раннере GitHub)."""
+    import shutil
+    import subprocess
+    import numpy as np
+    exe = shutil.which("ffmpeg") or "ffmpeg"
+    raw = subprocess.run([exe, "-nostdin", "-v", "error", "-i", path, "-f", "f32le",
+                          "-ac", "1", "-ar", "16000", "-"], capture_output=True, check=True).stdout
+    return np.frombuffer(raw, dtype=np.float32).copy()
+
+
 def transcribe(path: str, kind: str = "turbo", language: str | None = None,
                word_timestamps: bool = False) -> dict:
     if backend() == "mlx":
@@ -74,7 +87,7 @@ def transcribe(path: str, kind: str = "turbo", language: str | None = None,
                                           language=language, verbose=False,
                                           word_timestamps=word_timestamps,
                                           condition_on_previous_text=False)
-    segs, info = _fw(kind).transcribe(path, language=language,
+    segs, info = _fw(kind).transcribe(_load16k(path), language=language,
                                       word_timestamps=word_timestamps,
                                       condition_on_previous_text=False)
     out = []

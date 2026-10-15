@@ -537,8 +537,17 @@ class F5MLXEngine(F5Engine):
         target = LANG_MODELS[self.language].get("target_bps", 27.0)
         return float(np.clip(target / bps, 0.5, 3.5))
 
+    @staticmethod
+    def _check_ref_text(vid: str, ref_text: str) -> None:
+        """Без расшифровки образца длительность куска не посчитать (вышли бы
+        десятки тысяч кадров) - лучше сразу сказать, в чём дело."""
+        if len(ref_text.strip()) < 10:
+            raise RuntimeError(f"у голоса «{vid}» нет расшифровки образца (.txt) - "
+                               "добавьте образец заново")
+
     def _make_ref(self, vid: str, wav: str, ref_text: str):
         import mlx.core as mx
+        self._check_ref_text(vid, ref_text)
         audio = preprocess_ref_audio(wav)
         rms = float(np.sqrt(np.mean(np.square(audio))))
         gain = 1.0

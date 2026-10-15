@@ -110,6 +110,7 @@ class F5TorchEngine(F5MLXEngine):
         return mel.clamp(min=1e-5).log()
 
     def _make_ref(self, vid: str, wav: str, ref_text: str):
+        self._check_ref_text(vid, ref_text)
         audio = preprocess_ref_audio(wav)
         rms = float(np.sqrt(np.mean(np.square(audio))))
         gain = 1.0
