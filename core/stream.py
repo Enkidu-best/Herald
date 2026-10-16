@@ -98,20 +98,22 @@ class Speed:
             # осторожно: берём большее из старого и нового - лучше начать позже
             self.overlap = ov if self.overlap >= 1.0 else max(ov, 0.5 * (self.overlap + ov))
 
-    def audio_sec(self, chars: int) -> float:
-        return chars * self.spc
+    def audio_sec(self, chars: int, tempo: float = 1.0) -> float:
+        """Длина звука; spc хранится для темпа 1,0, медленнее - звука больше."""
+        return chars * self.spc / max(0.3, tempo)
 
     @property
     def rtf(self) -> float:
         x = sum(o[0] for o in self.obs)
         return sum(o[1] for o in self.obs) / x if x else self.prior
 
-    def observe(self, chars: int, audio_sec: float, synth_sec: float) -> None:
+    def observe(self, chars: int, audio_sec: float, synth_sec: float,
+                tempo: float = 1.0) -> None:
         if audio_sec <= 0.2:
             return
         self.obs = (self.obs + [(round(audio_sec, 3), round(synth_sec, 3))])[-KEEP_OBS:]
         if chars > 0:
-            self.spc = 0.7 * self.spc + 0.3 * (audio_sec / chars)
+            self.spc = 0.7 * self.spc + 0.3 * (audio_sec * tempo / chars)
 
     def save(self) -> None:
         # только обычный файл: os.replace поверх устройства (/dev/null под root
@@ -351,6 +353,8 @@ class Live:
         self.stopped = False
         self.paused = False
         self._t_last = None
+        self.tempo = 1.0                 # темп синтеза (клон): меняется на ходу
+        self._out_lens: list[int] = []   # длины кусков на выходе - для «что звучит»
         self._pending: list[np.ndarray] = []     # готово, но старт ещё не наступил
         self.timeline: list[tuple] = []
         self._start_lock = threading.Lock()
@@ -377,7 +381,7 @@ class Live:
         k = self.fed
         if k < len(self.plan_items) and self._t_last is not None and chunk_sec > 0:
             c = cost if cost is not None else now - self._t_last
-            self.speed.observe(self.plan_items[k][0], chunk_sec, c)
+            self.speed.observe(self.plan_items[k][0], chunk_sec, c, self.tempo)
             self._cost_sum += c
         self._t_last = now
         self.fed += 1
@@ -443,7 +447,7 @@ class Live:
         for j, (chars, _gap) in enumerate(self.plan_items[self.fed:], start=self.fed):
             # паузу между кусками не считаем: её съедает тишина на краях кусков
             # (_join), и с ней звучание выходило бы длиннее, чем на деле
-            d = self.speed.audio_sec(chars)
+            d = self.speed.audio_sec(chars, self.tempo)
             # первые два куска идут без упреждения (первый проверяется один, см.
             # _synth_chunks) - их счёт ни с чем не перекрывается (замер 3.4)
             out.append((self.speed.synth_sec(d, overlapped=j >= 2), d))
@@ -466,7 +470,20 @@ class Live:
             self._pending = []
             self.sink.open(self.out_sr)
 
+    def playing_chunk(self) -> int | None:
+        """Номер куска, который сейчас звучит (кусок k уходит вместе с паузой
+        перед ним), или None - звук ещё не начался или кончился."""
+        if not self.started or self.sink is None:
+            return None
+        pos, acc = self.sink.played, 0
+        for k, n in enumerate(self._out_lens):
+            acc += n
+            if pos < acc:
+                return k if k < len(self.plan_items) else None
+        return None
+
     def _put(self, a: np.ndarray) -> None:
+        self._out_lens.append(len(a))
         with self._start_lock:
             if not self.started:
                 self._pending.append(a)
@@ -621,6 +638,8 @@ def choose_first(chunks: list[tuple], live: "Live | None") -> list[tuple]:
     alt = split_first(chunks)
     if len(alt) == len(chunks):
         return chunks
+    if not live.gate:                   # «начинать сразу» - звук после первого куска
+        return alt
 
     def start(ch):
         rest = []
@@ -631,12 +650,62 @@ def choose_first(chunks: list[tuple], live: "Live | None") -> list[tuple]:
     return alt if start(alt) < start(chunks) else chunks
 
 
+# --- откуда в тексте каждый кусок (подсветка во вкладке) ---------------
+def sentence_spans(text: str) -> list[tuple[int, int]]:
+    """Предложения исходного текста: [(начало, конец)] по абзацам."""
+    import re
+    from razdel import sentenize
+    out = []
+    for m in re.finditer(r"[^\n]+(?:\n(?!\s*\n)[^\n]+)*", text):
+        for sp in sentenize(m.group(0)):
+            if sp.text.strip():
+                out.append((m.start() + sp.start, m.start() + sp.stop))
+    return out
+
+
+def prepare_by_sentences(text: str, prep) -> tuple[str, list[tuple[int, int]], list[int]]:
+    """Текст для синтеза по предложениям: (подготовленный текст, места
+    предложений в исходном, сколько букв в каждом подготовленном). Абзацы -
+    как в исходном (пустая строка), чтобы паузы были те же."""
+    spans = sentence_spans(text)
+    paras, letters, last_end = [], [], None
+    for a, b in spans:
+        t = prep(text[a:b])
+        if last_end is not None and "\n\n" in text[last_end:a].replace("\r", "").replace(" ", ""):
+            paras.append("\n\n")
+        elif paras:
+            paras.append(" ")
+        paras.append(t)
+        letters.append(_letters(t))
+        last_end = b
+    return "".join(paras), spans, letters
+
+
+def chunk_spans(chunks: list[tuple], spans: list[tuple[int, int]],
+                letters: list[int]) -> list[tuple[int, int]]:
+    """Место каждого куска в исходном тексте: по числу букв (нарезка на куски
+    добавляет только знаки и пробелы, буквы и цифры не трогает)."""
+    out, si, used = [], 0, 0
+    for c in chunks:
+        need = _letters(c[0])
+        first = min(si, len(spans) - 1)
+        while need > 0 and si < len(spans):
+            take = min(need, letters[si] - used)
+            need -= take
+            used += take
+            if used >= letters[si]:
+                si, used = si + 1, 0
+        last = max(first, min(si if used else si - 1, len(spans) - 1))
+        out.append((spans[first][0], spans[last][1]) if spans else (0, 0))
+    return out
+
+
 # --- озвучить произвольный текст -----------------------------------------
 def speak(text: str, *, engine: str, voice: str, live: Live | None,
           eng_kwargs: dict | None = None, language: str | None = None,
           prepared: bool = False, sound_check: bool = False, opts=None,
           use_cache: bool = True, lock_timeout: float | None = None,
-          on_prepared=None):
+          on_prepared=None, tempo: float | None = None, on_spans=None):
     """Озвучить текст потоком. Возвращает (сырой звук, частота).
 
     Ударения, числа, паузы, темп голоса - как в книге. Проверка слов по звуку
@@ -656,22 +725,37 @@ def speak(text: str, *, engine: str, voice: str, live: Live | None,
         fx = load_fx(default_voices_dir(), voice)
     except Exception:
         fx = None                       # поправки голоса не прочитались - как есть
-    if fx is not None and "speed" not in kw and engine != "silero" and fx.speed != 1.0:
-        kw["speed"] = fx.speed
-    if live is not None and live.fx_chain is None:
-        live.fx_chain = fx.filter_chain() if fx is not None else ""
+    # темп - не параметр движка (иначе другой ключ движка и перезагрузка модели
+    # 1,3 ГБ на каждое движение ползунка), а множитель на кусок: у клона - в
+    # модель (больше или меньше звука), у Silero - atempo после синтеза
+    if tempo is None:
+        tempo = float(kw.pop("speed", None) or (fx.speed if fx is not None else 1.0))
+    if live is not None:
+        if live.fx_chain is None:
+            live.fx_chain = fx.filter_chain() if fx is not None else ""
+        if engine == "silero":
+            live.fx_chain = with_tempo(live.fx_chain, tempo)
+        else:
+            live.tempo = tempo
     if not ENGINE_LOCK.acquire(timeout=-1 if lock_timeout is None else lock_timeout):
         raise Busy("Herald сейчас занят другой озвучкой")
     try:
         eng = P._loaded_engine(engine, kw)
         sr = eng.sample_rate
-        t = text if prepared else P._prepare_text(text, getattr(eng, "stress_format", None),
-                                                  opts.expand_numbers, opts.use_stress, lang)
+        prep = (lambda x: x) if prepared else (
+            lambda x: P._prepare_text(x, getattr(eng, "stress_format", None),
+                                      opts.expand_numbers, opts.use_stress, lang))
+        if on_spans is not None:            # вкладка: подсветка звучащего предложения
+            t, sp, lt = prepare_by_sentences(text, prep)
+        else:
+            t = prep(text)
         if on_prepared:
             on_prepared()
         chunks = P._chunk_paragraphs(t, eng.max_chunk_chars, opts.gap_sec,
                                      opts.para_gap_sec, opts.dialog_gap_sec)
         chunks = choose_first(chunks, live)
+        if on_spans is not None:
+            on_spans(chunk_spans(chunks, sp, lt))
         try:
             # края у готовых голосов Silero не проверяем: они их не съедают, а
             # пересчёт дал бы тот же звук - распознавание только задержало бы звук
@@ -686,6 +770,13 @@ def speak(text: str, *, engine: str, voice: str, live: Live | None,
         return audio, sr
     finally:
         ENGINE_LOCK.release()
+
+
+def with_tempo(chain: str, tempo: float) -> str:
+    """Поправки голоса (chain - без темпа) с темпом впереди: готовый голос
+    Silero меняет темп после синтеза (atempo), клон - в самой модели."""
+    t = f"atempo={tempo:.3f}" if abs(tempo - 1.0) > 1e-3 else ""
+    return ",".join(x for x in (t, chain or "") if x)
 
 
 class Busy(RuntimeError):

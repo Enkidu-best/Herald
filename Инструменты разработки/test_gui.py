@@ -19,6 +19,7 @@ _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)
 _os.chdir(_sys.path[0])
 
 import os
+import sys
 import time
 import traceback
 
@@ -87,13 +88,13 @@ def main() -> int:
 
     check("открылось и отрисовалось", lambda: app.update_idletasks())
     check("меню «Правка» на месте", lambda: app.nametowidget(app.cget("menu")))
-    check("три страницы построены заранее",
-          lambda: must(set(app.pages) == {"book", "voices", "settings"}, app.pages.keys()))
+    check("четыре страницы построены заранее (3.5: «Прочитать вслух»)",
+          lambda: must(set(app.pages) == {"book", "say", "voices", "settings"}, app.pages.keys()))
 
     print("боковое меню и темы:")
 
     def pages_switch():
-        for k in ("voices", "settings", "book"):
+        for k in ("voices", "say", "settings", "book"):
             app.show(k)
             app.update()
             must(app.page == k and app.pages[k].winfo_ismapped(), f"страница {k} не видна")
@@ -300,6 +301,24 @@ def main() -> int:
     app._on_profile()
 
     print("подробности:")
+    def details_hidden():
+        app.show("book")
+        app.update()
+        must(not app.details_box.winfo_ismapped() or app.cfg.get("show_log"),
+             "«Подробности» видны без ошибки")
+        import io
+        tee = G.App._StderrToLog(app, io.StringIO())   # тот же перехват, что в окне
+        tee.write("<torch_package_0>.x.py:286: SyntaxWarning: invalid escape sequence '\\^'\n")
+        tee.write("ℹ Продолжаю: готовых частей 1 из 2\n")
+        for _ in range(30):
+            app.update()
+            time.sleep(0.03)
+        must("SyntaxWarning" not in app.log.get("1.0", "end"), "предупреждение библиотеки в окне")
+        must("Продолжаю" in app.log.get("1.0", "end"), "справка программы пропала")
+        app._details_visible(True)                     # при ошибке - появляются
+        app.update()
+        must(app.details_box.winfo_ismapped(), "при ошибке «Подробности» не показаны")
+    check("«Подробности» скрыты, предупреждения библиотек - не в окне", details_hidden)
     check("подробности разворачиваются", lambda: (app.toggle_details(), app.update(),
                                                   must(app.log.winfo_ismapped(), "не видно")))
 
@@ -490,6 +509,9 @@ def main() -> int:
         """Заглушка синтеза: три куска по 0,8 с, каждый «считается» 0,3 с."""
         sr = 24000
         items = [("Первый кусок.", 0.4), ("Второй кусок.", 0.4), ("Третий.", 0.4)]
+        if _k.get("on_spans"):
+            n = max(1, len(text) // 3)
+            _k["on_spans"]([(0, n), (n, 2 * n), (2 * n, len(text))])
         live.plan(items, sr)
         out = []
         for _t, _g in items:
@@ -523,23 +545,93 @@ def main() -> int:
         return False
 
     def say_flow():
+        app.show("say")
         app.say_box.delete("1.0", "end")
-        app.say_box.insert("1.0", "Море к вечеру стихло.")
+        app.say_box.insert("1.0", "Море к вечеру стихло. Над водой повис туман. Лодки вернулись.")
+        app._say_text_changed()
+        must("знаков" in app.say_count.cget("text"), "счётчик знаков")
         app.say_mode.set("Быстрый")
+        app._say_on_kind("Быстрый")
+        must("звук через" in app.say_forecast.cget("text"), app.say_forecast.cget("text"))
         app.do_say()
-        must(app.say_btn.cget("text") == "Стоп", "во время чтения кнопка - «Стоп»")
         live = app._live
         must(live is not None and app._live_kind == "say", "поток не начался")
+        must(str(app.say_stop_btn.cget("state")) == "normal", "■ доступна во время чтения")
         must(pump(lambda: live.first_sound is not None), "звук не пошёл")
         must(pump(lambda: "Играет" in app.say_note.cget("text")), app.say_note.cget("text"))
-        app.do_say()                                   # «Стоп»
-        must(live.stopped and app.say_btn.cget("text") == "Прочитать", "стоп не сработал")
+        inner = app.say_box._textbox
+        must(pump(lambda: bool(inner.tag_ranges("say_cur"))), "звучащее предложение не подсвечено")
+        app._say_pause()
+        must(live.paused and str(app.say_pause_btn.cget("state")) == "disabled", "❚❚")
+        app.do_say()                                   # ▶ на паузе - продолжить
+        must(not live.paused, "▶ после паузы")
+        app._say_stop()                                # ■
+        must(live.stopped and app._live is None, "■ не сработал")
         must(pump(lambda: str(app.say_btn.cget("state")) == "normal"), "кнопка не вернулась")
         app.do_say()                                   # до конца
         must(pump(lambda: app._live is None, 15), "чтение не закончилось")
         must(str(app.say_save_btn.cget("state")) == "normal", "«Сохранить» не включилась")
         must("первый звук" in app.say_note.cget("text"), app.say_note.cget("text"))
-    check("«Прочитать вслух»: звук сразу, «Стоп», «Сохранить»", say_flow, limit=60)
+    check("вкладка «Прочитать вслух»: ▶ ❚❚ ■, подсветка, «Сохранить»", say_flow, limit=60)
+
+    def say_keys():
+        """Cmd/Ctrl+A C V X Z - и при русской раскладке (кириллическое имя клавиши)."""
+        inner = app.say_box._textbox
+        mod = "Command" if sys.platform == "darwin" else "Control"
+        app.say_box.delete("1.0", "end")
+        app.say_box.insert("1.0", "Проверка буфера")
+        inner.focus_force()
+        app.update()
+        for ks in ("a", "Cyrillic_ef"):              # выделить всё
+            inner.tag_remove("sel", "1.0", "end")
+            inner.event_generate(f"<{mod}-KeyPress>", keysym=ks)
+            must(inner.tag_ranges("sel"), f"{mod}+{ks}: не выделилось")
+        app.clipboard_clear()
+        inner.event_generate(f"<{mod}-KeyPress>", keysym="Cyrillic_es")      # Cmd+С (рус.)
+        app.update()
+        must(app.clipboard_get() == "Проверка буфера", "Cmd+С при русской раскладке")
+        inner.event_generate(f"<{mod}-KeyPress>", keysym="Cyrillic_che")     # Cmd+Ч - вырезать
+        app.update()
+        must(app._say_text() == "", "Cmd+Ч - вырезать")
+        inner.event_generate(f"<{mod}-KeyPress>", keysym="Cyrillic_em")      # Cmd+М - вставить
+        app.update()
+        must(app._say_text() == "Проверка буфера", "Cmd+М - вставить")
+        inner.event_generate(f"<{mod}-KeyPress>", keysym="z")                # отменить вставку
+        app.update()
+        must(app._say_text() == "", f"Cmd+Z: «{app._say_text()}»")
+        must(app._say_key_action(type("E", (), {"keysym": "??", "keycode": 8 << 24 if
+                                               sys.platform == "darwin" else 67})()) == "copy",
+             "по коду клавиши")
+    check("Cmd/Ctrl+A C V X Z при русской и английской раскладке", say_keys)
+
+    def say_voices():
+        app._say_on_kind("Быстрый")
+        fast = list(app.say_voice_menu.cget("values"))
+        must(any("Айдар" in x for x in fast) and len(fast) >= 5, fast)
+        app._say_on_kind("Клон")
+        clones = list(app.say_voice_menu.cget("values"))
+        must(clones and not any("Айдар" in x for x in clones), clones)
+        want = clones[-1]
+        app.say_voice_var.set(want)
+        app._say_on_voice()
+        app._say_on_kind("Быстрый")
+        app._say_on_kind("Клон")
+        must(app.say_voice_var.get() == want, "выбор клона не запомнился")
+        # ползунок темпа - прогноз пересчитывается сразу
+        app.say_box.delete("1.0", "end")
+        app.say_box.insert("1.0", "Море к вечеру стихло. " * 30)
+        app._say_text_changed()
+        sl = app._say_fx_vars["speed"][0]
+        sl.set(0.8)
+        app._say_fx_changed("speed")
+        slow = app.say_forecast.cget("text")
+        sl.set(1.2)
+        app._say_fx_changed("speed")
+        must(app.say_forecast.cget("text") != slow, "прогноз не пересчитан по темпу")
+        app._say_fx_reset()
+        must(abs(sl.get() - 1.0) < 1e-6, "«Сбросить»")
+        app._say_on_kind("Быстрый")
+    check("голос в два шага, ползунки и прогноз", say_voices)
 
     def stream_locked():
         app._set_busy(True, "тест")

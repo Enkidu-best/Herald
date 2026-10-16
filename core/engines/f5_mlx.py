@@ -27,6 +27,8 @@ import os
 import re
 import sys
 import shutil
+import threading
+
 import numpy as np
 
 from concurrent.futures import ThreadPoolExecutor
@@ -380,7 +382,7 @@ class F5MLXEngine(F5Engine):
                  steps: int = 16, speed: float = 1.0, quant_bits: int | None = None,
                  max_total_sec: float = MAX_TOTAL_SEC, dtype: str = "float32",
                  schedule: str = "epss", language: str = "ru",
-                 variant: str | None = None) -> None:
+                 variant: str | None = None, cfg_steps: int | None = None) -> None:
         super().__init__(voices_dir=voices_dir, device=None, nfe_step=steps, speed=speed)
         self.model_name = model_name
         # язык задаёт и модель, и нужны ли ударения: у английской модели свой
@@ -407,11 +409,28 @@ class F5MLXEngine(F5Engine):
         if variant and language != "ru":
             raise ValueError("другие веса есть только для русского")
         self.variant = variant
+        # cfg_steps (3.5, опыт): подсказка CFG (второй проход сети без текста)
+        # только на первых шагах; поздние шаги уточняют детали и идут одним
+        # проходом - вдвое дешевле. None - на всех шагах, как в F5 (по умолчанию)
+        self.cfg_steps = cfg_steps
         self._audio_cache: dict[str, tuple] = {}
         self._pace = 1.0                  # поправка темпа под образец
         self._vocoder = None
         self._vocab: dict[str, int] = {}
         # все операции MLX идут через общий поток _MLX_POOL (см. выше)
+
+    # last_cut_risk - своя у каждого потока: упреждение считает следующую пачку,
+    # пока основной поток пересчитывает кусок, и общая отметка перезаписывалась
+    # посреди чужого вызова (IndexError, поймано test_speed в 3.5)
+    @property
+    def last_cut_risk(self):
+        tls = self.__dict__.setdefault("_tls", threading.local())
+        return getattr(tls, "risk", None)
+
+    @last_cut_risk.setter
+    def last_cut_risk(self, v):
+        tls = self.__dict__.setdefault("_tls", threading.local())
+        tls.risk = v
 
     def cache_key(self) -> str:
         """Всё, что меняет звук куска, кроме текста и голоса (для кэша синтеза).
@@ -423,7 +442,8 @@ class F5MLXEngine(F5Engine):
         return "|".join(str(x) for x in (
             self.name, cfg["repo"], cfg["ckpt"], self.variant, self.language, self.steps, self.schedule,
             self.dtype, self.quant_bits, round(self.speed, 4), self.max_total_sec,
-            DURATION_HEADROOM, SHORT_HEADROOM, TAIL_KEEP_SEC, FADE_OUT_SEC))
+            DURATION_HEADROOM, SHORT_HEADROOM, TAIL_KEEP_SEC, FADE_OUT_SEC)
+            + ((f"cfg{self.cfg_steps}",) if self.cfg_steps is not None else ()))
 
     # --- подготовка локальной папки модели с ожидаемыми именами файлов ---
     def _prepare_model_dir(self) -> str:
@@ -772,9 +792,37 @@ class F5MLXEngine(F5Engine):
             pred, null = out[:B], out[B:]
             return pred + (pred - null) * CFG_STRENGTH
 
+        def flow_cond(xc, tc):
+            """Только условный проход (без CFG) - для поздних шагов при cfg_steps."""
+            time = mx.broadcast_to(tc.astype(dt), (B,))
+            tvec = d.time_embed(time)
+            if mask is None:
+                h = d.input_embed(xc, step_cond, te_keep, drop_audio_cond=False)
+                mk = None
+            else:
+                mk = mask[:B]
+                h = embed_cond(xc)
+            for blk in d.transformer_blocks:
+                h = blk(h, tvec, mask=mk, rope=rope)
+            return d.proj_out(d.norm_out(h, tvec))
+
+        def embed_cond(xc):
+            hh = ie.proj(mx.concatenate((xc, step_cond, te_keep), axis=-1))
+            y = hh * m3[:B]
+            for layer in conv:
+                y = layer(y)
+                if isinstance(layer, nn.Mish):
+                    y = y * m3[:B]
+            return y + hh
+
         flow = mx.compile(flow)
-        for i in range(t.shape[0] - 1):
-            x = x + (t[i + 1] - t[i]).astype(dt) * flow(x, t[i])
+        n_steps = t.shape[0] - 1
+        k_cfg = n_steps if self.cfg_steps is None else max(0, min(n_steps, int(self.cfg_steps)))
+        if k_cfg < n_steps:
+            flow_cond = mx.compile(flow_cond)
+        for i in range(n_steps):
+            f = flow if i < k_cfg else flow_cond
+            x = x + (t[i + 1] - t[i]).astype(dt) * f(x, t[i])
         if any(tails):
             # известные участки - как в F5TTS.sample: на выходе ровно то, что дали
             known = mx.stack([(mx.arange(n) >= g) & (mx.arange(n) < g + t)

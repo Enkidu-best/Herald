@@ -48,7 +48,7 @@ def first_sound(text, engine, kw, voice, prior, repeat, sound_check=False):
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--case", default="all", choices=["all", "silero", "phrase", "preview",
-                                                       "server", "pair"])
+                                                       "server", "pair", "tab", "fx"])
     ap.add_argument("--voice", default="Вячеслав Герасимов")
     ap.add_argument("--steps", type=int, default=12)
     ap.add_argument("--repeat", type=int, default=3)
@@ -136,6 +136,59 @@ def main() -> int:
             print("   ", out[-1], flush=True)
         srv.stop()
         res["server"] = out
+
+    if "tab" in cases:
+        # вкладка (3.5): «Сразу» и «Без пауз», 1 и 4 абзаца, быстрый голос и клон,
+        # темп 0,8 / 1,0 / 1,2 (у клона - в модель, у Silero - atempo после)
+        book = open("Примеры текстов/Пример - проба пера.txt", encoding="utf-8").read()
+        paras = [p for p in book.split("\n\n") if p.strip() and len(p) > 80]
+        texts = {"1 абзац": paras[0], "4 абзаца": "\n\n".join(paras[:4])}
+        out = []
+        for kind, engine, voice, k in (("быстрый", "silero", "aidar", {}),
+                                       ("клон", clone, a.voice, kw)):
+            S.speak("Проверка связи.", engine=engine, voice=voice, live=None, eng_kwargs=k)
+            prior = profiles.SILERO.rtf if engine == "silero" else profiles.get(None).rtf
+            for tname, text in texts.items():
+                for start in ("Сразу", "Без пауз"):
+                    for tempo in ((0.8, 1.0, 1.2) if tname == "1 абзац" and start == "Сразу"
+                                  else (1.0,)):
+                        live = S.Live(S.ClockSink(realtime=True),
+                                      S.make_speed(engine, k, voice, False, prior, accel_label()),
+                                      gate=start == "Без пауз")
+                        audio, sr = S.speak(text, engine=engine, voice=voice, live=live,
+                                            eng_kwargs=k, use_cache=False, tempo=tempo)
+                        synth = time.monotonic() - live.t0
+                        live.wait(900)
+                        dur = sum(len(x) for x in live.sink.chunks_out) / live.out_sr
+                        row = {"голос": kind, "текст": tname, "старт": start, "темп": tempo,
+                               "первый_звук_с": round(live.first_sound, 2),
+                               "звук_с": round(dur, 1), "счёт_с": round(synth, 1),
+                               "RTF": round(synth / max(0.1, dur), 2), "запинок": live.stalls,
+                               "запинки_с": round(live.sink.stall_sec, 1)}
+                        out.append(row)
+                        print("   ", row, flush=True)
+        res["tab"] = out
+
+    if "fx" in cases:
+        # добавка от фильтров голоса (высота, басы, яркость) на кусок: ffmpeg
+        import numpy as np
+        from core.voicefx import VoiceFX
+        seg = (0.2 * np.sin(np.arange(24000 * 12) / 7)).astype(np.float32)   # кусок 12 с
+        out = {}
+        for name, chain in (("без поправок", ""),
+                            ("высота+басы+яркость", VoiceFX(pitch=2, bass=3, brightness=2).filter_chain()),
+                            ("темп 1,2 (Silero)", S.with_tempo("", 1.2))):
+            live = S.Live(None, fx_chain=chain)
+            live.sr = 24000
+            ts = []
+            for _ in range(5):
+                t0 = time.monotonic()
+                live._polish(seg)
+                ts.append(time.monotonic() - t0)
+            live.stop()
+            out[name] = round(1000 * sorted(ts)[2], 1)
+            print(f"    {name}: {out[name]} мс на кусок 12 с", flush=True)
+        res["fx"] = out
 
     if "pair" in cases:
         # «живой» профиль 8 шагов против 12 - для слепого сравнения на одной фразе

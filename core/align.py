@@ -265,6 +265,54 @@ def stretched(ws: list[WordScore], audio: np.ndarray, sr: int,
     return out
 
 
+LAST_WORD_MIN = 0.6
+_DEVOICE = str.maketrans("бвгджз", "пфктшс")
+
+
+def _end_skeleton(word: str) -> str:
+    """Скелет с оглушённой последней согласной, если слово ею кончается:
+    звонкая на конце оглушается и у живого диктора («интриг» - [интрик])."""
+    w = word.lower().rstrip("ьъ")
+    sk = skeleton(w)
+    if sk and w and w[-1] not in _VOW:
+        sk = sk[:-1] + sk[-1].translate(_DEVOICE)
+    return sk
+
+
+def edges_ok(ws: list[WordScore], text: str) -> bool:
+    """Края куска по звуку (3.5) - вместо распознавания краёв Whisper.
+
+    Первое слово не должно быть съедено (is_bad). У последнего слова должен
+    прозвучать КОНЕЦ: последняя согласная (или две) его скелета - те же, что
+    слышит акустическая модель на его месте. Так ловится «ждать» -> «жда»,
+    «интриг» -> «интри»; безударные гласные на конце не сравниваются (их
+    редуцирует и живой диктор). Многоточие в конце - автор сам оборвал слово
+    («Не выйде…»): тогда только «не съедено». Слова короче 4 букв - как у
+    прежней проверки - не судим: на них модель путается сама.
+    """
+    words = [w for w in ws if w.norm]
+    if not words:
+        return True
+    first, last = words[0], words[-1]
+    if len(first.norm) >= 4 and is_bad(first):
+        return False
+    if len(last.norm) >= 4:
+        if is_bad(last):
+            return False
+        if not text.rstrip().endswith(("...", "…")):
+            # слово заменено похожим по согласным («выйдет» -> «вредит», поймано
+            # test_endings): по всем буквам. Порог 0,6 - ниже него на живой речи
+            # (742 чистых слова набора 3.3) не было ни одного верного слова
+            import difflib
+            if difflib.SequenceMatcher(None, last.norm, last.heard).ratio() < LAST_WORD_MIN:
+                return False
+            want, got = _end_skeleton(last.norm), _end_skeleton(last.heard)
+            k = 2 if len(want) >= 4 else 1
+            if want and got[-k:] != want[-k:]:
+                return False
+    return True
+
+
 def _resample(a: np.ndarray, sr: int, to: int) -> np.ndarray:
     if sr == to:
         return a

@@ -170,7 +170,15 @@ def main() -> int:
                   f"{'целиком' if ok else 'НЕ целиком'} ({' '.join(got[-3:])}), "
                   f"итог {'целиком' if fok else 'НЕ ЦЕЛИКОМ'} ({' '.join(fgot[-3:])})")
             if not fok:
-                fails.append(f"{tag}: в итоге последнее слово не целиком: {' '.join(fgot[-3:])}")
+                # что слышит на этом месте акустическая модель (без языковой
+                # догадки) - судьи бывают несогласны (3.5: «выйди» / «выйдет»)
+                try:
+                    from core import align
+                    lw = align.aligner().score(final, SR, _with_end_punct(text).replace("+", ""))[-1]
+                    note = f" (выравнивание слышит «{lw.heard}», уверенность {lw.post_mean:.2f})"
+                except Exception:
+                    note = ""
+                fails.append(f"{tag}: в итоге последнее слово не целиком: {' '.join(fgot[-3:])}{note}")
             # стык «хвост куска -> вставленная пауза»: до последнего ненулевого отсчёта
             nz = np.nonzero(final)[0]
             for p in click_problems(final[: nz[-1] + 2] if len(nz) else final):

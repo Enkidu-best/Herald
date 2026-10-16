@@ -94,7 +94,13 @@ class SileroEngine(TTSEngine):
         path = self._model_path()
         if not os.path.isfile(path):
             self._download(progress=progress)
-        self._model = torch.package.PackageImporter(path).load_pickle("tts_models", "model")
+        # код внутри пакета модели старый: при загрузке Python ругается на него
+        # (SyntaxWarning: invalid escape sequence) - это не ошибка, пользователю
+        # показывать нечего
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            self._model = torch.package.PackageImporter(path).load_pickle("tts_models", "model")
         self._model.to("cpu")
         self._loaded = True
 

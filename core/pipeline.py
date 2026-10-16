@@ -322,6 +322,7 @@ _ASR_MODEL = "small"          # core/asr: MLX на Mac, faster-whisper на Wind
 _ASR_FULL = "turbo"
 STRICT_WORDS = False          # 3.3: выключена - на слух выигрыша не дала, а время +50 %
 SOUND_CHECK = True            # 3.3: проверка слов по звуку (core/align)
+EDGES_BY_SOUND = True         # 3.5: края куска у клона - по звуку, без Whisper
 WORD_RETRIES = 2
 _align_failed = False
 
@@ -835,7 +836,20 @@ def _synth_chunks(eng: TTSEngine, voice: str, chunks, sr: int,
         live.plan([(t, g) for t, g, _m, _k in items], sr)
         _stop0 = should_stop
         should_stop = lambda: live.should_stop() or bool(_stop0 and _stop0())  # noqa: E731
-    muls = [m for _t, _g, m, _k in items]
+    base_muls = [m for _t, _g, m, _k in items]
+
+    class _Muls:
+        """Темп куска: свой (заголовок медленнее) × темп потока. Темп потока
+        можно менять на ходу (ползунок во вкладке «Прочитать вслух») - он
+        действует с ещё не посчитанного куска."""
+        def __getitem__(self, i):
+            return base_muls[i] * (getattr(live, "tempo", 1.0) if live is not None else 1.0)
+    muls = _Muls()
+    # края у клона - по звуку (3.5): тем же выравниванием, что слова. Оба судьи
+    # сразу (Whisper И звук) на «Пробе пера» дали 18 вызовов вместо 14 и RTF 2,02
+    # против 1,41: каждый лишний пересчёт - ~10 с счёта модели
+    sound_edges = (EDGES_BY_SOUND and check_edges and lang == "ru" and not strict_words
+                   and _clone(eng))
     st = stats if stats is not None else {}
     for k in ("fresh_sec", "cached", "retries", "pauses_fit"):
         st.setdefault(k, 0)
@@ -843,14 +857,18 @@ def _synth_chunks(eng: TTSEngine, voice: str, chunks, sr: int,
     groups = [list(range(i, min(i + B, len(items)))) for i in range(0, len(items), B)]
     vdir = default_voices_dir()
     ekey = eng.cache_key()
-    keys = [synthcache.key(ekey, vdir, voice, t, m) for t, m in zip(texts, muls)]
+    used_mul: dict[int, float] = {}
+
+    def key_of(i, m=None):
+        return synthcache.key(ekey, vdir, voice, texts[i], muls[i] if m is None else m)
 
     def produce(g):
         """Звук пачки: из кэша или синтезом. Работает в потоке упреждения."""
         out = {}
         todo = []
         for i in g:
-            hit = synthcache.get(keys[i]) if use_cache else None
+            used_mul[i] = muls[i]
+            hit = synthcache.get(key_of(i, used_mul[i])) if use_cache else None
             if hit is not None:
                 out[i] = (hit[0], hit[1], True, False)
             else:
@@ -885,6 +903,18 @@ def _synth_chunks(eng: TTSEngine, voice: str, chunks, sr: int,
             raise Cancelled()
         got = fut.result() if fut is not None else produce(g)
         fut = None
+        model = _ASR_FULL if strict_words else _ASR_MODEL
+        # Края - распознаванием ДО заказа следующего куска (3.5): Whisper и F5
+        # на Mac делят видеоядро, и одновременно проверка тянулась 8 с вместо
+        # 0,3 с (замер «Проба пера»: 136 с из 251). Так она идёт одна, а
+        # выравнивание (процессор) - уже параллельно со счётом следующего.
+        pre_h: dict[int, list | None] = {}
+        for i in g:
+            a_, _w, cached_, _r = got[i]
+            if not cached_ and len(a_) and check_edges and not sound_edges:
+                t0 = time.monotonic()
+                pre_h[i] = _listen(a_, sr, lang, model)
+                _spent([i], t0)
         # после «Стопа» следующий кусок не заказываем: движок нужен новому заказу
         # Поток (3.4): первый кусок проверяется БЕЗ упреждения. Иначе распознавание
         # его краёв делит видеоядро с синтезом второго и тянется 9 с вместо 0,3 -
@@ -894,28 +924,40 @@ def _synth_chunks(eng: TTSEngine, voice: str, chunks, sr: int,
                 and not (should_stop and should_stop())):
             fut = pool.submit(produce, groups[gi + 1])
         heard: dict[int, list | None] = {}
-        model = _ASR_FULL if strict_words else _ASR_MODEL
 
-        def judge(i, audio, risk):
+        def judge(i, audio, risk, h=None):
             """(годится, оценка): оценка - чем больше, тем лучше дубль.
 
             По звуку оценка дубля - его САМОЕ ПЛОХОЕ слово (а не среднее): из
             пересчётов берётся тот, где худшее слово звучит лучше всего."""
-            h = _listen(audio, sr, lang, model) if len(audio) and check_edges else None
-            edges = not risk and _edges_verdict(h, texts[i], len(audio) / sr)
+            # Края - по звуку, если звук и так выравнивается (3.5): Whisper на
+            # видеоядре делил его с синтезом и на Mac тянулся 8 с на кусок вместо
+            # 0,3 с (замер «Проба пера»: 136 с из 251). Без проверки слов, при
+            # строгой проверке 3.2 и если выравнивание недоступно - Whisper.
+            # выравнивание нужно и для краёв: у клона - всегда, даже без проверки
+            # слов (иначе без неё снова Whisper на видеоядре - медленнее, чем с ней)
+            ws = (_sound_words(audio, sr, texts[i])
+                  if len(audio) and lang == "ru" and (sound_check or sound_edges) else None)
+            if sound_edges and ws:
+                from .align import edges_ok
+                edges = not risk and (len(audio) / sr < 1.0 or edges_ok(ws, texts[i]))
+            else:
+                if h is None and len(audio) and check_edges:
+                    h = _listen(audio, sr, lang, model)  # пересчёт - распознаём здесь
+                edges = not risk and _edges_verdict(h, texts[i], len(audio) / sr)
             bad = _bad_words(h, texts[i]) if strict_words else []
+            if ws and not strict_words:
+                # времена слов по выравниванию точнее, чем у Whisper: по ним и паузы
+                # внутри куска (слова те же, что в тексте)
+                h = [(x, w.start, w.end) for w in ws for x in _words(w.word)]
             worst = 0.0
             if sound_check and len(audio) and lang == "ru":
-                ws = _sound_words(audio, sr, texts[i])
                 if ws:
                     from .align import is_bad, stretched
                     bad = bad + [w.word for w in ws if is_bad(w)]
                     # крайне растянутая гласная - тоже повод пересчитать (3.4)
                     bad = bad + [w + " (тянется)" for w in stretched(ws, audio, sr)]
                     worst = min(w.post_mean for w in ws)
-                    # времена слов по выравниванию точнее, чем у Whisper: по ним
-                    # и паузы внутри куска (слова те же, что в тексте)
-                    h = [(x, w.start, w.end) for w in ws for x in _words(w.word)]
             if bad or not edges:
                 heard_txt = " ".join(w for w, _s, _e in (h or []))
                 log_info(f"проверка куска: края {'да' if edges else 'НЕТ'}, слова не так: "
@@ -936,7 +978,7 @@ def _synth_chunks(eng: TTSEngine, voice: str, chunks, sr: int,
                 heard[i] = None
                 continue
             t0 = time.monotonic()
-            h, ok, score, edges, bad = judge(i, audio, risk)
+            h, ok, score, edges, bad = judge(i, audio, risk, pre_h.get(i))
             _spent([i], t0)
             heard[i] = h
             best[i] = (score, audio, h, bad)
@@ -1001,7 +1043,7 @@ def _synth_chunks(eng: TTSEngine, voice: str, chunks, sr: int,
             if not cached and len(audio):
                 st["fresh_sec"] += len(audio) / sr
                 if use_cache:                        # лучший из дублей - окончательный
-                    synthcache.put(keys[i], audio, sr, heard[i])
+                    synthcache.put(key_of(i, used_mul.get(i)), audio, sr, heard[i])
             if on_piece is not None and len(audio):
                 on_piece(texts[i], audio)          # стенды: звук куска до пауз
             if len(audio):
