@@ -73,11 +73,12 @@ def _speak(args) -> int:
         engine, kw, voice, prior = "silero", {}, args.voice or "aidar", profiles.SILERO.rtf
     else:
         engine = args.engine
-        kw = dict(profiles.get(None).kwargs) if engine in ("f5mlx", "f5torch") else {}
+        kw = (profiles.engine_kwargs(profiles.get(None), args.quality)
+              if engine in ("f5mlx", "f5torch") else {})
         if args.nfe is not None:
             kw["steps"] = args.nfe
         voice = args.voice
-        prior = profiles.rtf_for(profiles.get(None), accel_label())
+        prior = profiles.rtf_for(profiles.get(None), accel_label(), args.quality)
         if not voice:
             print("Не задан голос: --voice <образец> или --fast.", file=sys.stderr)
             return 1
@@ -117,7 +118,7 @@ def _serve(args) -> int:
     from core import profiles
     from core.speak_server import SpeakServer, DEFAULT_PORT
     srv = SpeakServer(port=args.port or DEFAULT_PORT, default_voice=lambda: args.voice,
-                      profile_kwargs=lambda: dict(profiles.get(None).kwargs),
+                      profile_kwargs=lambda: profiles.engine_kwargs(profiles.get(None), args.quality),
                       log=lambda m: print(m, file=sys.stderr))
     srv.start()
     print(f"Сервис озвучки: {srv.url}  (POST /speak, POST /stop; Ctrl+C - выход)",
@@ -170,6 +171,8 @@ def main() -> int:
     ap.add_argument("--serve", action="store_true",
                     help="озвучка для других программ: сервис /speak на 127.0.0.1")
     ap.add_argument("--port", type=int, default=None, help="порт сервиса (по умолч. 8716)")
+    ap.add_argument("--quality", default="balanced", choices=["fast", "balanced", "max"],
+                    help="клон: быстрее / сбалансировано (по умолч.) / максимальное качество")
     args = ap.parse_args()
     if args.engine == "auto":
         args.engine = clone_engine()
@@ -209,7 +212,7 @@ def main() -> int:
             eng_kw["device"] = args.device
     elif args.engine in ("f5mlx", "f5torch"):
         from core import profiles
-        eng_kw.update(profiles.get(None).kwargs)        # основной: 12 шагов EPSS
+        eng_kw.update(profiles.engine_kwargs(profiles.get(None), args.quality))  # основной
         if args.speed is not None:
             eng_kw["speed"] = args.speed
         if args.nfe is not None:

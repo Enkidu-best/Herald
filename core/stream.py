@@ -733,10 +733,10 @@ def speak(text: str, *, engine: str, voice: str, live: Live | None,
     if live is not None:
         if live.fx_chain is None:
             live.fx_chain = fx.filter_chain() if fx is not None else ""
-        if engine == "silero":
-            live.fx_chain = with_tempo(live.fx_chain, tempo)
+        if engine in ("f5mlx", "f5torch", "f5"):
+            live.tempo = tempo                  # клон: темп - в модель
         else:
-            live.tempo = tempo
+            live.fx_chain = with_tempo(live.fx_chain, tempo)   # готовые голоса - после
     if not ENGINE_LOCK.acquire(timeout=-1 if lock_timeout is None else lock_timeout):
         raise Busy("Herald сейчас занят другой озвучкой")
     try:

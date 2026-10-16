@@ -63,9 +63,17 @@ PAUSES = (("gap_sec", "После предложения", 0.4, 0.2, 1.5),
           ("dialog_gap_sec", "Между репликами", 1.1, 0.3, 2.5))
 VOICE_NAME_LIMIT = 24
 FAST_VOICE = "aidar"       # «Прочитать вслух» быстрым голосом: готовый голос Silero
+SAY_HL_BG, SAY_HL_FG = "#FFE99A", "#1A1A1A"   # подсветка звучащего предложения
+SAY_TEMPO = (0.5, 1.5)     # темп во вкладке (3.6: Андрей хотел медленнее 0,8)
+GENDER = {"м": "муж.", "ж": "жен."}
 
 
 # --- мелочи ----------------------------------------------------------------
+def _clone_engine(engine: str) -> bool:
+    """Клон F5 (темп в модель, долгий старт) или готовый быстрый голос."""
+    return engine in ("f5mlx", "f5torch", "f5")
+
+
 def _open_path(path: str):
     osutil.open_path(path)
 
@@ -130,8 +138,10 @@ def save_config(cfg: dict) -> None:
 class _V:
     """Голос в списке: клон (из образца) или готовый (Silero)."""
 
-    def __init__(self, vid: str, title: str, language: str, ready: bool):
+    def __init__(self, vid: str, title: str, language: str, ready: bool,
+                 engine: str = "silero", gender: str = ""):
         self.id, self.title, self.language, self.ready = vid, title, language, ready
+        self.engine, self.gender = engine, gender
 
     def label(self) -> str:
         name = _short(self.title, VOICE_NAME_LIMIT)
@@ -762,6 +772,28 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         self.prof_note = T.label(b, "", 12, color=T.MUTED, anchor="w")
         self.prof_note.pack(fill="x", pady=(8, 0))
 
+        cq = T.card(page)
+        cq.pack(fill="x", padx=28, pady=(0, 14))
+        bq = ctk.CTkFrame(cq, fg_color="transparent")
+        bq.pack(fill="x", padx=18, pady=16)
+        T.section(bq, "Качество / скорость").pack(fill="x")
+        T.label(bq, "Для клона (основной и ESpeech). Модель и 12 шагов те же; меняется, на "
+                    "скольких шагах модель сверяется с текстом дважды.",
+                12, color=T.MUTED, anchor="w", justify="left", wraplength=640).pack(
+            fill="x", pady=(2, 6))
+        qk = self.cfg.get("quality")
+        self.quality_var = ctk.StringVar(value=qk if qk in profiles.QUALITY else profiles.DEFAULT_QUALITY)
+        self._quality_radios = []
+        for q in profiles.QUALITY.values():
+            r = ctk.CTkRadioButton(bq, text=q.title, value=q.key, variable=self.quality_var,
+                                   font=T.font(14), fg_color=T.ACCENT, hover_color=T.ACCENT_HOVER,
+                                   border_color=T.BORDER_STRONG, text_color=T.TEXT,
+                                   command=self._on_quality)
+            r.pack(anchor="w", pady=(8, 0))
+            self._quality_radios.append(r)
+            T.label(bq, q.hint, 12, color=T.MUTED, anchor="w", justify="left",
+                    wraplength=640).pack(fill="x", padx=(30, 0))
+
         cs = T.card(page)
         cs.pack(fill="x", padx=28, pady=(0, 14))
         bs = ctk.CTkFrame(cs, fg_color="transparent")
@@ -783,6 +815,21 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         # в 3.3: на слух выигрыша не дала, а время +50 %; проверка по звуку лучше
         # на размеченном наборе (9 из 10 мест против 7 из 10)
         self.strict_var = ctk.BooleanVar(value=False)
+
+        cr = T.card(page)
+        cr.pack(fill="x", padx=28, pady=(0, 14))
+        br = ctk.CTkFrame(cr, fg_color="transparent")
+        br.pack(fill="x", padx=18, pady=16)
+        T.section(br, "Прочитать вслух").pack(fill="x")
+        self.say_clones_var = ctk.BooleanVar(value=bool(self.cfg.get("say_clones", False)))
+        ctk.CTkCheckBox(br, text="Показывать клон-голоса в «Прочитать вслух»",
+                        variable=self.say_clones_var, font=T.font(14), fg_color=T.ACCENT,
+                        hover_color=T.ACCENT_HOVER, border_color=T.BORDER_STRONG,
+                        text_color=T.TEXT, command=self._on_say_clones).pack(anchor="w", pady=(8, 0))
+        T.label(br, "Клон в этой вкладке начинает говорить только через 10-50 с; быстрые "
+                    "голоса - сразу. Для книги клон - лучший выбор.",
+                12, color=T.MUTED, anchor="w", justify="left", wraplength=640).pack(
+            fill="x", padx=(30, 0))
 
         csv = T.card(page)
         csv.pack(fill="x", padx=28, pady=(0, 14))
@@ -909,11 +956,15 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         p = self.profile()
         # сначала - полное ожидание прошлых книг этим движком (со сборкой и
         # пересчётами), потом - замер счёта по частям, потом прикидка профиля
-        got = (self.cfg.get("rtf_wall", {}).get(self._rtf_key())
-               or self.cfg.get("rtf", {}).get(self._rtf_key()))
+        key = self._rtf_key()
+        rw = self.cfg.get("rtf_wall", {})
+        # этот голос в этом режиме -> любой голос в этом режиме -> счёт по частям
+        got = (rw.get(f"{key}|{v.id}" if v else key) or rw.get(f"{key}|*")
+               or self.cfg.get("rtf", {}).get(key))
         if got:
             return float(got)
-        return (profiles.rtf_for(p, self._accel) * (STRICT_COST if self.strict_var.get() else 1.0)
+        return (profiles.rtf_for(p, self._accel, self._quality())
+                * (STRICT_COST if self.strict_var.get() else 1.0)
                 * (SOUND_COST if self.sound_var.get() else 1.0))
 
     def _show_accel(self, accel: str):
@@ -965,7 +1016,10 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         """Замер RTF - на профиль И число шагов: при смене шагов старый не годится."""
         p = self.profile()
         strict = ("s" if self.strict_var.get() else "n") + ("z" if self.sound_var.get() else "")
-        return f"{p.key}:{p.kwargs.get('steps', '')}:{self._accel}:{strict}"
+        # 3.6: и версия, и режим - замеры прежних версий и других режимов не годятся
+        # (прогноз Ященко в 3.5 шёл по замерам до ускорения: ×1,8 вместо ×1,4)
+        return (f"{VERSION}:{p.key}:{p.kwargs.get('steps', '')}:{self._quality()}:"
+                f"{self._accel}:{strict}")
 
     def _got_rtf(self, rtf: float):
         """Настоящий RTF от конвейера: показать и запомнить для прогноза."""
@@ -994,12 +1048,36 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
             key = self._rtf_key()
             rw = self.cfg.setdefault("rtf_wall", {})
             w = took / dur
-            rw[key] = round(w if key not in rw else 0.3 * rw[key] + 0.7 * w, 3)
+            for k_ in (f"{key}|{v.id}", f"{key}|*"):     # голос и режим целиком
+                rw[k_] = round(w if k_ not in rw else 0.3 * rw[k_] + 0.7 * w, 3)
         save_config(self.cfg)
         self.show_estimate()
 
     def profile(self) -> profiles.Profile:
         return profiles.get(self.profile_var.get())
+
+    def _quality(self) -> str:
+        return self.quality_var.get() if hasattr(self, "quality_var") else profiles.DEFAULT_QUALITY
+
+    def _prof_kwargs(self, p: profiles.Profile | None = None) -> dict:
+        """Параметры движка профиля с режимом «Качество / скорость» (3.6)."""
+        return profiles.engine_kwargs(p or self.profile(), self._quality())
+
+    def _on_say_clones(self):
+        self.cfg["say_clones"] = bool(self.say_clones_var.get())
+        save_config(self.cfg)
+        if hasattr(self, "say_mode"):
+            self._say_on_kind(self.say_mode.get() if self._say_clones() else "Быстрый",
+                              remember=False)
+
+    def _on_quality(self):
+        self.cfg["quality"] = self.quality_var.get()
+        save_config(self.cfg)
+        self._srv_sync()
+        self._update_tech()
+        self.show_estimate()
+        if hasattr(self, "say_forecast"):
+            self._say_forecast()
 
     def _on_profile(self):
         self.cfg["profile"] = self.profile_var.get()
@@ -1022,7 +1100,14 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
                 out.append(_V(v.id, v.id, v.language, False))
         except Exception as e:
             log_problem("не удалось прочитать список голосов", e)
-        out += [_V(v.id, v.title, v.language, True) for v in SILERO_VOICES]
+        out += [_V(v.id, v.title, v.language, True, "silero", v.gender) for v in SILERO_VOICES]
+        # быстрые голоса Vosk / Piper - только отмеченные Андреем (3.6, core/engines/fast)
+        try:
+            from core.engines import fast
+            out += [_V(v.id, v.title, v.language, True, fast.engine_of(v.id), v.gender)
+                    for v in fast.enabled_voices()]
+        except Exception as e:
+            log_problem("быстрые голоса не прочитались", e, show=False)
         return out
 
     def refresh_voices(self):
@@ -1221,9 +1306,10 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
             return
         lang = v.language if v else "ru"
         if v and v.ready:
-            engine, kw, text = "silero", {}, self.FX_PHRASE["ru"]
+            engine, kw = v.engine, {}
+            text = self.FX_PHRASE.get(v.language, self.FX_PHRASE["ru"])
         else:
-            kw = dict(self.profile().kwargs, speed=fx.speed)
+            kw = dict(self._prof_kwargs(), speed=fx.speed)
             if lang != "ru":
                 kw.pop("variant", None)
             engine, text = clone_engine(), self.FX_PHRASE.get(lang, self.FX_PHRASE["ru"])
@@ -1307,7 +1393,7 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
                   show, fx_chain: str | None = None, gate: bool = True):
         """Новый поток (прежний останавливается). show(текст) - куда писать статус."""
         self._live_stop()
-        prior = (profiles.SILERO.rtf if engine == "silero"
+        prior = (profiles.SILERO.rtf if not _clone_engine(engine)
                  else profiles.rtf_for(self.profile(), self._accel)
                  * (SOUND_COST if sound_check else 1.0))
         live = S.Live(S.default_sink(),
@@ -1460,8 +1546,9 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         self.say_box.pack(fill="both", expand=True, padx=14, pady=(0, 8))
         self._say_bind_keys()
         inner = getattr(self.say_box, "_textbox", self.say_box)
-        inner.tag_configure("say_cur", background=T.ACCENT_SOFT[1] if isinstance(
-            T.ACCENT_SOFT, (tuple, list)) else T.ACCENT_SOFT)
+        # светлая заливка и тёмный текст в обеих темах (3.6: на тёмной теме
+        # прежняя заливка закрывала текст); контраст 14,4:1 - проверено в test_gui
+        inner.tag_configure("say_cur", background=SAY_HL_BG, foreground=SAY_HL_FG)
         inner.bind("<<Modified>>", lambda e: self._say_text_changed())
         inner.bind("<ButtonRelease-1>", self._say_click)
         inner.bind("<FocusIn>", lambda e: self._say_warm())
@@ -1480,8 +1567,9 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
                                      size=13, width=120, command=self._say_save)
         self.say_save_btn.configure(state="disabled")
         self.say_save_btn.pack(side="right")
-        self.say_note = T.label(ctrl, "", 12, color=T.MUTED, anchor="w")
-        self.say_note.pack(side="left", fill="x", expand=True, padx=12)
+        # строка состояния - отдельной строкой: между кнопками она обрезалась (3.6)
+        self.say_note = T.label(left, "", 12, color=T.MUTED, anchor="w")
+        self.say_note.pack(fill="x", padx=16, pady=(0, 10))
 
         right = T.card(page)
         right.grid(row=1, column=1, sticky="nsew", padx=(8, 28), pady=(0, 20))
@@ -1489,8 +1577,11 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         r.pack(fill="both", expand=True, padx=18, pady=16)
         ctk.CTkFrame(r, width=290, height=0, fg_color="transparent").pack()
         T.section(r, "Голос").pack(fill="x")
+        # «Быстрый / Клон» - только если клоны показаны (Настройки, 3.6)
+        self.say_mode_box = ctk.CTkFrame(r, fg_color="transparent")
+        self.say_mode_box.pack(fill="x")
         self.say_mode = ctk.CTkSegmentedButton(
-            r, values=["Быстрый", "Клон"], height=30, font=T.font(13),
+            self.say_mode_box, values=["Быстрый", "Клон"], height=30, font=T.font(13),
             selected_color=T.ACCENT, selected_hover_color=T.ACCENT_HOVER,
             command=lambda v: self._say_on_kind(v))
         self.say_mode.pack(fill="x", pady=(6, 4))
@@ -1500,21 +1591,23 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
                                                 dropdown_font=T.font(13),
                                                 command=lambda *_: self._say_on_voice())
         self.say_voice_menu.pack(fill="x")
-        T.section(r, "Начало").pack(fill="x", pady=(14, 0))
-        self.say_start = ctk.CTkSegmentedButton(
-            r, values=["Сразу", "Без пауз"], height=30, font=T.font(13),
-            selected_color=T.ACCENT, selected_hover_color=T.ACCENT_HOVER,
-            command=lambda v: (self.cfg.__setitem__("say_start", v), save_config(self.cfg),
-                               self._say_forecast()))
-        self.say_start.set(self.cfg.get("say_start", "Сразу")
-                           if self.cfg.get("say_start") in ("Сразу", "Без пауз") else "Сразу")
-        self.say_start.pack(fill="x", pady=(6, 2))
-        T.label(r, "«Сразу» - звук после первой фразы; если следующая не готова, пауза между "
-                   "предложениями. «Без пауз» - начать, когда успеет без остановок.",
-                11, color=T.MUTED, anchor="w", justify="left", wraplength=290).pack(fill="x")
-        T.section(r, "Звучание").pack(fill="x", pady=(14, 0))
+        # «Сразу / Без пауз» - только для клона: быстрые голоса и так без пауз
+        self.say_start_box = ctk.CTkFrame(r, fg_color="transparent")
+        self.say_start_box.pack(fill="x")
+        T.section(self.say_start_box, "Начало").pack(fill="x", pady=(14, 0))
+        sv = self.cfg.get("say_start")
+        self.say_start_var = ctk.StringVar(value=sv if sv in ("Сразу", "Без пауз") else "Сразу")
+        for val, text in (("Сразу", "Начать сразу (между фразами возможны паузы)"),
+                          ("Без пауз", "Подождать и читать без остановок")):
+            ctk.CTkRadioButton(self.say_start_box, text=text, value=val,
+                               variable=self.say_start_var, font=T.font(13),
+                               fg_color=T.ACCENT, hover_color=T.ACCENT_HOVER,
+                               border_color=T.BORDER_STRONG, text_color=T.TEXT,
+                               command=self._say_on_start).pack(anchor="w", pady=(6, 0))
+        self.say_sound_head = T.section(r, "Звучание")
+        self.say_sound_head.pack(fill="x", pady=(14, 0))
         self._say_fx_vars = {}
-        for title, key, lo, hi, unit in (("Темп", "speed", 0.8, 1.25, "×"),
+        for title, key, lo, hi, unit in (("Темп", "speed", SAY_TEMPO[0], SAY_TEMPO[1], "×"),
                                          ("Высота", "pitch", -4, 4, " полутона"),
                                          ("Басы", "bass", -6, 6, " дБ"),
                                          ("Яркость", "brightness", -6, 6, " дБ")):
@@ -1523,7 +1616,7 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
             T.label(line, title, 13, anchor="w", width=70).pack(side="left")
             val = T.label(line, "", 12, color=T.MUTED, width=80, anchor="e")
             val.pack(side="right")
-            steps = 18 if key == "speed" else int((hi - lo) * 4)
+            steps = 20 if key == "speed" else int((hi - lo) * 4)
             sl = ctk.CTkSlider(line, from_=lo, to=hi, number_of_steps=steps,
                                button_color=T.ACCENT, button_hover_color=T.ACCENT_HOVER,
                                progress_color=T.ACCENT, fg_color=T.SURFACE2,
@@ -1670,15 +1763,46 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
             save_config(self.cfg)
 
     # --- голос ---
+    def _say_clones(self) -> bool:
+        return bool(self.cfg.get("say_clones", False))
+
     def _say_voices(self, kind: str) -> list[_V]:
+        if kind != "Быстрый" and not self._say_clones():
+            kind = "Быстрый"
         return [v for v in self._voices if v.ready == (kind == "Быстрый")]
+
+    @staticmethod
+    def _say_label(v: _V) -> str:
+        """«Евгений · муж. · русский» - имя, пол, язык (3.6)."""
+        name = v.title.split(" (")[0]
+        g = GENDER.get(v.gender, "") if v.ready else "клон"
+        return " · ".join(x for x in (name, g, LANG_MARK.get(v.language, v.language)) if x)
+
+    def _say_on_start(self):
+        self.cfg["say_start"] = self.say_start_var.get()
+        save_config(self.cfg)
+        self._say_forecast()
+
+    def _say_layout(self):
+        """Показать «Быстрый / Клон» и «Начало» только там, где они нужны."""
+        if self._say_clones():
+            self.say_mode_box.pack(fill="x", before=self.say_voice_menu)
+        else:
+            self.say_mode_box.pack_forget()
+            if self.say_mode.get() != "Быстрый":
+                self.say_mode.set("Быстрый")
+        v = self._say_voice()
+        if v is not None and not v.ready:
+            self.say_start_box.pack(fill="x", before=self.say_sound_head)
+        else:
+            self.say_start_box.pack_forget()
 
     def _say_on_kind(self, kind: str, remember: bool = True):
         if remember:
             self.cfg["say_mode"] = kind
             save_config(self.cfg)
         vs = self._say_voices(kind)
-        labels = [v.label() for v in vs] or ["(нет голосов)"]
+        labels = [self._say_label(v) for v in vs] or ["(нет голосов)"]
         self.say_voice_menu.configure(values=labels)
         want = self.cfg.get("say_fast_voice" if kind == "Быстрый" else "say_clone_voice")
         if kind == "Быстрый" and not want:
@@ -1687,12 +1811,12 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
             v = self._voice_obj()
             want = v.id if v is not None and not v.ready else None
         pick = next((v for v in vs if v.id == want), vs[0] if vs else None)
-        self.say_voice_var.set(pick.label() if pick else labels[0])
+        self.say_voice_var.set(self._say_label(pick) if pick else labels[0])
         self._say_on_voice(remember=False)
 
     def _say_voice(self) -> _V | None:
         lab = self.say_voice_var.get()
-        return next((v for v in self._voices if v.label() == lab), None)
+        return next((v for v in self._voices if self._say_label(v) == lab), None)
 
     def _say_on_voice(self, remember: bool = True):
         v = self._say_voice()
@@ -1701,8 +1825,9 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
             save_config(self.cfg)
         fx = load_fx(default_voices_dir(), v.id) if v is not None else VoiceFX()
         for k, (sl, _l, _u) in self._say_fx_vars.items():
-            sl.set(getattr(fx, k))
+            sl.set(getattr(fx, k))          # сохранённое для голоса - начальное положение
             self._say_fx_label(k)
+        self._say_layout()
         self._say_forecast()
 
     def _say_fx(self) -> VoiceFX:
@@ -1755,23 +1880,26 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         lang = detect_language(text) if text.strip() else "ru"
         v = self._say_voice()
         hint = ""
-        if v is not None and v.ready and lang == "ru":
-            return "silero", {}, v.id, lang, hint
+        if v is not None and v.ready and v.language == lang:
+            return v.engine, {}, v.id, lang, hint
         if v is not None and v.ready:
-            hint = "Готовых английских голосов нет - читает клон. "
+            other = next((x for x in self._voices if x.ready and x.language == lang), None)
+            if other is not None:              # другой язык - быстрый голос этого языка
+                return other.engine, {}, other.id, lang, f"Текст {LANG_MARK.get(lang, lang)} - читает {other.title}. "
+            hint = f"Быстрого голоса на языке текста нет - читает клон. "
             vid = self._clone_for(lang)
         else:
             vid = v.id if v is not None else self._clone_for(lang)
-        kw = dict(self.profile().kwargs)
+        kw = self._prof_kwargs()
         if lang != "ru":
             kw.pop("variant", None)
         return clone_engine(), kw, vid, lang, hint
 
     def _say_speed(self, engine, kw, vid):
-        prior = (profiles.SILERO.rtf if engine == "silero"
+        prior = (profiles.SILERO.rtf if not _clone_engine(engine)
                  else profiles.rtf_for(self.profile(), self._accel))
         return S.make_speed(engine, dict(kw, language=self._say_plan()[3])
-                            if engine != "silero" else kw, vid, False, prior, self._accel)
+                            if _clone_engine(engine) else kw, vid, False, prior, self._accel)
 
     def _say_forecast(self):
         if not hasattr(self, "say_forecast"):
@@ -1786,7 +1914,7 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
             return
         sp = self._say_speed(engine, kw, vid)
         tempo = self._say_fx().speed
-        clone = engine != "silero"
+        clone = _clone_engine(engine)
         from core.stream import _letters
         size = 187 if clone else 800
         parts, cur = [], 0
@@ -1804,7 +1932,7 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         for n in ([first, parts[0] - first] if parts and parts[0] > first else [first]) + parts[1:]:
             d = sp.audio_sec(int(n * 0.8), tempo if clone else 1.0)
             rest.append((sp.synth_sec(d), d))
-        if self.say_start.get() == "Сразу":
+        if self.say_start_var.get() == "Сразу":
             wait = rest[0][0] if rest else 0.0
             maybe = " · возможны паузы" if clone and sp.rtf > 1.0 else ""
         else:
@@ -1843,12 +1971,12 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
             self.say_note.configure(text="Нет голоса-клона - добавьте образец в «Голосах»")
             return
         fx = self._say_fx()
-        gate = self.say_start.get() == "Без пауз"
+        gate = self.say_start_var.get() == "Без пауз"
         self.say_save_btn.configure(state="disabled")
         chain = fx.filter_chain()
 
         def done(audio, sr):
-            self._say_last = (audio, sr, S.with_tempo(chain, fx.speed) if engine == "silero"
+            self._say_last = (audio, sr, S.with_tempo(chain, fx.speed) if not _clone_engine(engine)
                               else chain)
             self.say_save_btn.configure(state="normal")
         if hint:
@@ -1945,7 +2073,7 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
             self.prof_note.configure(text="Движок слышно на клоне: выберите голос-клон на главной")
             return
         p = profiles.get(key)
-        kw = dict(p.kwargs)
+        kw = self._prof_kwargs(p)
         if v.language != "ru":
             if "variant" in kw:
                 self.prof_note.configure(text="У ESpeech только русский голос")
@@ -1959,7 +2087,7 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         """Голос и движок для сервиса - из окна (читаются в главном потоке)."""
         v = self._voice_obj()
         self._srv_voice = v.id if v is not None and not v.ready else self._clone_for("ru")
-        self._srv_kwargs = dict(self.profile().kwargs)
+        self._srv_kwargs = self._prof_kwargs()
 
     def _srv_toggle(self):
         self.cfg["speak_server"] = bool(self.srv_var.get())
@@ -2234,8 +2362,8 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         Английскому голосу - без ESpeech (у него веса только русские)."""
         v = self._voice_obj()
         if v is not None and v.ready:
-            return "silero", {}
-        kw = dict(self.profile().kwargs)
+            return v.engine, {}
+        kw = self._prof_kwargs()
         if v is not None and v.language != "ru":
             kw.pop("variant", None)
         return clone_engine(), kw
@@ -2266,7 +2394,7 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         st = "disabled" if busy else "normal"
         for w in self._setting_widgets + [self.preview_btn, self.clear_btn, self.add_voice_btn]:
             w.configure(state=st)
-        for r in self._profile_radios:
+        for r in self._profile_radios + getattr(self, "_quality_radios", []):
             r.configure(state=st)
         for sl, _v in self._pause_vars.values():
             sl.configure(state=st)
@@ -2421,7 +2549,7 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         opts, fmt = self._conv_options(), self.fmt_var.get()
         self._live_stop()
         self._set_busy(True, "Шаг 1 из 3 · Готовлю пробник…")
-        live = self._live_new("preview", engine, kw, voice, opts.sound_check and engine != "silero",
+        live = self._live_new("preview", engine, kw, voice, opts.sound_check and _clone_engine(engine),
                               lambda t: self.status.configure(text="Пробник · " + t))
         self.pause_btn.configure(state="normal")
         self.progress.set(0)

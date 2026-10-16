@@ -69,8 +69,53 @@ ACCEL_TITLE = {"mlx": "видеоядро Apple (MLX)", "cuda": "видеока�
                "cpu": "процессор - очень медленно"}
 
 
-def rtf_for(p: Profile, accel: str) -> float:
-    return p.rtf * ACCEL_MUL.get(accel, 1.0)
+@dataclass(frozen=True)
+class Quality:
+    """Качество / скорость (3.6): на скольких из 12 шагов идёт подсказка CFG.
+
+    На каждом шаге модель считается дважды - с текстом и без, разница усиливает
+    следование тексту. На поздних шагах второй проход можно опустить: звук чуть
+    менее чистый, счёт быстрее (слепое сравнение 3.5: разница небольшая,
+    Андрей выбрал скорость). Модель и 12 шагов не меняются.
+    """
+    key: str
+    title: str
+    cfg_steps: int | None          # None - на всех шагах, как в F5
+    rtf_mul: float                 # во сколько раз быстрее «Максимального качества»
+    hint: str = ""
+
+
+QUALITY: dict[str, Quality] = {q.key: q for q in (
+    Quality("fast", "Быстрее", 4, 0.64,
+            "Подсказка на 4 шагах из 12: книга считается быстрее, чем звучит. "
+            "На слух чуть меньше чистоты."),
+    Quality("balanced", "Сбалансировано (рекомендуется)", 6, 0.75,
+            "Подсказка на 6 шагах из 12: счёт примерно как длина звука, на слух "
+            "почти не отличить от максимального качества."),
+    Quality("max", "Максимальное качество", None, 1.0,
+            "Подсказка на всех 12 шагах, как в 3.5: чище всего, счёт дольше звука "
+            "в 1,4 раза."),
+)}
+DEFAULT_QUALITY = "balanced"
+
+
+def quality(key: str | None) -> Quality:
+    return QUALITY.get(key or DEFAULT_QUALITY, QUALITY[DEFAULT_QUALITY])
+
+
+def engine_kwargs(p: Profile, quality_key: str | None = None) -> dict:
+    """Параметры движка профиля с учётом режима «Качество / скорость».
+    Режим действует на клоны с 12 шагами (основной, ESpeech); черновик - как есть."""
+    kw = dict(p.kwargs)
+    q = quality(quality_key)
+    if p.clone and kw.get("steps") == 12 and q.cfg_steps is not None:
+        kw["cfg_steps"] = q.cfg_steps
+    return kw
+
+
+def rtf_for(p: Profile, accel: str, quality_key: str | None = None) -> float:
+    mul = quality(quality_key).rtf_mul if p.clone and p.kwargs.get("steps") == 12 else 1.0
+    return p.rtf * mul * ACCEL_MUL.get(accel, 1.0)
 
 
 def get(key: str | None) -> Profile:

@@ -51,7 +51,9 @@ def _loaded_engine(engine_id: str, eng_kwargs: dict) -> TTSEngine:
         eng.ensure_loaded()
         # держим не больше одной большой модели разом; Silero (40 МБ) - сбоку:
         # «Прочитать вслух» быстрым голосом не должен выгружать клон
-        for k in [k for k in _ENGINE_CACHE if (k[0] == "silero") == (engine_id == "silero")]:
+        big = engine_id in ("f5mlx", "f5torch", "f5")
+        for k in [k for k in _ENGINE_CACHE if (k[0] in ("f5mlx", "f5torch", "f5")) == big
+                  and (big or k[0] == engine_id)]:
             del _ENGINE_CACHE[k]
         _ENGINE_CACHE[key] = eng
     return eng

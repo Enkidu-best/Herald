@@ -70,6 +70,16 @@ def main() -> int:
     rel = diff / float(np.max(np.abs(a[gen])) + 1e-9)
     must(rel < 0.02, f"мел torch = MLX: наибольшее расхождение {diff:.3g} ({rel:.2%} от размаха)")
 
+    # режим «Сбалансировано» (3.6): подсказка CFG на 6 шагах из 12 - так же
+    em.cfg_steps = et.cfg_steps = 6
+    a6 = F._MLX_POOL.submit(mlx_run).result()
+    b6, nb6 = F._MLX_POOL.submit(et._sample_mel_torch, audio_t, tokens, dur, tail, noise).result()
+    b6 = b6[0, :nb6].numpy()
+    d6 = float(np.max(np.abs(a6[gen] - b6[gen]))) if a6.shape == b6.shape else 1e9
+    r6 = d6 / float(np.max(np.abs(a6[gen])) + 1e-9)
+    must(r6 < 0.02, f"подсказка на 6 шагах: мел torch = MLX, расхождение {d6:.3g} ({r6:.2%})")
+    em.cfg_steps = et.cfg_steps = None
+
     print("Звук через torch целиком:")
     w = et.synth_chunk(g, VOICE)
     sec = len(w) / F.SAMPLE_RATE

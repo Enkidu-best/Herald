@@ -225,12 +225,22 @@ def main() -> int:
             app._on_profile()
             app.update()
             engine, kw = app._eng_choice()
-            must(engine == "f5mlx" and kw == profiles.get(key).kwargs, f"{key}: {engine} {kw}")
+            must(engine == "f5mlx" and kw == profiles.engine_kwargs(profiles.get(key), app._quality()),
+                 f"{key}: {engine} {kw}")
             must(kw.get("steps") != 32, "32 шага в окне")
         app.profile_var.set("main")
         app._on_profile()
         e, kw = app._eng_choice()
         must(kw.get("steps") == 12 and "variant" not in kw, f"основной: {kw}")
+        # 3.6: по умолчанию «Сбалансировано» - подсказка на 6 шагах из 12
+        must(app._quality() == "balanced" or G.load_config().get("quality"), app._quality())
+        for q, k in (("fast", 4), ("balanced", 6), ("max", None)):
+            app.quality_var.set(q)
+            app._on_quality()
+            must(app._eng_choice()[1].get("cfg_steps") == k, f"{q}: {app._eng_choice()[1]}")
+            must(q in app._rtf_key() and G.VERSION in app._rtf_key(), app._rtf_key())
+        app.quality_var.set(cfg_backup.get("quality", "balanced"))
+        app._on_quality()
         ready = next(v for v in app._voices if v.ready)
         app.voice_var.set(ready.label())
         must(app._eng_choice()[0] == "silero", "готовый голос - не Silero")
@@ -605,12 +615,38 @@ def main() -> int:
     check("Cmd/Ctrl+A C V X Z при русской и английской раскладке", say_keys)
 
     def say_voices():
-        app._say_on_kind("Быстрый")
+        # 3.6: по умолчанию клонов во вкладке нет, «Быстрый / Клон» и «Начало» скрыты
+        app.say_clones_var.set(False)
+        app._on_say_clones()
+        app.update()
         fast = list(app.say_voice_menu.cget("values"))
         must(any("Айдар" in x for x in fast) and len(fast) >= 5, fast)
+        must(all("муж." in x or "жен." in x for x in fast) and all("русский" in x for x in fast),
+             f"подписи имя · пол · язык: {fast}")
+        must(not app.say_mode_box.winfo_ismapped() and not app.say_start_box.winfo_ismapped(),
+             "без клонов переключатели видны")
+        app._say_on_kind("Клон")
+        must(not any("клон" in x for x in app.say_voice_menu.cget("values")), "клоны видны")
+        # подсветка: светлая заливка, тёмный текст - контраст по WCAG
+        def lum(h):
+            c = [int(h[i:i + 2], 16) / 255 for i in (1, 3, 5)]
+            c = [x / 12.92 if x <= 0.03928 else ((x + 0.055) / 1.055) ** 2.4 for x in c]
+            return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
+        L1, L2 = sorted((lum(G.SAY_HL_BG), lum(G.SAY_HL_FG)), reverse=True)
+        must((L1 + 0.05) / (L2 + 0.05) >= 7, "контраст подсветки ниже 7:1")
+        sl0 = app._say_fx_vars["speed"][0]
+        must(abs(sl0.cget("from_") - 0.5) < 1e-6 and abs(sl0.cget("to") - 1.5) < 1e-6,
+             "темп 0,5…1,5")
+        app.say_clones_var.set(True)
+        app._on_say_clones()
+        app.update()
+        must(app.say_mode_box.winfo_ismapped(), "с клонами «Быстрый / Клон» не виден")
+        app._say_on_kind("Быстрый")
         app._say_on_kind("Клон")
         clones = list(app.say_voice_menu.cget("values"))
         must(clones and not any("Айдар" in x for x in clones), clones)
+        app.update()
+        must(app.say_start_box.winfo_ismapped(), "для клона «Начало» не видно")
         want = clones[-1]
         app.say_voice_var.set(want)
         app._say_on_voice()
@@ -631,7 +667,9 @@ def main() -> int:
         app._say_fx_reset()
         must(abs(sl.get() - 1.0) < 1e-6, "«Сбросить»")
         app._say_on_kind("Быстрый")
-    check("голос в два шага, ползунки и прогноз", say_voices)
+        app.say_clones_var.set(False)
+        app._on_say_clones()
+    check("голоса: клоны скрыты, подписи, темп 0,5-1,5, светлая подсветка, прогноз", say_voices)
 
     def stream_locked():
         app._set_busy(True, "тест")

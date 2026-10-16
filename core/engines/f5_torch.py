@@ -171,12 +171,20 @@ class F5TorchEngine(F5MLXEngine):
             x = torch.as_tensor(np.asarray(noise, dtype=np.float32), device=dev)[None, :n]
         t = torch.as_tensor(timesteps(self.steps, self.schedule), device=dev)
         use_half = dev == "cuda"
-        for i in range(t.shape[0] - 1):
+        n_steps = t.shape[0] - 1
+        # подсказка CFG только на первых cfg_steps шагах (3.6) - как в MLX
+        k_cfg = n_steps if self.cfg_steps is None else max(0, min(n_steps, int(self.cfg_steps)))
+        for i in range(n_steps):
             with torch.autocast("cuda", dtype=torch.float16, enabled=use_half):
-                v = self._net(x=x, cond=step_cond, text=text, time=t[i], mask=None,
-                              cfg_infer=True, cache=True)
-            pred, null = v.float().chunk(2, dim=0)
-            x = x + (t[i + 1] - t[i]) * (pred + (pred - null) * CFG_STRENGTH)
+                if i < k_cfg:
+                    v = self._net(x=x, cond=step_cond, text=text, time=t[i], mask=None,
+                                  cfg_infer=True, cache=True)
+                    pred, null = v.float().chunk(2, dim=0)
+                    d = pred + (pred - null) * CFG_STRENGTH
+                else:
+                    d = self._net(x=x, cond=step_cond, text=text, time=t[i], mask=None,
+                                  drop_audio_cond=False, drop_text=False, cache=True).float()
+            x = x + (t[i + 1] - t[i]) * d
         self._net.clear_cache()
         if tail:
             x[:, gen_end:n] = step_cond[:, gen_end:n]

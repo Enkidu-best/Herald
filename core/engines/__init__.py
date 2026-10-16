@@ -11,6 +11,7 @@ from .f5 import F5Engine
 from .f5_mlx import F5MLXEngine
 from .f5_torch import F5TorchEngine
 from .apple import AppleEngine
+from .fast import VoskEngine, PiperEngine
 
 # id -> (человекочитаемое имя, класс)
 ENGINES: dict[str, tuple[str, type[TTSEngine]]] = {
@@ -20,6 +21,8 @@ ENGINES: dict[str, tuple[str, type[TTSEngine]]] = {
     "f5": ("F5-TTS (torch, через f5_tts.api) — прежний путь, для сверки", F5Engine),
     "apple": ("Голос macOS — мгновенно, но готовый голос, не клон", AppleEngine),
     "silero": ("Silero — ровный диктор, очень быстрый (запасной)", SileroEngine),
+    "vosk": ("Vosk TTS — быстрые русские голоса (3.6, по выбору Андрея)", VoskEngine),
+    "piper": ("Piper — быстрые голоса (3.6, по выбору Андрея)", PiperEngine),
 }
 
 
