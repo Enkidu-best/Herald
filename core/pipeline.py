@@ -49,9 +49,24 @@ def _loaded_engine(engine_id: str, eng_kwargs: dict) -> TTSEngine:
     if eng is None:
         eng = get_engine(engine_id, **(eng_kwargs or {}))
         eng.ensure_loaded()
-        _ENGINE_CACHE.clear()          # держим не больше одной модели разом
+        # держим не больше одной большой модели разом; Silero (40 МБ) - сбоку:
+        # «Прочитать вслух» быстрым голосом не должен выгружать клон
+        for k in [k for k in _ENGINE_CACHE if (k[0] == "silero") == (engine_id == "silero")]:
+            del _ENGINE_CACHE[k]
         _ENGINE_CACHE[key] = eng
     return eng
+
+
+def unload_engines() -> None:
+    """Выгрузить модели (сервис после простоя)."""
+    _ENGINE_CACHE.clear()
+    import gc
+    gc.collect()
+    try:
+        import mlx.core as mx
+        mx.clear_cache()
+    except Exception:
+        pass                           # не Mac или старый MLX - память вернёт gc
 
 
 @dataclass
@@ -693,14 +708,58 @@ def _join(pieces: list[tuple[np.ndarray, float]], sr: int) -> np.ndarray:
     вставка + тишина в начале следующего. Вставляем ровно столько, сколько
     не хватает до заданной; после последнего куска - его пауза целиком.
     """
-    out = []
-    for i, (audio, gap) in enumerate(pieces):
-        out.append(audio)
-        _lead, trail = edge_silence(audio, sr)
-        nxt_lead = edge_silence(pieces[i + 1][0], sr)[0] if i + 1 < len(pieces) else 0.0
-        add = max(0.0, gap - trail - nxt_lead)
-        out.append(np.zeros(int(sr * add), dtype=np.float32))
-    return np.concatenate(out) if out else np.zeros(int(sr * 0.2), dtype=np.float32)
+    j = _Joiner(sr)
+    for audio, gap in pieces:
+        j.add(audio, gap)
+    j.finish()
+    return j.result()
+
+
+def _drop(fut) -> None:
+    """Брошенный заказ упреждения: отменить, а если уже считается - дождаться,
+    чтобы движок освободился раньше, чем его возьмёт следующий заказ."""
+    if fut is not None and not fut.cancel():
+        try:
+            fut.result()
+        except Exception:
+            pass                       # результат всё равно не нужен
+
+
+class _Joiner:
+    """Та же склейка, что _join, но по одному куску (звук потоком, core/stream).
+
+    Пауза после куска зависит от тишины в начале СЛЕДУЮЩЕГО, поэтому она
+    уходит вместе со следующим куском: [пауза перед ним, он сам].
+    """
+
+    def __init__(self, sr: int, emit=None):
+        self.sr, self.emit = sr, emit
+        self.out: list[np.ndarray] = []
+        self._prev = None                       # (хвост тишины, пауза) прошлого куска
+
+    def _gap(self, nxt_lead: float) -> np.ndarray:
+        trail, gap = self._prev
+        return np.zeros(int(self.sr * max(0.0, gap - trail - nxt_lead)), dtype=np.float32)
+
+    def add(self, audio: np.ndarray, gap: float, cost: float | None = None) -> None:
+        lead, trail = edge_silence(audio, self.sr)
+        seg = [audio] if self._prev is None else [self._gap(lead), audio]
+        self._prev = (trail, gap)
+        self._put(seg, len(audio) / self.sr, cost)
+
+    def finish(self) -> None:
+        if self._prev is not None:
+            self._put([self._gap(0.0)], 0.0, None)
+            self._prev = None
+
+    def _put(self, seg: list, chunk_sec: float, cost: float | None) -> None:
+        self.out += seg
+        if self.emit is not None:
+            self.emit(np.concatenate(seg), chunk_sec, cost)
+
+    def result(self) -> np.ndarray:
+        return (np.concatenate(self.out) if self.out
+                else np.zeros(int(self.sr * 0.2), dtype=np.float32))
 
 
 def _synth_by_sentences(eng, voice: str, text: str, mul: float, sr: int,
@@ -751,7 +810,8 @@ def _synth_chunks(eng: TTSEngine, voice: str, chunks, sr: int,
                   lang: str = "ru", pause_gate=None, batch_size: int | None = None,
                   use_cache: bool = True, stats: dict | None = None,
                   pipelined: bool = True, strict_words: bool | None = None,
-                  sound_check: bool | None = None, on_piece=None) -> np.ndarray:
+                  sound_check: bool | None = None, on_piece=None,
+                  live=None, check_edges: bool = True) -> np.ndarray:
     """Куски -> звук части: пачками, с упреждением, кэшем и проверкой краёв.
 
     stats (если передан) пополняется: fresh_sec - звука посчитано заново,
@@ -768,6 +828,13 @@ def _synth_chunks(eng: TTSEngine, voice: str, chunks, sr: int,
     sound_check = sound_check and _clone(eng)
     items = _norm_items(chunks, gap_sec)
     texts = [_with_end_punct(t) for t, _g, _m, _k in items]
+    # звук потоком (core/stream): куски уходят в игру по мере готовности, склейка
+    # та же, что у файла; «Стоп» потока останавливает и синтез
+    joiner = _Joiner(sr, live.feed if live is not None else None)
+    if live is not None:
+        live.plan([(t, g) for t, g, _m, _k in items], sr)
+        _stop0 = should_stop
+        should_stop = lambda: live.should_stop() or bool(_stop0 and _stop0())  # noqa: E731
     muls = [m for _t, _g, m, _k in items]
     st = stats if stats is not None else {}
     for k in ("fresh_sec", "cached", "retries", "pauses_fit"):
@@ -789,14 +856,24 @@ def _synth_chunks(eng: TTSEngine, voice: str, chunks, sr: int,
             else:
                 todo.append(i)
         if todo:
+            t0 = time.monotonic()
             waves = eng.synth_batch([texts[i] for i in todo], voice, [muls[i] for i in todo])
+            _spent(todo, t0)
             risks = list(getattr(eng, "last_cut_risk", None) or [False] * len(todo))
             for i, w, r in zip(todo, waves, risks):
                 out[i] = (w, None, False, r)
         return out
 
+    # сколько стоил каждый кусок: счёт, проверки, пересчёты (звук потоком меряет
+    # по этому скорость; интервал между кусками при упреждении обманчив)
+    cost: dict[int, float] = {}
+
+    def _spent(idx, t0):
+        dt = (time.monotonic() - t0) / max(1, len(idx))
+        for i in idx:
+            cost[i] = cost.get(i, 0.0) + dt
+
     pool = _prefetch_pool()
-    pieces: list[tuple[np.ndarray, float]] = []
     fut = None
     for gi, g in enumerate(groups):
         # «Пауза»: ждём здесь, между пачками, не выходя из процесса - модель
@@ -804,10 +881,17 @@ def _synth_chunks(eng: TTSEngine, voice: str, chunks, sr: int,
         if pause_gate is not None:
             pause_gate()
         if should_stop is not None and should_stop():
+            _drop(fut)
             raise Cancelled()
         got = fut.result() if fut is not None else produce(g)
         fut = None
-        if pipelined and gi + 1 < len(groups):
+        # после «Стопа» следующий кусок не заказываем: движок нужен новому заказу
+        # Поток (3.4): первый кусок проверяется БЕЗ упреждения. Иначе распознавание
+        # его краёв делит видеоядро с синтезом второго и тянется 9 с вместо 0,3 -
+        # первый звук приходил только вместе со вторым куском (замер 3.4)
+        first_live = live is not None and gi == 0
+        if (pipelined and gi + 1 < len(groups) and not first_live
+                and not (should_stop and should_stop())):
             fut = pool.submit(produce, groups[gi + 1])
         heard: dict[int, list | None] = {}
         model = _ASR_FULL if strict_words else _ASR_MODEL
@@ -817,15 +901,17 @@ def _synth_chunks(eng: TTSEngine, voice: str, chunks, sr: int,
 
             По звуку оценка дубля - его САМОЕ ПЛОХОЕ слово (а не среднее): из
             пересчётов берётся тот, где худшее слово звучит лучше всего."""
-            h = _listen(audio, sr, lang, model) if len(audio) else None
+            h = _listen(audio, sr, lang, model) if len(audio) and check_edges else None
             edges = not risk and _edges_verdict(h, texts[i], len(audio) / sr)
             bad = _bad_words(h, texts[i]) if strict_words else []
             worst = 0.0
             if sound_check and len(audio) and lang == "ru":
                 ws = _sound_words(audio, sr, texts[i])
                 if ws:
-                    from .align import is_bad
+                    from .align import is_bad, stretched
                     bad = bad + [w.word for w in ws if is_bad(w)]
+                    # крайне растянутая гласная - тоже повод пересчитать (3.4)
+                    bad = bad + [w + " (тянется)" for w in stretched(ws, audio, sr)]
                     worst = min(w.post_mean for w in ws)
                     # времена слов по выравниванию точнее, чем у Whisper: по ним
                     # и паузы внутри куска (слова те же, что в тексте)
@@ -834,7 +920,9 @@ def _synth_chunks(eng: TTSEngine, voice: str, chunks, sr: int,
                 heard_txt = " ".join(w for w, _s, _e in (h or []))
                 log_info(f"проверка куска: края {'да' if edges else 'НЕТ'}, слова не так: "
                          f"{bad} | слова: {heard_txt[:300]}")
-            return h, edges and not bad, (edges, worst, -len(bad)), edges, bad
+            # из дублей: края целы, потом без растянутых гласных, потом лучшее худшее слово
+            long_ = sum(1 for b in bad if b.endswith(" (тянется)"))
+            return h, edges and not bad, (edges, -long_, worst, -len(bad)), edges, bad
 
         best: dict[int, tuple] = {}
         need = []
@@ -847,7 +935,9 @@ def _synth_chunks(eng: TTSEngine, voice: str, chunks, sr: int,
             if not len(audio):
                 heard[i] = None
                 continue
+            t0 = time.monotonic()
             h, ok, score, edges, bad = judge(i, audio, risk)
+            _spent([i], t0)
             heard[i] = h
             best[i] = (score, audio, h, bad)
             if not ok:
@@ -874,19 +964,25 @@ def _synth_chunks(eng: TTSEngine, voice: str, chunks, sr: int,
             hms = [HEADROOM_STEPS[min(attempt, len(HEADROOM_STEPS) - 1)] if not e else 1.0
                    for _i, e in reseed]
             idx = [i for i, _e in reseed]
+            t0 = time.monotonic()
             waves = (eng.synth_batch([texts[i] for i in idx], voice, [muls[i] for i in idx], hms)
                      if idx else [])
+            _spent(idx, t0)
             risks = list(getattr(eng, "last_cut_risk", None) or [False] * len(idx))
             for i in split:
                 idx.append(i)
+                t0 = time.monotonic()
                 waves.append(_synth_by_sentences(eng, voice, texts[i], muls[i], sr, gap_sec))
+                _spent([i], t0)
                 risks.append(False)
                 st["split"] = st.get("split", 0) + 1
             still = []
             for i, w, r in zip(idx, waves, risks):
                 if not len(w):
                     continue
+                t0 = time.monotonic()
                 h, ok, score, edges, bad = judge(i, w, r)
+                _spent([i], t0)
                 last_bad[i] = set(bad)
                 if score > best[i][0]:
                     best[i] = (score, w, h, bad)
@@ -911,10 +1007,16 @@ def _synth_chunks(eng: TTSEngine, voice: str, chunks, sr: int,
             if len(audio):
                 audio, nfit = _fit_inner_pauses(audio, sr, texts[i], items[i][3], heard[i])
                 st["pauses_fit"] += nfit
-                pieces.append((audio, items[i][1]))
+                joiner.add(audio, items[i][1], cost.get(i))
             if on_chunk:
                 on_chunk()
-    return _join(pieces, sr)
+            if live is not None and live.should_stop():
+                _drop(fut)
+                raise Cancelled()
+    joiner.finish()
+    if live is not None:
+        live.finish()
+    return joiner.result()
 
 
 # --- параллельные рабочие процессы --------------------------------------
@@ -1308,12 +1410,14 @@ def convert_book(path: str, *, engine: str = "f5", eng_kwargs: dict | None = Non
                     if part_progress:
                         part_progress(ci, len(prepared), in_part / max(1, len(chunks)))
                 t0, p0, f0 = time.monotonic(), paused[0], stats.get("fresh_sec", 0)
-                audio = _synth_chunks(eng, voice, chunks, sr, opts.gap_sec, on_chunk=bump,
-                                      should_stop=should_stop, lang=doc_lang,
-                                      pause_gate=gate, use_cache=opts.use_cache,
-                                      strict_words=opts.strict_words,
-                                      sound_check=opts.sound_check,
-                                      stats=stats)
+                from .stream import ENGINE_LOCK
+                with ENGINE_LOCK:           # сервис /speak ждёт стыка частей
+                    audio = _synth_chunks(eng, voice, chunks, sr, opts.gap_sec, on_chunk=bump,
+                                          should_stop=should_stop, lang=doc_lang,
+                                          pause_gate=gate, use_cache=opts.use_cache,
+                                          strict_words=opts.strict_words,
+                                          sound_check=opts.sound_check,
+                                          stats=stats)
                 spent = time.monotonic() - t0 - (paused[0] - p0)
                 fresh = stats.get("fresh_sec", 0) - f0
                 if fresh > 5:
@@ -1420,7 +1524,9 @@ def estimate_book(path: str, minutes_per_file: float = 15.0,
 def preview_sample(path: str, *, engine: str = "f5", eng_kwargs: dict | None = None,
                    voice: str, minutes: float = 1.0, chapter_index: int | None = None,
                    out_path: str | None = None, options: ConvertOptions | None = None,
-                   progress: Progress | None = None) -> str:
+                   progress: Progress | None = None, live=None) -> str:
+    """Пробник: минута из середины книги в wav. live (core/stream.Live) - звук
+    ещё и потоком, по мере готовности; файл при этом тот же."""
     opts = options or ConvertOptions()
 
     def say(fr, msg):
@@ -1478,15 +1584,26 @@ def preview_sample(path: str, *, engine: str = "f5", eng_kwargs: dict | None = N
         picked = sentenize(paras[0])[:1]
     chunks = _chunk_paragraphs("\n\n".join(picked), eng.max_chunk_chars,
                                opts.gap_sec, opts.para_gap_sec, opts.dialog_gap_sec)
+    if live is not None:
+        from .stream import choose_first
+        chunks = choose_first(chunks, live)  # первый звук - раньше, если это помогает
 
     say(0.2, "Озвучиваю пробный фрагмент…")
     done = [0]
     def bump():
         done[0] += 1
         say(0.2 + 0.7 * done[0] / max(1, len(chunks)), "Озвучиваю пробный фрагмент…")
-    audio = _synth_chunks(eng, voice, chunks, sr, opts.gap_sec, on_chunk=bump,
-                          lang=doc_lang, use_cache=opts.use_cache,
-                          strict_words=opts.strict_words, sound_check=opts.sound_check)
+    from .stream import ENGINE_LOCK
+    try:
+        with ENGINE_LOCK:
+            audio = _synth_chunks(eng, voice, chunks, sr, opts.gap_sec, on_chunk=bump,
+                                  lang=doc_lang, use_cache=opts.use_cache,
+                                  strict_words=opts.strict_words,
+                                  sound_check=opts.sound_check, live=live)
+    except BaseException:
+        if live is not None:
+            live.stop()
+        raise
 
     # временную папку пробника удаляет вызывающий (см. окно) или чистка при
     # запуске — она старше суток не живёт

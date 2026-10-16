@@ -13,6 +13,13 @@
     python3 cli.py "Книга.epub" --engine silero --voice eugene --mp3
 
     python3 cli.py --list-voices --engine silero
+
+    # прочитать вслух сразу, по мере готовности (3.4): быстрым голосом или клоном
+    python3 cli.py --speak "Море к вечеру стихло." --fast
+    echo "Текст из другой программы" | python3 cli.py --speak - --voice образец
+
+    # озвучка для других программ: локальный сервис /speak (только 127.0.0.1)
+    python3 cli.py --serve --port 8716
 """
 
 from __future__ import annotations
@@ -53,6 +60,76 @@ def _progress(fr: float, msg: str) -> None:
         sys.stderr.write("\n")
 
 
+def _speak(args) -> int:
+    """--speak: звук сразу, по мере готовности (core/stream)."""
+    import time
+    from core import profiles
+    from core.stream import Live, default_sink, make_speed, speak, ClockSink
+    text = sys.stdin.read() if args.speak == "-" else args.speak
+    if not text.strip():
+        print("Пустой текст.", file=sys.stderr)
+        return 1
+    if args.fast or args.engine == "silero":
+        engine, kw, voice, prior = "silero", {}, args.voice or "aidar", profiles.SILERO.rtf
+    else:
+        engine = args.engine
+        kw = dict(profiles.get(None).kwargs) if engine in ("f5mlx", "f5torch") else {}
+        if args.nfe is not None:
+            kw["steps"] = args.nfe
+        voice = args.voice
+        prior = profiles.rtf_for(profiles.get(None), accel_label())
+        if not voice:
+            print("Не задан голос: --voice <образец> или --fast.", file=sys.stderr)
+            return 1
+    sink = default_sink() or ClockSink(realtime=False)
+    t0 = time.monotonic()
+
+    def status(s):
+        if s["state"] == "wait" and s["chunks"]:
+            sys.stderr.write(f"\rЗвук начнётся через ~{max(1, round(s['wait']))} с   ")
+            sys.stderr.flush()
+    live = Live(sink, make_speed(engine, kw, voice, False, prior, accel_label()),
+                on_status=status)
+    try:
+        audio, sr = speak(text, engine=engine, voice=voice, live=live, eng_kwargs=kw,
+                          sound_check=False)      # прослушивание, не книга
+        live.wait()
+    except KeyboardInterrupt:
+        live.stop()
+        return 130
+    fs = live.first_sound
+    print(f"\rпервый звук через {fs:.2f} с, всего {time.monotonic() - t0:.1f} с, "
+          f"звук {len(audio) / sr:.1f} с, запинок {live.stalls}" if fs is not None
+          else "\rзвука нет", file=sys.stderr)
+    if args.save:
+        import tempfile
+        from core.assemble import polish_wav_to_mp3
+        from core.pipeline import write_wav
+        tmp = os.path.join(tempfile.mkdtemp(prefix="herald_say_"), "say.wav")
+        write_wav(audio, sr, tmp)
+        polish_wav_to_mp3(tmp, args.save, fx=live.fx_chain or "")
+        print(f"сохранено: {args.save}", file=sys.stderr)
+    return 0
+
+
+def _serve(args) -> int:
+    import time
+    from core import profiles
+    from core.speak_server import SpeakServer, DEFAULT_PORT
+    srv = SpeakServer(port=args.port or DEFAULT_PORT, default_voice=lambda: args.voice,
+                      profile_kwargs=lambda: dict(profiles.get(None).kwargs),
+                      log=lambda m: print(m, file=sys.stderr))
+    srv.start()
+    print(f"Сервис озвучки: {srv.url}  (POST /speak, POST /stop; Ctrl+C - выход)",
+          file=sys.stderr)
+    try:
+        while True:
+            time.sleep(3600)
+    except KeyboardInterrupt:
+        srv.stop()
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Озвучка текста в аудиокнигу (локально)")
     ap.add_argument("inputs", nargs="*", help="файлы: .txt .md .docx .epub .fb2 .pdf")
@@ -84,6 +161,15 @@ def main() -> int:
     ap.add_argument("--device", default=None,
                     help="только f5 (torch): cpu. mps на 16 ГБ упирается в память и медленнее - не советую")
     ap.add_argument("--list-voices", action="store_true", help="показать голоса движка")
+    ap.add_argument("--speak", default=None, metavar="ТЕКСТ",
+                    help="прочитать вслух сразу, по мере готовности («-» - текст из stdin)")
+    ap.add_argument("--fast", action="store_true",
+                    help="--speak и сервис: быстрый готовый голос Silero, а не клон")
+    ap.add_argument("--save", default=None, metavar="ФАЙЛ",
+                    help="--speak: ещё и сохранить прочитанное в mp3")
+    ap.add_argument("--serve", action="store_true",
+                    help="озвучка для других программ: сервис /speak на 127.0.0.1")
+    ap.add_argument("--port", type=int, default=None, help="порт сервиса (по умолч. 8716)")
     args = ap.parse_args()
     if args.engine == "auto":
         args.engine = clone_engine()
@@ -100,6 +186,10 @@ def main() -> int:
                           "asr": asr.backend(), "platform": sys.platform}, ensure_ascii=False))
         return 0
     cleanup_stale_temp()          # забытые временные папки прошлых запусков
+    if args.serve:
+        return _serve(args)
+    if args.speak is not None:
+        return _speak(args)
 
     if args.list_voices:
         eng = get_engine(args.engine)

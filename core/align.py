@@ -38,6 +38,11 @@ MODEL = os.environ.get("HERALD_ALIGN_MODEL", "bond005/wav2vec2-large-ru-golos")
 BAD_POST = -3.5
 SOFT_POST = -0.8
 SKELETON_MIN = 0.6
+# Растянутая гласная («никогооо», 3.4): голос тянется после выровненного конца
+# слова. У голоса Вячеслава на четырёх главах 99-й процентиль - 0,34-0,41 с,
+# крайние случаи - 0,54-0,98 с (eval_tail.py). Ловим только крайние: порог
+# ниже задевал бы обычные конечные гласные перед запятой.
+STRETCH_MAX = 0.6
 SR = 16000
 FRAME = 0.02                    # wav2vec2: один кадр - 20 мс
 WINDOW_SEC = 20.0               # длинный звук - окнами, чтобы не съесть память
@@ -60,6 +65,7 @@ class WordScore:
     post_min: float = 0.0       # самая слабая буква
     heard: str = ""             # что модель слышит на месте слова САМА (без языковой модели)
     sim: float = 0.0            # похожесть услышанного на буквы слова, 0..1
+    spans: list = field(default_factory=list)   # [(буква, начало с, конец с)] - пики CTC
 
 
 class Aligner:
@@ -176,7 +182,7 @@ class Aligner:
             # выход CTC «пиковый»: буква - 1-2 кадра среди пауз, поэтому берём её
             # наибольшую вероятность рядом с выровненным местом (±2 кадра)
             post = float(np.exp(lp[max(0, f0 - 2):min(T, f1 + 2), tok].max()))
-            per_word.setdefault(owner[ti], []).append((f0, f1, conf, post))
+            per_word.setdefault(owner[ti], []).append((f0, f1, conf, post, ti))
         inv = {v: k for k, v in self._vocab.items()}
         out = []
         for wi, (w, norm, p) in enumerate(words):
@@ -184,8 +190,8 @@ class Aligner:
             if not ch:
                 out.append(WordScore(w, norm, 0, 0, 0.0, 1.0, 0.0, 0.0, p))
                 continue
-            confs = [c for _a, _b, c, _p in ch]
-            posts = [q for _a, _b, _c, q in ch]
+            confs = [c[2] for c in ch]
+            posts = [c[3] for c in ch]
             f0, f1 = ch[0][0], ch[-1][1]
             # что модель слышит сама: жадное декодирование кадров слова (±1 кадр)
             g = lp[max(0, f0 - 1):min(T, f1 + 1)].argmax(axis=1)
@@ -201,7 +207,8 @@ class Aligner:
                                  float(np.mean(confs)), float(np.mean([c < 0.5 for c in confs])),
                                  float(min(confs)), 0.0, p, confs,
                                  float(np.mean(np.log(np.maximum(posts, 1e-6)))), float(min(posts)),
-                                 heard, float(sim)))
+                                 heard, float(sim),
+                                 [(inv.get(tokens[c[4]], ""), c[0] * FRAME, c[1] * FRAME) for c in ch]))
         for i in range(len(out) - 1):
             out[i].gap_after = max(0.0, out[i + 1].start - out[i].end)
         return out
@@ -231,6 +238,31 @@ def is_bad(ws: WordScore) -> bool:
         return False
     return ws.post_mean < BAD_POST or (ws.post_mean < SOFT_POST
                                        and skeleton_sim(ws.word, ws.heard) < SKELETON_MIN)
+
+
+def stretched(ws: list[WordScore], audio: np.ndarray, sr: int,
+              limit: float = STRETCH_MAX, quiet_db: float = -35.0) -> list[str]:
+    """Слова, после которых голос звучит дольше limit (растянутая гласная).
+
+    Звучание - громкие кадры по 10 мс между концом слова (пик последней буквы)
+    и началом следующего; у последнего слова куска - до конца звука.
+    """
+    a = np.asarray(audio, dtype=np.float32).reshape(-1)
+    w = max(1, int(0.01 * sr))
+    n = len(a) // w
+    if n < 10 or not ws:
+        return []
+    e = np.sqrt(np.mean(a[:n * w].reshape(n, w) ** 2, axis=1) + 1e-12)
+    loud = 20 * np.log10(e / np.percentile(e, 95)) > quiet_db
+    out = []
+    for i, x in enumerate(ws):
+        if not x.norm or x.end <= 0:
+            continue
+        t1 = ws[i + 1].start if i + 1 < len(ws) else n * 0.01
+        k0, k1 = int(x.end / 0.01), int(t1 / 0.01)
+        if k1 > k0 and loud[k0:k1].sum() * 0.01 > limit:
+            out.append(x.word)
+    return out
 
 
 def _resample(a: np.ndarray, sr: int, to: int) -> np.ndarray:

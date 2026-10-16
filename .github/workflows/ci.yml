@@ -39,12 +39,16 @@ jobs:
         run: python "Инструменты разработки/test_pauses.py" --fast
       - name: Сверка слов (без модели)
         run: python "Инструменты разработки/test_words.py"
+      - name: Звук потоком (без модели, заглушка движка)
+        run: python "Инструменты разработки/test_stream.py"
       - name: Числа и сокращения (ru-normalizr)
         run: python "Инструменты разработки/test_normalize.py"
       - name: Ударения
         run: python "Инструменты разработки/test_stress.py"
       - name: Пробник Silero и клон F5 на процессоре
         run: python "Инструменты разработки/smoke_pc.py"
+      - name: Время первого звука (Silero и /speak)
+        run: python "Инструменты разработки/bench_live.py" --case silero --repeat 3 && python "Инструменты разработки/bench_live.py" --case server --repeat 3
       - name: Журнал Herald (при сбое)
         if: failure()
         run: cat ~/.local/state/Herald/log/herald.log || true
@@ -74,12 +78,16 @@ jobs:
         run: python "Инструменты разработки/test_pauses.py" --fast
       - name: Сверка слов (без модели)
         run: python "Инструменты разработки/test_words.py"
+      - name: Звук потоком (без модели, заглушка движка)
+        run: python "Инструменты разработки/test_stream.py"
       - name: Числа и сокращения (ru-normalizr)
         run: python "Инструменты разработки/test_normalize.py"
       - name: Ударения
         run: python "Инструменты разработки/test_stress.py"
       - name: Пробник Silero и клон F5 на процессоре
         run: python "Инструменты разработки/smoke_pc.py"
+      - name: Время первого звука (Silero и /speak)
+        run: python "Инструменты разработки/bench_live.py" --case silero --repeat 3 && python "Инструменты разработки/bench_live.py" --case server --repeat 3
       - name: Ссылка на ускорение NVIDIA (без скачивания)
         run: python -c "from core.cuda_pack import wheel_url; print(wheel_url())"
       - name: Журнал Herald (при сбое)

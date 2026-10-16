@@ -481,6 +481,140 @@ def main() -> int:
     check("очистка книги", lambda: (app.clear_book(), app.update(),
                                     must(app.empty.winfo_ismapped(), "зона не вернулась")))
 
+    print("звук потоком (3.4):")
+    import numpy as np
+    from core import stream as S
+    real_speak, real_sink, real_preview = G.S.speak, G.S.default_sink, G.preview_sample
+
+    def fake_speak(text, *, engine, voice, live, eng_kwargs=None, prepared=False, **_k):
+        """Заглушка синтеза: три куска по 0,8 с, каждый «считается» 0,3 с."""
+        sr = 24000
+        items = [("Первый кусок.", 0.4), ("Второй кусок.", 0.4), ("Третий.", 0.4)]
+        live.plan(items, sr)
+        out = []
+        for _t, _g in items:
+            if live.should_stop():
+                raise P.Cancelled()
+            time.sleep(0.3)
+            a = (0.1 * np.sin(np.arange(int(sr * 0.8)) / 5)).astype("float32")
+            live.feed(a, 0.8)
+            out.append(a)
+        live.finish()
+        return np.concatenate(out), sr
+
+    def fake_preview(path, *, live=None, progress=None, **_k):
+        a, sr = fake_speak("", engine="x", voice="v", live=live)
+        import tempfile
+        import soundfile as sf
+        out = os.path.join(tempfile.mkdtemp(prefix="t2a_prev_"), "preview.wav")
+        sf.write(out, np.concatenate([a] * 3), sr)
+        return out
+
+    G.S.speak, G.S.default_sink = fake_speak, lambda: S.ClockSink(realtime=True)
+    G.preview_sample = fake_preview
+
+    def pump(cond, limit=10.0):
+        t = time.time()
+        while time.time() - t < limit:
+            app.update()
+            if cond():
+                return True
+            time.sleep(0.03)
+        return False
+
+    def say_flow():
+        app.say_box.delete("1.0", "end")
+        app.say_box.insert("1.0", "Море к вечеру стихло.")
+        app.say_mode.set("Быстрый")
+        app.do_say()
+        must(app.say_btn.cget("text") == "Стоп", "во время чтения кнопка - «Стоп»")
+        live = app._live
+        must(live is not None and app._live_kind == "say", "поток не начался")
+        must(pump(lambda: live.first_sound is not None), "звук не пошёл")
+        must(pump(lambda: "Играет" in app.say_note.cget("text")), app.say_note.cget("text"))
+        app.do_say()                                   # «Стоп»
+        must(live.stopped and app.say_btn.cget("text") == "Прочитать", "стоп не сработал")
+        must(pump(lambda: str(app.say_btn.cget("state")) == "normal"), "кнопка не вернулась")
+        app.do_say()                                   # до конца
+        must(pump(lambda: app._live is None, 15), "чтение не закончилось")
+        must(str(app.say_save_btn.cget("state")) == "normal", "«Сохранить» не включилась")
+        must("первый звук" in app.say_note.cget("text"), app.say_note.cget("text"))
+    check("«Прочитать вслух»: звук сразу, «Стоп», «Сохранить»", say_flow, limit=60)
+
+    def stream_locked():
+        app._set_busy(True, "тест")
+        off = [b for b in [app.say_btn, app.fx_play_btn] + list(app._prof_btns.values())
+               if str(b.cget("state")) != "disabled"]
+        app._set_busy(False)
+        must(not off, f"во время счёта не заблокировано: {len(off)}")
+        must(str(app.say_btn.cget("state")) == "normal", "после счёта не вернулось")
+    check("во время озвучки книги прослушивание заперто", stream_locked)
+
+    def preview_stream():
+        app._set_book(book)
+        pump(lambda: app.est is not None)
+        app.do_preview()
+        live = app._live
+        must(app._live_kind == "preview" and live is not None, "пробник не потоком")
+        must(str(app.pause_btn.cget("state")) == "normal", "пауза недоступна")
+        must(pump(lambda: live.first_sound is not None), "звук пробника не пошёл")
+        must(pump(lambda: "Пробник · " in app.status.cget("text")), app.status.cget("text"))
+        app.do_pause()
+        must(live.paused and app.pause_btn.cget("text") == "Продолжить", "пауза звука")
+        app.do_pause()
+        must(not live.paused, "продолжить")
+        app.do_stop()
+        must(live.stopped, "«Остановить» не оборвал звук")
+        must(pump(lambda: not app.running, 15), "пробник не закончился")
+    check("пробник потоком: пауза, «Остановить»", preview_stream, limit=60)
+
+    def profile_listen_needs_clone():
+        silero = next(v for v in app._voices if v.ready)
+        keep = app.voice_var.get()
+        app.voice_var.set(silero.label())
+        app._profile_listen("main")
+        app.voice_var.set(keep)
+        must("клон" in app.prof_note.cget("text"), app.prof_note.cget("text"))
+    check("«Послушать» движок - на клоне", profile_listen_needs_clone)
+
+    def server():
+        import json as _json
+        import socket
+        import urllib.request
+        from core import speak_server
+        speak_server.SpeakServer._warm = lambda self: None   # без загрузки моделей
+        sk = socket.socket()
+        sk.bind(("127.0.0.1", 0))
+        port = sk.getsockname()[1]
+        sk.close()
+        app.srv_port.delete(0, "end")
+        app.srv_port.insert(0, str(port))
+        app.srv_var.set(True)
+        app._srv_toggle()
+        must(app._srv is not None and app._srv.running, app.srv_note.cget("text"))
+        r = _json.load(urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=5))
+        must(r.get("ok"), r)
+        req = urllib.request.Request(f"http://127.0.0.1:{port}/health",
+                                     headers={"Host": "evil.example"})
+        try:
+            urllib.request.urlopen(req, timeout=5)
+            must(False, "чужой Host пропущен")
+        except urllib.error.HTTPError as e:
+            must(e.code == 403, e.code)
+        req = urllib.request.Request(f"http://127.0.0.1:{port}/health",
+                                     headers={"Origin": "https://evil.example"})
+        try:
+            urllib.request.urlopen(req, timeout=5)
+            must(False, "чужой сайт пропущен")
+        except urllib.error.HTTPError as e:
+            must(e.code == 403, e.code)
+        app.srv_var.set(False)
+        app._srv_toggle()
+        must(app._srv is None, "сервис не выключился")
+    check("сервис /speak: только этот компьютер, включается и выключается", server)
+
+    G.S.speak, G.S.default_sink, G.preview_sample = real_speak, real_sink, real_preview
+
     G.save_config(cfg_backup)
     app.destroy()
     print("всё в порядке" if not FAILS else f"\nПРОВАЛЕНО: {len(FAILS)}")

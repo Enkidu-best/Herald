@@ -2,7 +2,7 @@
 
 APP_NAME = "Herald"
 APP_TAGLINE = "книги, прочитанные вслух"
-VERSION = "3.3"
+VERSION = "3.4"
 
 ABOUT = """Herald {v} - {tag}
 
