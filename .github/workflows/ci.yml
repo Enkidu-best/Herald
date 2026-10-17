@@ -45,6 +45,10 @@ jobs:
         run: python "Инструменты разработки/test_normalize.py"
       - name: Ударения
         run: python "Инструменты разработки/test_stress.py"
+      - name: Словарь интерфейса EN - нет пропущенных ключей
+        run: python "Инструменты разработки/i18n_keys.py" --missing
+      - name: Голоса - нет сети, Piper с pypi.org, Vosk, удаление
+        run: python "Инструменты разработки/scenario_voices.py"
       - name: Пробник Silero и клон F5 на процессоре
         run: python "Инструменты разработки/smoke_pc.py"
       - name: Время первого звука (Silero и /speak)
@@ -84,6 +88,10 @@ jobs:
         run: python "Инструменты разработки/test_normalize.py"
       - name: Ударения
         run: python "Инструменты разработки/test_stress.py"
+      - name: Словарь интерфейса EN - нет пропущенных ключей
+        run: python "Инструменты разработки/i18n_keys.py" --missing
+      - name: Голоса - нет сети, Piper с pypi.org, Vosk, удаление
+        run: python "Инструменты разработки/scenario_voices.py"
       - name: Пробник Silero и клон F5 на процессоре
         run: python "Инструменты разработки/smoke_pc.py"
       - name: Время первого звука (Silero и /speak)

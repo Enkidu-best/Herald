@@ -8,6 +8,8 @@
 после съёмки возвращаются как были.
 
     caffeinate -dimsu .venv/bin/python "Инструменты разработки/snap_37.py" docs/screenshots
+
+В docs/screenshots снимки лежат в JPEG шириной 1416 (sips -Z 1416, качество 82).
 """
 import copy, os, subprocess, sys, threading, time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

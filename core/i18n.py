@@ -16,8 +16,9 @@ import json
 import os
 import re
 
-HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DICT_DIR = os.path.join(HERE, "assets", "i18n")
+from .osutil import source_dir
+
+DICT_DIR = os.path.join(str(source_dir()), "assets", "i18n")   # в сборке - _MEIPASS
 LANGS = ("ru", "en")
 _lang = "ru"
 _en: dict[str, str] | None = None

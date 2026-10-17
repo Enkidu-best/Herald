@@ -56,6 +56,12 @@ jobs:
         run: |
           $bad = Get-ChildItem dist\Herald -Recurse -File | Where-Object { $_.Extension -in '.mp3','.wav','.flac','.m4a','.m4b','.fb2','.epub' }
           if ($bad) { $bad | ForEach-Object { Write-Host $_.FullName }; throw "в сборке аудио или книги" }
+      - name: В сборке нет движка Piper (GPL - скачивается по кнопке)
+        shell: pwsh
+        run: |
+          $bad = Get-ChildItem dist\Herald -Recurse -Directory | Where-Object { $_.Name -match '^piper' }
+          if ($bad) { $bad | ForEach-Object { Write-Host $_.FullName }; throw "в сборке движок Piper" }
+          if (-not (Test-Path dist\Herald\_internal\assets\i18n\en.json) -and -not (Test-Path dist\Herald\assets\i18n\en.json)) { throw "в сборке нет словаря EN" }
       - name: Установщик (Inno Setup)
         shell: pwsh
         run: |

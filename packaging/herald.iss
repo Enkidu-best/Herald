@@ -2,7 +2,7 @@
 ; Внутри: программа, ffmpeg (LGPL). Моделей и образцов голосов внутри нет:
 ; модели качаются при первом запуске, голос пользователь добавляет сам.
 #ifndef AppVersion
-  #define AppVersion "3.6"
+  #define AppVersion "3.7"
 #endif
 
 [Setup]
