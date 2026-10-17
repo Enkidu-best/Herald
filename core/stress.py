@@ -309,7 +309,8 @@ def user_stress() -> dict[str, str]:
     если файл изменился)."""
     global _user_cache
     try:
-        mt = os.path.getmtime(USER_DICT)
+        st = os.stat(USER_DICT)
+        mt = (st.st_mtime_ns, st.st_size)
     except OSError:
         return {}
     if _user_cache is None or _user_cache[0] != mt:
@@ -338,6 +339,8 @@ def set_user_stress(word: str) -> str:
     lines.append(w)
     with open(USER_DICT, "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
+    global _user_cache
+    _user_cache = None            # на Windows время записи грубое - две правки подряд
     return w
 
 
