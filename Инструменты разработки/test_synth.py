@@ -56,7 +56,8 @@ def check_one(book: str, voice: str, lang: str, out_dir: str) -> list[str]:
 
     if not res.mp3_dir or not os.path.isdir(res.mp3_dir):
         return [f"{name}: папка с результатом не создана"]
-    files = sorted(f for f in os.listdir(res.mp3_dir) if not f.startswith("."))
+    files = sorted(f for f in os.listdir(res.mp3_dir)       # «_служебное» (3.7) - не звук
+                   if not f.startswith(".") and os.path.isfile(os.path.join(res.mp3_dir, f)))
     if not files:
         return [f"{name}: НИ ОДНОГО ФАЙЛА не записано"]
 
