@@ -636,8 +636,9 @@ def main() -> int:
         app.update()
         fast = list(app.say_voice_menu.cget("values"))
         must(any("Айдар" in x for x in fast) and len(fast) >= 5, fast)
-        must(all("муж." in x or "жен." in x for x in fast) and all("русский" in x for x in fast),
-             f"подписи имя · пол · язык: {fast}")
+        must(all(("муж." in x or "жен." in x) and ("русский" in x or "английский" in x)
+                 for x in fast), f"подписи имя · пол · язык: {fast}")
+        must(not any("Бая" in x for x in fast), "Бая должна быть скрыта (выбор Андрея 3.7)")
         must(not app.say_mode_box.winfo_ismapped() and not app.say_start_box.winfo_ismapped(),
              "без клонов переключатели видны")
         app._say_on_kind("Клон")
@@ -798,6 +799,57 @@ def main() -> int:
             if getattr(app, "_read_win", None) is not None:
                 app._read_win.destroy()
     check("«Как будет прочитано»: ударения знаком, меню по правому щелчку", read_text)
+
+    def voice_manager():
+        """Настройки → «Голоса»: скрыть / показать, скачать (с прогрессом), нет
+        интернета - понятная ошибка, удалить - с подтверждением. Без сети."""
+        from core import voice_store as VS
+        from tkinter import messagebox as mb
+        app.show("settings")
+        app.update()
+        rows = [w for w in app.vm_rows.winfo_children()]
+        texts = " | ".join(c.cget("text") for r in rows for c in r.winfo_children()
+                           if isinstance(c, ctk.CTkLabel))
+        must("Пакет Vosk: 3 голоса" in texts and "Joe" in texts and "Silero" in texts, texts[:300])
+        keep_cfg = app.cfg.get("hidden_voices")
+        app._vm_toggle_hidden("eugene")              # скрыть Евгения
+        must(not any(v.id == "eugene" for v in app._voices), "скрытый голос остался в списке")
+        app._vm_toggle_hidden("eugene")
+        must(any(v.id == "eugene" for v in app._voices), "голос не вернулся")
+        joe = VS.by_id("piper:en_US-joe-medium")
+        real_dl, real_ok, real_yes = VS.download, mb.askokcancel, mb.askyesno
+        mb.askokcancel = mb.askyesno = lambda *a, **k: True
+        try:
+            def fake(v, progress=None, cancel=None):
+                for i in range(5):
+                    progress(i / 4, f"Скачиваю {v.title}: {i} из 4 МБ")
+                    time.sleep(0.05)
+            VS.download = fake
+            app._vm_download(joe)
+            must(pump(lambda: app._vm_busy is None, 10), "загрузка не закончилась")
+            must("Готово" in app.vm_note.cget("text"), app.vm_note.cget("text"))
+
+            def offline(v, progress=None, cancel=None):
+                raise VS.NoInternet("Нет связи с интернетом - голос не скачался. Проверьте "
+                                    "подключение и нажмите «Скачать» ещё раз.")
+            VS.download = offline
+            app._vm_download(joe)
+            must(pump(lambda: app._vm_busy is None, 10), "ошибка не пришла")
+            must("Нет связи с интернетом" in app.vm_note.cget("text"), app.vm_note.cget("text"))
+            deleted = []
+            real_del = VS.delete
+            VS.delete = lambda v: deleted.append(v.id)
+            app._vm_delete(joe)
+            VS.delete = real_del
+            must(deleted == [joe.id], "удаление не спросило или не удалило")
+        finally:
+            VS.download, mb.askokcancel, mb.askyesno = real_dl, real_ok, real_yes
+            app.cfg["hidden_voices"] = keep_cfg
+            if keep_cfg is None:
+                app.cfg.pop("hidden_voices", None)
+            app._vm_refresh()
+            app.refresh_voices()
+    check("менеджер голосов: скрыть, скачать, нет интернета, удалить", voice_manager, limit=60)
 
     G.S.speak, G.S.default_sink, G.preview_sample = real_speak, real_sink, real_preview
 

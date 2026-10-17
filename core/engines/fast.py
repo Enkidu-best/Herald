@@ -1,8 +1,7 @@
 """Дополнительные быстрые голоса (3.6): Vosk TTS и Piper.
 
-Отбирает Андрей на слух (слепой набор «Сравнение 3.6 - быстрые голоса - …»);
-в программе появляются только голоса из ENABLED. Пакеты (vosk-tts, piper-tts)
-необязательны: нет пакета - голоса нет, остальное работает.
+Отобраны Андреем на слух (слепые наборы 3.6); каталог, загрузка и удаление -
+core/voice_store. В списках - только скачанные голоса.
 
 Лицензии (карточки моделей, 16.10.2026):
   * Vosk TTS ru 0.9 multi - Apache-2.0 (движок vosk-tts - Apache-2.0);
@@ -23,34 +22,21 @@ from .base import TTSEngine, Voice
 
 SR = 24000          # общий выход: у Piper 22 050 Гц, у Vosk 22 050 Гц - приводим
 
-# (id, имя, пол, язык, движок, параметр модели)
-CANDIDATES = [
-    ("vosk:0", "Vosk 0", "ж", "ru", "vosk", 0),
-    ("vosk:1", "Vosk 1", "ж", "ru", "vosk", 1),
-    ("vosk:2", "Vosk 2", "ж", "ru", "vosk", 2),
-    ("vosk:3", "Vosk 3", "м", "ru", "vosk", 3),
-    ("vosk:4", "Vosk 4", "м", "ru", "vosk", 4),
-    ("piper:ru_RU-denis-medium", "Денис", "м", "ru", "piper", "ru_RU-denis-medium"),
-    ("piper:en_US-joe-medium", "Joe", "м", "en", "piper", "en_US-joe-medium"),
-    ("piper:en_US-kristin-medium", "Kristin", "ж", "en", "piper", "en_US-kristin-medium"),
-    ("piper:en_GB-cori-medium", "Cori", "ж", "en", "piper", "en_GB-cori-medium"),
-]
-# Голоса, отмеченные Андреем в слепом наборе 3.6 (до оценки - пусто)
-ENABLED: set[str] = set()
-VOSK_MODEL = "vosk-model-tts-ru-0.9-multi"
+# Каталог, загрузка и удаление - core/voice_store (3.7). Здесь - только движки.
+from ..voice_store import VOSK_MODEL  # noqa: E402
 
 
 def enabled_voices() -> list[Voice]:
-    """Включённые голоса, движок которых установлен."""
-    out = []
-    for vid, title, g, lang, eng, _p in CANDIDATES:
-        if vid in ENABLED and _available(eng):
-            out.append(Voice(vid, title, g, lang))
-    return out
+    """Скачанные голоса Vosk / Piper (выбор Андрея 3.6 - в voice_store.CATALOG)."""
+    from .. import voice_store as VS
+    return [Voice(v.id, v.title, v.gender, v.language)
+            for v in VS.CATALOG if v.engine != "silero" and VS.installed(v)]
 
 
 def engine_of(voice_id: str) -> str | None:
-    return next((c[4] for c in CANDIDATES if c[0] == voice_id), None)
+    from .. import voice_store as VS
+    v = VS.by_id(voice_id)
+    return v.engine if v else None
 
 
 def _available(eng: str) -> bool:
@@ -122,17 +108,18 @@ class PiperEngine(TTSEngine):
         return "piper|1.8"
 
     def load(self) -> None:
+        from .. import voice_store as VS
+        VS.activate_piper()            # движок скачан по кнопке в папку данных (GPL)
         import piper  # noqa: F401 - нет пакета - пусть упадёт здесь
 
     def _voice(self, name: str):
         if name not in self._voices:
-            from huggingface_hub import hf_hub_download
             from piper import PiperVoice
-            lang, who, q = name.split("-")
-            base = f"{lang.split('_')[0]}/{lang}/{who}/{q}/{name}"
-            self._voices[name] = PiperVoice.load(
-                hf_hub_download("rhasspy/piper-voices", base + ".onnx"),
-                config_path=hf_hub_download("rhasspy/piper-voices", base + ".onnx.json"))
+            from .. import voice_store as VS
+            onnx, cfg = VS.piper_paths(name)
+            if not onnx.is_file():
+                raise RuntimeError(f"голос Piper {name} не скачан - «Скачать» в Настройках")
+            self._voices[name] = PiperVoice.load(str(onnx), config_path=str(cfg))
         return self._voices[name]
 
     def synth_chunk(self, text: str, voice: str, speed_mul: float = 1.0, **kw) -> np.ndarray:

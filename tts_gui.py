@@ -97,6 +97,13 @@ def _stressed_at(plus: str, letter_idx: int) -> bool:
     return False
 
 
+def _mb(n: int) -> str:
+    """Размер по-русски: «747 МБ», «1,2 ГБ»."""
+    if n >= 1 << 30:
+        return f"{n / (1 << 30):.1f} ГБ".replace(".", ",")
+    return f"{max(1, round(n / (1 << 20)))} МБ"
+
+
 def _clone_engine(engine: str) -> bool:
     """Клон F5 (темп в модель, долгий старт) или готовый быстрый голос."""
     return engine in ("f5mlx", "f5torch", "f5")
@@ -847,6 +854,25 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         # на размеченном наборе (9 из 10 мест против 7 из 10)
         self.strict_var = ctk.BooleanVar(value=False)
 
+        cvm = T.card(page)
+        cvm.pack(fill="x", padx=28, pady=(0, 14))
+        bvm = ctk.CTkFrame(cvm, fg_color="transparent")
+        bvm.pack(fill="x", padx=18, pady=16)
+        T.section(bvm, "Голоса").pack(fill="x")
+        T.label(bvm, "Быстрые готовые голоса. Встроенные можно скрыть; остальные "
+                     "скачиваются из официальных источников и удаляются.",
+                12, color=T.MUTED, anchor="w", justify="left", wraplength=640).pack(
+            fill="x", pady=(2, 6))
+        self.vm_rows = ctk.CTkFrame(bvm, fg_color="transparent")
+        self.vm_rows.pack(fill="x")
+        self.vm_prog = ctk.CTkProgressBar(bvm, height=6)
+        self.vm_prog.set(0)
+        self.vm_note = T.label(bvm, "", 12, color=T.MUTED, anchor="w", justify="left",
+                               wraplength=640)
+        self.vm_note.pack(fill="x", pady=(6, 0))
+        self._vm_busy = None
+        self._vm_refresh()
+
         cr = T.card(page)
         cr.pack(fill="x", padx=28, pady=(0, 14))
         br = ctk.CTkFrame(cr, fg_color="transparent")
@@ -1094,6 +1120,135 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         """Параметры движка профиля с режимом «Качество / скорость» (3.6)."""
         return profiles.engine_kwargs(p or self.profile(), self._quality())
 
+    # --- менеджер голосов (3.7) ---
+    def _vm_refresh(self):
+        """Строки менеджера голосов: имя · пол · язык · движок · размер, кнопки."""
+        from core import voice_store as VS
+        for w in self.vm_rows.winfo_children():
+            w.destroy()
+        hidden = self._hidden_voices()
+        eng_title = {"silero": "Silero", "vosk": "Vosk", "piper": "Piper"}
+        vosk_shown = False
+        for v in VS.CATALOG:
+            if v.engine == "vosk" and not vosk_shown:
+                vosk_shown = True
+                n = sum(1 for x in VS.CATALOG if x.engine == "vosk")
+                have = VS.installed(v)
+                line = ctk.CTkFrame(self.vm_rows, fg_color="transparent")
+                line.pack(fill="x", pady=(8, 2))
+                size = VS.size_on_disk(v) if have else VS.download_size(v)
+                T.label(line, f"Пакет Vosk: {n} голоса, {_mb(size)}"
+                        + ("" if have else " · не скачан"), 13, bold=True, anchor="w").pack(
+                    side="left")
+                self._vm_btn(line, v, have)
+            line = ctk.CTkFrame(self.vm_rows, fg_color="transparent")
+            line.pack(fill="x", pady=1)
+            have = VS.installed(v)
+            if v.engine == "silero":
+                where = "встроен"
+            elif v.engine == "vosk":
+                where = "в пакете Vosk"
+            else:
+                where = _mb(VS.size_on_disk(v) if have else VS.download_size(v)) + (
+                    "" if have else " · не скачан")
+            text = " · ".join((v.title, GENDER.get(v.gender, ""), LANG_MARK.get(v.language, ""),
+                               eng_title[v.engine], where))
+            lbl = T.label(line, ("    " if v.engine == "vosk" else "") + text, 13, anchor="w",
+                          color=T.MUTED if (v.id in hidden or not have) else T.TEXT)
+            lbl.pack(side="left")
+            if v.engine == "silero":
+                T.button(line, "Показать" if v.id in hidden else "Скрыть", None, kind="ghost",
+                         height=26, size=12, width=90,
+                         command=lambda vid=v.id: self._vm_toggle_hidden(vid)).pack(side="right")
+            elif v.engine == "piper":
+                self._vm_btn(line, v, have)
+            if have or v.engine == "piper":
+                T.button(line, "Послушать", "play", kind="ghost", height=26, size=12, width=110,
+                         command=lambda vv=v: self._vm_listen(vv)).pack(side="right", padx=(0, 6))
+
+    def _vm_btn(self, line, v, have: bool):
+        T.button(line, "Удалить" if have else "Скачать", "trash-2" if have else "upload",
+                 kind="ghost", height=26, size=12, width=110,
+                 command=(lambda: self._vm_delete(v)) if have else (lambda: self._vm_download(v))
+                 ).pack(side="right")
+
+    def _vm_toggle_hidden(self, vid: str):
+        h = self._hidden_voices()
+        h.symmetric_difference_update({vid})
+        self.cfg["hidden_voices"] = sorted(h)
+        save_config(self.cfg)
+        self._vm_refresh()
+        self.refresh_voices()
+
+    def _vm_listen(self, v):
+        """Образец: Silero и скачанные - синтез фразы; Piper без загрузки - официальный."""
+        from core import voice_store as VS
+        if v.engine == "piper" and not VS.installed(v):
+            self.vm_note.configure(text="Беру официальный образец Piper…")
+
+            def work():
+                try:
+                    path = VS.sample(v)
+                    self.ui(lambda: self.vm_note.configure(text=f"Образец {v.title}: играет"))
+                    p = Player()
+                    if p.load(path):
+                        p.play()
+                        while p.playing:
+                            time.sleep(0.1)
+                except Exception as e:
+                    self.ui(lambda: self.vm_note.configure(text=str(e)))
+            threading.Thread(target=work, daemon=True).start()
+            return
+        text = self.FX_PHRASE.get(v.language, self.FX_PHRASE["ru"])
+        if v.language == "ru":
+            text = text.replace("+", "")
+        self._speak_job("vm", text, v.engine, {}, v.id, note=self.vm_note)
+
+    def _vm_download(self, v):
+        from core import voice_store as VS
+        if self._vm_busy is not None:
+            return
+        size = _mb(VS.download_size(v))
+        what = "пакет Vosk (3 голоса)" if v.engine == "vosk" else f"голос {v.title}"
+        lic = (VS.PIPER_LICENSE.format(lic=v.license) if v.engine == "piper"
+               else f"Лицензия: {v.license}. Источник: alphacephei.com.")
+        if not messagebox.askokcancel("Скачать голос", f"Скачать {what} ({size})?\n\n{lic}"):
+            return
+        self._vm_busy = v
+        self.vm_prog.pack(fill="x", pady=(8, 0), before=self.vm_note)
+        self.vm_prog.set(0)
+
+        def prog(fr, msg):
+            self.ui(lambda: (self.vm_prog.set(fr), self.vm_note.configure(text=msg)))
+
+        def work():
+            err = None
+            try:
+                VS.download(v, progress=prog)
+            except Exception as e:
+                err = e
+                log_problem(f"голос {v.id} не скачался", e, show=False)
+
+            def end():
+                self._vm_busy = None
+                self.vm_prog.pack_forget()
+                self.vm_note.configure(text=str(err) if err else f"Готово: {what} скачан")
+                self._vm_refresh()
+                self.refresh_voices()
+            self.ui(end)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _vm_delete(self, v):
+        from core import voice_store as VS
+        what = "пакет Vosk (все 3 голоса)" if v.engine == "vosk" else f"голос {v.title}"
+        if not messagebox.askyesno("Удалить голос", f"Удалить {what} с диска?\n"
+                                   "Его можно будет скачать снова."):
+            return
+        VS.delete(v)
+        self.vm_note.configure(text=f"Удалено: {what}")
+        self._vm_refresh()
+        self.refresh_voices()
+
     def _on_say_clones(self):
         self.cfg["say_clones"] = bool(self.say_clones_var.get())
         save_config(self.cfg)
@@ -1131,15 +1286,22 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
                 out.append(_V(v.id, v.id, v.language, False))
         except Exception as e:
             log_problem("не удалось прочитать список голосов", e)
-        out += [_V(v.id, v.title, v.language, True, "silero", v.gender) for v in SILERO_VOICES]
-        # быстрые голоса Vosk / Piper - только отмеченные Андреем (3.6, core/engines/fast)
+        hidden = self._hidden_voices()
+        out += [_V(v.id, v.title, v.language, True, "silero", v.gender) for v in SILERO_VOICES
+                if v.id not in hidden]
+        # быстрые голоса Vosk / Piper - выбор Андрея 3.6, только скачанные (core/voice_store)
         try:
             from core.engines import fast
             out += [_V(v.id, v.title, v.language, True, fast.engine_of(v.id), v.gender)
-                    for v in fast.enabled_voices()]
+                    for v in fast.enabled_voices() if v.id not in hidden]
         except Exception as e:
             log_problem("быстрые голоса не прочитались", e, show=False)
         return out
+
+    def _hidden_voices(self) -> set:
+        from core.voice_store import HIDDEN_DEFAULT
+        h = self.cfg.get("hidden_voices")
+        return set(HIDDEN_DEFAULT if h is None else h)
 
     def refresh_voices(self):
         # все голоса в одном списке: сначала клоны, потом готовые Silero
@@ -1914,14 +2076,25 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
     def _say_voices(self, kind: str) -> list[_V]:
         if kind != "Быстрый" and not self._say_clones():
             kind = "Быстрый"
-        return [v for v in self._voices if v.ready == (kind == "Быстрый")]
+        out = [v for v in self._voices if v.ready == (kind == "Быстрый")]
+        if kind == "Быстрый":
+            # не скачанные голоса каталога - тоже в списке, с пометкой «скачать» (3.7)
+            from core import voice_store as VS
+            have, hidden = {v.id for v in out}, self._hidden_voices()
+            for c in VS.CATALOG:
+                if c.engine != "silero" and c.id not in have and c.id not in hidden:
+                    x = _V(c.id, c.title, c.language, True, c.engine, c.gender)
+                    x.missing = True
+                    out.append(x)
+        return out
 
     @staticmethod
     def _say_label(v: _V) -> str:
         """«Евгений · муж. · русский» - имя, пол, язык (3.6)."""
         name = v.title.split(" (")[0]
         g = GENDER.get(v.gender, "") if v.ready else "клон"
-        return " · ".join(x for x in (name, g, LANG_MARK.get(v.language, v.language)) if x)
+        tail = "скачать" if getattr(v, "missing", False) else ""
+        return " · ".join(x for x in (name, g, LANG_MARK.get(v.language, v.language), tail) if x)
 
     def _say_on_start(self):
         self.cfg["say_start"] = self.say_start_var.get()
@@ -1961,10 +2134,25 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
 
     def _say_voice(self) -> _V | None:
         lab = self.say_voice_var.get()
-        return next((v for v in self._voices if self._say_label(v) == lab), None)
+        pool = self._voices + [v for v in self._say_voices("Быстрый") if getattr(v, "missing", False)]
+        return next((v for v in pool if self._say_label(v) == lab), None)
 
     def _say_on_voice(self, remember: bool = True):
         v = self._say_voice()
+        if v is not None and getattr(v, "missing", False):
+            # серый голос - предложить скачать, а пока вернуть прежний выбор
+            from core import voice_store as VS
+            c = VS.by_id(v.id)
+            prev = self.cfg.get("say_fast_voice") or FAST_VOICE
+            back = next((x for x in self._say_voices("Быстрый") if x.id == prev
+                         and not getattr(x, "missing", False)), None)
+            if back is not None:
+                self.say_voice_var.set(self._say_label(back))
+            if c is not None and remember:
+                self._vm_download(c)
+                self.say_note.configure(text=f"Скачиваю {c.title} - ход загрузки в Настройках, "
+                                             "раздел «Голоса»")
+            v = self._say_voice()
         if v is not None and remember:
             self.cfg["say_fast_voice" if v.ready else "say_clone_voice"] = v.id
             save_config(self.cfg)

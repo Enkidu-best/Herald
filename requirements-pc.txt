@@ -47,3 +47,8 @@ pillow
 customtkinter
 tkinterdnd2
 sounddevice
+
+# --- быстрые голоса Vosk (3.7): движок Apache-2.0, пакет голосов (783 МБ)
+# качается по кнопке в Настройках. Piper (GPL-3.0) сюда НЕ входит - его
+# движок скачивается с pypi.org по кнопке (core/voice_store).
+vosk-tts==0.3.61

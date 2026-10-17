@@ -12,7 +12,8 @@ for pkg in ("customtkinter", "tkinterdnd2", "faster_whisper", "ctranslate2", "on
             "_sounddevice_data", "docx", "ebooklib", "fitz", "pymupdf", "tokenizers", "av",
             "ruaccent", "silero_stress", "ru_normalizr", "pymorphy3", "pymorphy3_dicts_ru",
             "eng_to_ipa", "num2words", "razdel", "vocos", "encodec", "x_transformers", "einx",
-            "torchaudio", "rjieba", "pypinyin", "transformers", "sentencepiece", "pycrfsuite"):
+            "torchaudio", "rjieba", "pypinyin", "transformers", "sentencepiece", "pycrfsuite",
+            "vosk_tts"):
     try:
         d, b, h = collect_all(pkg)
         datas += d; binaries += b; hidden += h
@@ -28,10 +29,10 @@ for dist in ("torch", "torchaudio", "transformers", "tokenizers", "huggingface-h
         print("без метаданных:", dist, e)
 datas += [(os.path.join(ROOT, "assets"), "assets"),
           (os.path.join(ROOT, "core", "engines", "f5net", "LICENSE"), os.path.join("core", "engines", "f5net"))]
-hidden += ["theme", "player", "core", "core.osutil", "core.asr", "core.align", "core.stream", "core.speak_server", "core.cuda_pack",
+hidden += ["theme", "player", "core", "core.osutil", "core.asr", "core.align", "core.stream", "core.speak_server", "core.voice_store", "core.engines.fast", "core.cuda_pack",
            "core.engines.f5_torch", "core.engines.f5net.dit", "core.engines.f5net.modules",
            "sounddevice", "scipy.signal"]
-excludes = ["mlx", "mlx_whisper", "f5_tts", "f5_tts_mlx", "vocos_mlx", "AVFoundation", "Foundation",
+excludes = ["piper", "mlx", "mlx_whisper", "f5_tts", "f5_tts_mlx", "vocos_mlx", "AVFoundation", "Foundation",
             "objc", "torchcodec", "gradio", "wandb", "datasets", "IPython", "jupyter", "notebook",
             "pytest", "matplotlib", "tensorboard"]
 
