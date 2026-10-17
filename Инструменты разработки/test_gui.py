@@ -88,13 +88,13 @@ def main() -> int:
 
     check("открылось и отрисовалось", lambda: app.update_idletasks())
     check("меню «Правка» на месте", lambda: app.nametowidget(app.cget("menu")))
-    check("четыре страницы построены заранее (3.5: «Прочитать вслух»)",
-          lambda: must(set(app.pages) == {"book", "say", "voices", "settings"}, app.pages.keys()))
+    check("страницы построены заранее (3.5: «Прочитать вслух», 3.7: «Справка»)",
+          lambda: must(set(app.pages) == {"book", "say", "voices", "help", "settings"}, app.pages.keys()))
 
     print("боковое меню и темы:")
 
     def pages_switch():
-        for k in ("voices", "say", "settings", "book"):
+        for k in ("voices", "say", "help", "settings", "book"):
             app.show(k)
             app.update()
             must(app.page == k and app.pages[k].winfo_ismapped(), f"страница {k} не видна")
@@ -891,6 +891,81 @@ def main() -> int:
 
     G.save_config(cfg_backup)
     app.destroy()
+
+    print("язык интерфейса EN и стандарт (3.7):")
+    from core import i18n
+    import re as _re
+
+    def walk(w, out):
+        for c in w.winfo_children():
+            if getattr(c, "_herald_data", False):
+                continue
+            for opt in ("text",):
+                try:
+                    v = c.cget(opt)
+                    if isinstance(v, str):
+                        out.append((type(c).__name__, v))
+                except Exception:
+                    pass
+            if isinstance(c, (ctk.CTkSegmentedButton, ctk.CTkOptionMenu)):
+                try:
+                    out += [(type(c).__name__, str(x)) for x in c.cget("values")]
+                except Exception:
+                    pass
+            walk(c, out)
+        return out
+
+    def english():
+        i18n.set_lang("en")
+        try:
+            e = G.App()
+            e.update()
+            clones = sorted({x for v in e._voices if not v.ready
+                             for x in (v.title, G._short(v.title, G.VOICE_NAME_LIMIT), v.id)},
+                            key=len, reverse=True)
+            found = []
+            for key in ("book", "say", "voices", "help", "settings"):
+                e.show(key)
+                e.update()
+            texts = walk(e, [])
+            # тексты справки и «О программе» - тоже интерфейс
+            for page in e.pages.values():
+                for c in page.winfo_children() + [x for p_ in page.winfo_children()
+                                                   for x in p_.winfo_children()]:
+                    if isinstance(c, ctk.CTkTextbox) and c not in (e.say_box, e.log):
+                        texts.append(("CTkTextbox", c.get("1.0", "end")))
+            menu = e.nametowidget(e.cget("menu"))
+            for i in range(menu.index("end") + 1):
+                texts.append(("Menu", menu.entrycget(i, "label")))
+                sub = e.nametowidget(menu.entrycget(i, "menu"))
+                for j in range((sub.index("end") or 0) + 1):
+                    if sub.type(j) == "command":
+                        texts.append(("Menu", sub.entrycget(j, "label")))
+            for kind, t in texts:
+                for cid in clones:                         # имена клонов - данные пользователя
+                    t = t.replace(cid, "")
+                if _re.search(r"[А-Яа-яЁё]", t):
+                    found.append(f"{kind}: {t.strip()[:80]!r}")
+            must(not found, f"кириллица при EN ({len(found)}): " + " | ".join(found[:40]))
+            must(e.lang_seg.get() == "EN", "переключатель языка не EN")
+            must(abs(e._scale - (G.load_config().get("scale") or G.DEFAULT_SCALE)) < 1e-6
+                 and G.DEFAULT_SCALE == 1.2, "масштаб по умолчанию не 120 %")
+            must(G.VERSION in e.version_lbl.cget("text"), "версия внизу не совпадает с пакетом")
+            th = e.cfg.get("theme", "system")
+            e._cycle_theme()
+            must(e.cfg.get("theme") != th, "тема не переключается")
+            e.set_theme(th)
+            e.destroy()
+        finally:
+            i18n.set_lang("ru")
+    check("EN: в окне нет кириллицы, масштаб 120 %, версия, тема", english, limit=120)
+
+    def no_missing():
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__))))
+        import i18n_keys
+        miss = i18n.missing(i18n_keys.all_keys())
+        must(not miss, f"ключи без перевода ({len(miss)}): {miss[:5]}")
+    check("в словаре EN нет пропущенных ключей", no_missing)
     print("всё в порядке" if not FAILS else f"\nПРОВАЛЕНО: {len(FAILS)}")
     for f in FAILS:
         print("   ", f)

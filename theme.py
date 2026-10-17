@@ -86,6 +86,11 @@ def apply():
 _icon_cache = {}
 
 
+def reset_icons():
+    """Новое окно (смена языка, «Aa») - значки заново: картинки Tk живут в старом окне."""
+    _icon_cache.clear()
+
+
 def icon(name, color=MUTED, size=16):
     key = (name, color, size)
     if key in _icon_cache:
