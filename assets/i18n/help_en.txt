@@ -18,12 +18,12 @@ Paste text (“From clipboard”, “Open file…”) and click “Read” - the
 in a fraction of a second. The same button is “Pause” and “Continue” (or Space,
 when the cursor is not in the text); ■ stops. The voice is on the right, along with tempo, pitch,
 bass and brightness. The sentence being read is highlighted; click a sentence
-to read from there. “Save” - save what was read as an mp3.
+to read from there. The disk icon saves what was read as an mp3, “×” clears the text.
 
 VOICES
 A clone is made from a recording of a narrator: “Add voice sample…” - the app
 picks a clean passage by itself. All ready-made voices are here too, one per
-row: “Listen”, “Download” (Vosk, Piper), “✎” - your own name for the lists,
+row: ▶ - listen, “Download” (Vosk, Piper), “✎” - your own name for the lists,
 “⋯” - hide or delete. On the right - the voice sound (tempo, pitch, bass,
 brightness), “Listen”, “Save”.
 

@@ -846,7 +846,7 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         self.add_voice_btn = T.button(hdr, _("Добавить образец…"), "plus", kind="primary", height=30,
                                       size=13, width=170, command=self.load_sample)
         self.add_voice_btn.pack(side="right")
-        T.button(hdr, _("Папка"), "folder-open", kind="ghost", height=30, size=13, width=100,
+        T.button(hdr, "", "folder-open", kind="ghost", height=30, width=34,          # папка голосов
                  command=lambda: _open_path(default_voices_dir())).pack(side="right", padx=6)
         ctk.CTkFrame(lst, height=1, fg_color=T.BORDER, corner_radius=0).pack(fill="x")
         # загрузка голоса: полоса и строка хода - внизу списка (3.8: всё о голосах здесь)
@@ -1618,8 +1618,8 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         sub.grid(row=1, column=1, sticky="ew", pady=(0, 6))
         acts = ctk.CTkFrame(row, fg_color="transparent")
         acts.grid(row=0, column=2, rowspan=2, padx=(4, 8))
-        if listen:
-            T.button(acts, _("Послушать"), "play", kind="ghost", height=28, size=12, width=110,
+        if listen:                              # ▶ - «Послушать» (значок: строка узкая)
+            T.button(acts, "", "play", kind="ghost", height=28, width=32,
                      command=lambda: self._vm_listen_id(vid)).pack(side="left")
         if download:
             T.button(acts, _("Скачать"), "upload", kind="default", height=28, size=12, width=100,
@@ -2078,7 +2078,7 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
                  command=self._say_paste).pack(side="left")
         T.button(bar, _("Открыть файл…"), "folder-open", kind="ghost", height=30, size=13,
                  width=150, command=self._say_open).pack(side="left", padx=6)
-        T.button(bar, _("Очистить"), "x", kind="ghost", height=30, size=13, width=110,
+        T.button(bar, "", "x", kind="ghost", height=30, width=34,                    # очистить
                  command=self._say_clear).pack(side="left")
         self.say_count = T.label(bar, "", 12, color=T.MUTED, anchor="e")
         self.say_count.pack(side="right")
@@ -2102,8 +2102,8 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         self.say_stop_btn = T.button(ctrl, "", "square", height=34, width=44,
                                      command=self._say_stop)
         self.say_stop_btn.pack(side="left", padx=(6, 0))
-        self.say_save_btn = T.button(ctrl, _("Сохранить"), "save", kind="ghost", height=34,
-                                     size=13, width=120, command=self._say_save)
+        self.say_save_btn = T.button(ctrl, "", "save", kind="ghost", height=34, width=44,
+                                     command=self._say_save)              # сохранить в mp3
         self.say_save_btn.configure(state="disabled")
         self.say_save_btn.pack(side="right")
         # строка состояния - отдельной строкой: между кнопками она обрезалась (3.6)
