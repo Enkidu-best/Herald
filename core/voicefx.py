@@ -59,7 +59,13 @@ class VoiceFX:
 
 
 def fx_path(voices_dir: str, voice_id: str) -> str:
-    return os.path.join(voices_dir, f"{voice_id}.fx.json")
+    """Файл поправок голоса. У быстрых голосов в имени «:» («vosk:4») - на Windows
+    такое имя файла запрещено, поэтому «:» -> «_» (3.8); прежний файл читается."""
+    safe = os.path.join(voices_dir, f"{voice_id.replace(':', '_')}.fx.json")
+    old = os.path.join(voices_dir, f"{voice_id}.fx.json")
+    if ":" in voice_id and not os.path.exists(safe) and os.path.exists(old):
+        return old
+    return safe
 
 
 def load(voices_dir: str, voice_id: str) -> VoiceFX:
@@ -80,6 +86,12 @@ def load(voices_dir: str, voice_id: str) -> VoiceFX:
 
 def save(voices_dir: str, voice_id: str, fx: VoiceFX) -> None:
     path = fx_path(voices_dir, voice_id)
+    if path.endswith(f"{voice_id}.fx.json") and ":" in voice_id:      # прежнее имя -> новое
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        path = os.path.join(voices_dir, f"{voice_id.replace(':', '_')}.fx.json")
     if fx.is_neutral():
         if os.path.exists(path):
             os.remove(path)          # нечего хранить — не мусорим файлами

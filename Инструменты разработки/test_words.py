@@ -82,28 +82,6 @@ def main() -> int:
                   "Ветер дул к берегу."), "безударная гласная на конце - не ошибка")
     must(not edges_ok(ch(("Перед", "", -9.0), ("берегу", "берегу", -0.3)),
                       "Перед берегу."), "первое слово съедено")
-    print("Ударения пользователя (3.7):")
-    import tempfile
-    from core import stress as ST
-    keep = ST.USER_DICT
-    ST.USER_DICT = _os.path.join(tempfile.mkdtemp(), "ударения_пользователя.txt")
-    ST._user_cache = None
-    try:
-        ST.set_user_stress("взял+ись")
-        ST.set_user_stress("+отмель")
-        out = ST._apply_user("Они вз+ялись за дело. На отм+ель вышли. ВЗЯЛИСЬ!")
-        must("взял+ись" in out and "+отмель" in out and "ВЗЯЛ+ИСЬ" in out,
-             f"слово пользователя важнее автоматики, регистр сохранён: {out}")
-        ST.set_user_stress("вз+ялись")
-        must("вз+ялись" in ST._apply_user("взялись"), "повторная запись заменяет прежнюю")
-        try:
-            ST.set_user_stress("взялись")
-            must(False, "слово без «+» принято")
-        except ValueError:
-            pass
-    finally:
-        ST.USER_DICT = keep
-        ST._user_cache = None
     print("Растянутая гласная (3.4, «никогооо»):")
     import numpy as np
     from core.align import stretched

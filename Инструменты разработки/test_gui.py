@@ -576,9 +576,18 @@ def main() -> int:
         must(pump(lambda: "Играет" in app.say_note.cget("text")), app.say_note.cget("text"))
         inner = app.say_box._textbox
         must(pump(lambda: bool(inner.tag_ranges("say_cur"))), "звучащее предложение не подсвечено")
-        app._say_pause()
-        must(live.paused and str(app.say_pause_btn.cget("state")) == "disabled", "❚❚")
-        app.do_say()                                   # ▶ на паузе - продолжить
+        must(app.say_btn.cget("text") == "Пауза", f"во время чтения кнопка: {app.say_btn.cget('text')}")
+        must(not hasattr(app, "say_pause_btn"), "осталась отдельная кнопка паузы")
+        app._say_toggle()                              # ❚❚ - та же кнопка
+        must(live.paused and app.say_btn.cget("text") == "Продолжить", "❚❚")
+        import types
+        app.focus_force()
+        app.update()
+        app._on_space(types.SimpleNamespace(widget=app))   # пробел вне текста - ▶
+        must(not live.paused, "пробел не продолжил")
+        must(app._on_space(types.SimpleNamespace(widget=inner)) is None, "пробел в тексте перехвачен")
+        app._say_toggle()
+        app._say_toggle()                              # ▶ на паузе - продолжить
         must(not live.paused, "▶ после паузы")
         app._say_stop()                                # ■
         must(live.stopped and app._live is None, "■ не сработал")
@@ -587,7 +596,7 @@ def main() -> int:
         must(pump(lambda: app._live is None, 15), "чтение не закончилось")
         must(str(app.say_save_btn.cget("state")) == "normal", "«Сохранить» не включилась")
         must("первый звук" in app.say_note.cget("text"), app.say_note.cget("text"))
-    check("вкладка «Прочитать вслух»: ▶ ❚❚ ■, подсветка, «Сохранить»", say_flow, limit=60)
+    check("вкладка «Прочитать вслух»: одна ▶/❚❚, пробел, ■, подсветка, «Сохранить»", say_flow, limit=60)
 
     def say_keys():
         """Cmd/Ctrl+A C V X Z - и при русской раскладке (кириллическое имя клавиши)."""
@@ -761,12 +770,8 @@ def main() -> int:
     check("сервис /speak: только этот компьютер, включается и выключается", server)
 
     def read_text():
-        """«Как будет прочитано»: ударение знаком, правый щелчок - исправить."""
-        import tempfile
-        from core import stress as ST
-        keep_dict, keep_prep = ST.USER_DICT, P.prepare_read_text
-        ST.USER_DICT = os.path.join(tempfile.mkdtemp(), "у.txt")
-        ST._user_cache = None
+        """«Как будет прочитано»: ударение знаком, только просмотр (3.8)."""
+        keep_prep = P.prepare_read_text
         P.prepare_read_text = lambda path, opts: "=== Часть 1 ===\n\nОни вз+ялись за дело.\n"
         real_path = P.read_text_path
         P.read_text_path = lambda path, out_dir=None: "/нет/такого/файла"
@@ -775,31 +780,16 @@ def main() -> int:
             app.show_read_text()
             must(pump(lambda: getattr(app, "_read_win", None) is not None
                       and app._read_win.winfo_exists(), 10), "окно не открылось")
-            win = app._read_win
-            box = next(w for w in win.winfo_children() if isinstance(w, ctk.CTkTextbox))
+            box = app._read_win._box
             body = box.get("1.0", "end")
             must("вз\u044f\u0301лись" in body, f"ударение знаком: {body!r}")
-            inner = box._textbox
-            idx = inner.search("лись", "1.0")
-            w = win._word_at(idx)
-            must(w.replace("\u0301", "") == "взялись", f"слово под курсором: {w!r}")
-            win._fix(w)                    # «Исправить ударение…» (меню на Mac модально)
-            app.update()
-            dlg = win._dlg
-            must(dlg._entry.get() == "вз+ялись", f"в окне исправления: {dlg._entry.get()!r}")
-            dlg._entry.delete(0, "end")
-            dlg._entry.insert(0, "взял+ись")
-            dlg._ok()
-            app.update()
-            must("взялись" in ST.user_stress() and ST.user_stress()["взялись"] == "взял+ись",
-                 "слово не попало в словарь пользователя")
-            must("взял\u0438\u0301сь" in box.get("1.0", "end"), "окно не показало исправление")
+            must(str(box.cget("state")) == "disabled", "текст можно править")
+            must(not hasattr(app._read_win, "_fix"), "осталось «Исправить ударение»")
         finally:
-            ST.USER_DICT, P.prepare_read_text, P.read_text_path = keep_dict, keep_prep, real_path
-            ST._user_cache = None
+            P.prepare_read_text, P.read_text_path = keep_prep, real_path
             if getattr(app, "_read_win", None) is not None:
                 app._read_win.destroy()
-    check("«Как будет прочитано»: ударения знаком, меню по правому щелчку", read_text)
+    check("«Как будет прочитано»: ударения знаком, только просмотр", read_text)
 
     def busy_gpu():
         """Честный прогноз во время работы и «видеокарта занята» (3.7)."""
@@ -836,24 +826,78 @@ def main() -> int:
             app._set_busy(False)
     check("прогноз по недавней скорости, «видеокарта занята», «Подождать»", busy_gpu, limit=40)
 
+    def forecast_cache():
+        """3.8: куски книги уже в кэше - прогноз меньше и говорит об этом."""
+        app._set_book(book)
+        pump(lambda: app.est is not None)
+        app._cache_key = None
+        real = G.cached_share
+        G.cached_share = lambda *a, **k: None
+        app.show_estimate()
+        pump(lambda: getattr(app, "_cache_key", None) is not None, 2)
+        app.update()
+        full = app.est_label.cget("text")
+        G.cached_share = lambda *a, **k: {"n": 15, "cached": 12, "chars": 1500, "cached_chars": 1200}
+        app._cache_key = None
+        try:
+            app.show_estimate()
+            must(pump(lambda: "12 из 15" in app.est_label.cget("text"), 5), app.est_label.cget("text"))
+            import re as _r
+            def wait_sec(t):
+                m = _r.search(r"Ждать около ([^·]+)", t)
+                return m.group(1).strip() if m else ""
+            must(wait_sec(app.est_label.cget("text")) != wait_sec(full),
+                 f"ожидание не уменьшилось: {wait_sec(full)} -> {wait_sec(app.est_label.cget('text'))}")
+        finally:
+            G.cached_share = real
+            app._cache_key = None
+    check("прогноз: куски из кэша - «12 из 15 кусков уже посчитаны», ждать меньше", forecast_cache)
+
     def voice_manager():
-        """Настройки → «Голоса»: скрыть / показать, скачать (с прогрессом), нет
-        интернета - понятная ошибка, удалить - с подтверждением. Без сети."""
+        """«Голоса» (3.8): каждый голос - строкой; послушать, скачать (с ходом),
+        нет интернета - понятная ошибка, удалить - через «⋯» с подтверждением,
+        Vosk - скрыть один, все три скрыты - удалить пакет; своё имя (✎). В
+        «Настройках» голосов больше нет. Без сети."""
         from core import voice_store as VS
         from tkinter import messagebox as mb
         app.show("settings")
         app.update()
-        rows = [w for w in app.vm_rows.winfo_children()]
-        texts = " | ".join(c.cget("text") for r in rows for c in r.winfo_children()
-                           if isinstance(c, ctk.CTkLabel))
-        must("Пакет Vosk: 3 голоса" in texts and "Joe" in texts and "Silero" in texts, texts[:300])
-        keep_cfg = app.cfg.get("hidden_voices")
-        app._vm_toggle_hidden("eugene")              # скрыть Евгения
+        must(not hasattr(app, "vm_rows"), "в Настройках осталась карточка голосов")
+        app.show("voices")
+        app.update()
+        rows = app._voice_row_widgets
+        for vid in [c.id for c in VS.CATALOG]:
+            must(vid in rows, f"нет строки голоса {vid}")
+        def labels(w):
+            for c in w.winfo_children():
+                if isinstance(c, ctk.CTkLabel):
+                    yield c.cget("text")
+                yield from labels(c)
+        texts = " | ".join(t for r in rows.values() for t in labels(r))
+        must("входит в пакет Vosk" in texts and "Joe" in texts, texts[-300:])
+        keep_cfg = {k: app.cfg.get(k) for k in ("hidden_voices", "voice_names")}
+        app._voice_action("eugene", "Евгений (муж.)", "hide")          # «⋯» → «Скрыть»
         must(not any(v.id == "eugene" for v in app._voices), "скрытый голос остался в списке")
-        app._vm_toggle_hidden("eugene")
+        must(("show", "Показать в списках") in rows["eugene"]._herald_menu
+             or any(a == "show" for a, _t in app._voice_row_widgets["eugene"]._herald_menu),
+             "у скрытого нет «Показать»")
+        app._voice_action("eugene", "Евгений (муж.)", "show")
         must(any(v.id == "eugene" for v in app._voices), "голос не вернулся")
+        # своё имя: во всех списках, исходное - рядом
+        app._rename_voice("aidar", "Айдар (муж.)")
+        app.update()
+        app._rename_dlg._save("Диктор А")
+        must(any(v.id == "aidar" and v.title == "Диктор А" for v in app._voices),
+             "своё имя не дошло до списков")
+        must(any("Диктор А" in x for x in app.voice_menu.cget("values")), "в меню голоса старое имя")
+        app._rename_voice("aidar", "Айдар (муж.)")
+        app.update()
+        app._rename_dlg._save("")
+        must(any(v.id == "aidar" and v.title.startswith("Айдар") for v in app._voices),
+             "исходное имя не вернулось")
         joe = VS.by_id("piper:en_US-joe-medium")
-        real_dl, real_ok, real_yes = VS.download, mb.askokcancel, mb.askyesno
+        real_dl, real_ok, real_yes, real_del = VS.download, mb.askokcancel, mb.askyesno, VS.delete
+        real_inst = VS.installed
         mb.askokcancel = mb.askyesno = lambda *a, **k: True
         try:
             def fake(v, progress=None, cancel=None):
@@ -861,7 +905,7 @@ def main() -> int:
                     progress(i / 4, f"Скачиваю {v.title}: {i} из 4 МБ")
                     time.sleep(0.05)
             VS.download = fake
-            app._vm_download(joe)
+            app._vm_download_id(joe.id)
             must(pump(lambda: app._vm_busy is None, 10), "загрузка не закончилась")
             must("Готово" in app.vm_note.cget("text"), app.vm_note.cget("text"))
 
@@ -869,23 +913,32 @@ def main() -> int:
                 raise VS.NoInternet("Нет связи с интернетом - голос не скачался. Проверьте "
                                     "подключение и нажмите «Скачать» ещё раз.")
             VS.download = offline
-            app._vm_download(joe)
+            app._vm_download_id(joe.id)
             must(pump(lambda: app._vm_busy is None, 10), "ошибка не пришла")
             must("Нет связи с интернетом" in app.vm_note.cget("text"), app.vm_note.cget("text"))
             deleted = []
-            real_del = VS.delete
             VS.delete = lambda v: deleted.append(v.id)
-            app._vm_delete(joe)
-            VS.delete = real_del
-            must(deleted == [joe.id], "удаление не спросило или не удалило")
+            VS.installed = lambda v: True
+            app._voice_action(joe.id, joe.title, "delete")
+            must(deleted == [joe.id], "удаление Piper не спросило или не удалило")
+            deleted.clear()
+            for vid in ("vosk:4", "vosk:3"):
+                app._voice_action(vid, vid, "delete")
+            must(not deleted and {"vosk:4", "vosk:3"} <= app._hidden_voices(),
+                 "голос Vosk не скрылся или пакет удалён раньше времени")
+            app._voice_action("vosk:2", "vosk:2", "delete")
+            must(deleted == ["vosk:2"], f"все три Vosk скрыты - пакет не удалён: {deleted}")
         finally:
-            VS.download, mb.askokcancel, mb.askyesno = real_dl, real_ok, real_yes
-            app.cfg["hidden_voices"] = keep_cfg
-            if keep_cfg is None:
-                app.cfg.pop("hidden_voices", None)
-            app._vm_refresh()
+            VS.download, mb.askokcancel, mb.askyesno, VS.delete = real_dl, real_ok, real_yes, real_del
+            VS.installed = real_inst
+            for k, v in keep_cfg.items():
+                if v is None:
+                    app.cfg.pop(k, None)
+                else:
+                    app.cfg[k] = v
             app.refresh_voices()
-    check("менеджер голосов: скрыть, скачать, нет интернета, удалить", voice_manager, limit=60)
+            app._refresh_voice_rows()
+    check("«Голоса»: строка на голос, послушать, скачать, нет сети, «⋯» удалить, Vosk, своё имя", voice_manager, limit=60)
 
     G.S.speak, G.S.default_sink, G.preview_sample = real_speak, real_sink, real_preview
 

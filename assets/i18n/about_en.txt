@@ -12,8 +12,8 @@ WHAT IT DOES
     letters (ru-normalizr).
   • Places stress by itself: RUAccent; for homographs ("castle" / "lock", spelled the same in Russian) where it
     is unsure - silero-stress. A character's name sounds the same throughout
-    the book. “How it will be read” shows the text with stress marks; a wrong
-    one can be fixed with a right-click - your fix wins over the automatic one.
+    the book. “How it will be read” shows the text with stress marks exactly
+    as it goes to the model.
   • Splits the book into parts of about the length you set and delivers them
     in order - you can listen to the first ones right in the window (mini
     player) while the rest are computed. Pause, “Continue narration” after a

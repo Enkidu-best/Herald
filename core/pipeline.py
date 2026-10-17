@@ -111,6 +111,8 @@ class ConvertResult:
     duration: float
     title: str
     author: str
+    fresh_sec: float = 0.0           # звука посчитано заново (без кэша), 3.8
+    cached: int = 0                  # кусков взято из кэша
 
 
 def _safe_name(s: str) -> str:
@@ -1105,8 +1107,9 @@ def settings_fingerprint(engine: str, eng_kwargs: dict, voice: str,
     import hashlib
     vdir = default_voices_dir()
     vinfo = {}
+    from .voicefx import fx_path
     for ext in (".wav", ".txt", ".fx.json"):
-        p = os.path.join(vdir, voice + ext)
+        p = fx_path(vdir, voice) if ext == ".fx.json" else os.path.join(vdir, voice + ext)
         if os.path.exists(p):
             with open(p, "rb") as f:
                 vinfo[ext] = hashlib.sha1(f.read()).hexdigest()
@@ -1152,6 +1155,7 @@ def _save_state(state_dir: str, state: dict) -> None:
 
 SERVICE_DIR = "_служебное"
 READ_TEXT = "текст с ударениями.txt"
+CHUNK_LIST = "куски.json"           # 3.8: по нему прогноз видит, что уже в кэше
 
 
 def save_read_text(book_dir: str, prepared) -> str | None:
@@ -1194,6 +1198,59 @@ def prepare_read_text(path: str, opts: "ConvertOptions") -> str:
 
 def read_text_path(path: str, out_dir: str | None = None) -> str:
     return os.path.join(output_dir_for(path, out_dir), SERVICE_DIR, READ_TEXT)
+
+
+def save_chunk_list(book_dir: str, prepared, gap_sec: float, src: str) -> None:
+    """Куски книги ровно как они уйдут в модель (текст и темп) - для прогноза
+    (3.8: «Проба пера 3» второй раз - прогноз 2:19, факт 0:55, куски были в кэше)."""
+    try:
+        items = []
+        for ci, (_title, chunks) in enumerate(prepared, 1):
+            for t, _g, m, _k in _norm_items(chunks, gap_sec):
+                items.append([ci, _with_end_punct(t), m])
+        st = os.stat(src)
+        d = os.path.join(book_dir, SERVICE_DIR)
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, CHUNK_LIST), "w", encoding="utf-8") as f:
+            json.dump({"book": [st.st_size, st.st_mtime_ns], "chunks": items}, f,
+                      ensure_ascii=False)
+    except OSError as e:
+        log_problem("список кусков для прогноза не записался", e, show=False)
+
+
+def cached_share(path: str, *, engine: str, eng_kwargs: dict, voice: str,
+                 language: str = "ru", out_dir: str | None = None) -> dict | None:
+    """Сколько кусков этой книги уже в кэше синтеза при ТЕКУЩИХ настройках.
+
+    {"n": кусков, "cached": из них в кэше, "chars": букв, "cached_chars": ...}
+    или None, если книгу ещё не озвучивали или файл книги поменялся. Ключи
+    кэша считаются заново (движок, голос, темп) - другой голос или режим
+    честно даст «ничего не готово»."""
+    from . import synthcache
+    try:
+        man = os.path.join(output_dir_for(path, out_dir), SERVICE_DIR, CHUNK_LIST)
+        data = json.load(open(man, encoding="utf-8"))
+        st = os.stat(path)
+        if data.get("book") != [st.st_size, st.st_mtime_ns]:
+            return None
+        kw = dict(eng_kwargs or {})
+        if engine in CLONE_ENGINES:
+            kw.setdefault("language", language)
+            vs = load_fx(default_voices_dir(), voice).speed      # как в convert_book
+            if vs and vs != 1.0:
+                kw["speed"] = kw.get("speed", 1.0) * vs
+        ekey = get_engine(engine, **kw).cache_key()
+        vdir = default_voices_dir()
+        out = {"n": 0, "cached": 0, "chars": 0, "cached_chars": 0}
+        for _ci, text, mul in data.get("chunks", []):
+            hit = os.path.exists(synthcache._path(synthcache.key(ekey, vdir, voice, text, mul)))
+            out["n"] += 1
+            out["chars"] += len(text)
+            out["cached"] += hit
+            out["cached_chars"] += len(text) if hit else 0
+        return out if out["n"] else None
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
 
 
 def output_dir_for(path: str, out_dir: str | None = None) -> str:
@@ -1390,6 +1447,7 @@ def convert_book(path: str, *, engine: str = "f5", eng_kwargs: dict | None = Non
     book_dir = os.path.join(out_dir, base)
     os.makedirs(book_dir, exist_ok=True)
     save_read_text(book_dir, prepared)
+    save_chunk_list(book_dir, prepared, opts.gap_sec, path)
     mp3_dir = book_dir if opts.make_chapter_mp3 else None
     # сырые части — в «.herald» рядом с результатом (см. «продолжение после сбоя»)
     workdir = os.path.join(book_dir, STATE_DIR)
@@ -1402,6 +1460,7 @@ def convert_book(path: str, *, engine: str = "f5", eng_kwargs: dict | None = Non
     hashes = {ci: _part_hash(fp, chunks) for ci, (_t, chunks) in enumerate(prepared, 1)}
     rendered: dict[int, RenderedChapter] = {}
     workers = max(1, int(opts.workers))
+    stats: dict = {}                    # свежий звук и куски из кэша (3.8)
 
     def emit(ci: int, r: RenderedChapter, expected_chars: int = 0,
              reuse: bool = False):
@@ -1479,7 +1538,6 @@ def convert_book(path: str, *, engine: str = "f5", eng_kwargs: dict | None = Non
             eng = _loaded_engine(engine, eng_kwargs) if len(reused) < len(prepared) else None
             if eng is not None and opts.sound_check and _clone(eng):
                 _prepare_sound_check(say, eng_kwargs)
-            stats: dict = {}
             paused = [0.0]
 
             def gate():
@@ -1585,7 +1643,8 @@ def convert_book(path: str, *, engine: str = "f5", eng_kwargs: dict | None = Non
         shutil.rmtree(workdir, ignore_errors=True)
     say(1.0, "Готово")
     return ConvertResult(m4b_path, mp3_dir, 1 if single_path else len(ordered),
-                         total_dur, book_title, doc.author)
+                         total_dur, book_title, doc.author,
+                         float(stats.get("fresh_sec", 0.0)), int(stats.get("cached", 0)))
 
 
 # --- оценка объёма книги (без синтеза) ----------------------------------

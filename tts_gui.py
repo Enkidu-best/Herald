@@ -43,7 +43,7 @@ from core.engines.silero import VOICES as SILERO_VOICES
 from core.log import log_problem, log_info, LOG_PATH
 from core.pipeline import (convert_book, preview_sample, estimate_book, ConvertOptions,
                            Cancelled, resume_info, forget_progress, cleanup_stale_temp,
-                           output_dir_for)
+                           output_dir_for, cached_share)
 from core.readers import ScannedPdfError, ReaderError
 from core.voicefx import VoiceFX, load as load_fx, save as save_fx
 from player import Player, fmt_time
@@ -69,38 +69,12 @@ DEFAULT_SCALE = 1.2        # масштаб по умолчанию - 120 % (с�
 _RESTART = None            # окно пересобирается (язык, меню): что вернуть на место
 FAST_VOICE = "aidar"       # «Прочитать вслух» быстрым голосом: готовый голос Silero
 SAY_HL_BG, SAY_HL_FG = "#FFE99A", "#1A1A1A"   # подсветка звучащего предложения
-SAY_TEMPO = (0.5, 1.5)     # темп во вкладке (3.6: Андрей хотел медленнее 0,8)
+SAY_TEMPO = (0.5, 1.5)
+CACHED_CHUNK_SEC = 1.0     # кусок из кэша: прочитать, проверить края, склеить     # темп во вкладке (3.6: Андрей хотел медленнее 0,8)
 GENDER = {"м": "муж.", "ж": "жен."}
 
 
 # --- мелочи ----------------------------------------------------------------
-def _restress(word: str, plus: str) -> str:
-    """Слово (с комбинируемым ударением) - с ударением из «plus», регистр - как был."""
-    letters = [c for c in word if c != "\u0301"]
-    out, j = [], 0
-    for ch in plus:
-        if ch == "+":
-            continue
-        c = letters[j] if j < len(letters) else ch
-        out.append(c)
-        j += 1
-        if j - 1 < len(plus) and _stressed_at(plus, j - 1):
-            out.append("\u0301")
-    return "".join(out)
-
-
-def _stressed_at(plus: str, letter_idx: int) -> bool:
-    """Стоит ли ударение на букве номер letter_idx в слове с «+»."""
-    k = -1
-    for i, ch in enumerate(plus):
-        if ch == "+":
-            continue
-        k += 1
-        if k == letter_idx:
-            return i > 0 and plus[i - 1] == "+"
-    return False
-
-
 def _mb(n: int) -> str:
     """Размер по-русски: «747 МБ», «1,2 ГБ»."""
     if n >= 1 << 30:
@@ -290,6 +264,8 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         T.reset_icons()
         self.TkdndVersion = tkinterdnd2.TkinterDnD._require(self)
         self.cfg = load_config()
+        from core import audio_out
+        audio_out.set_output(self.cfg.get("audio_out"))
         self.title(APP_NAME)
         # окно растёт вместе с масштабом текста (120 % по умолчанию), но не больше экрана
         k = float(self.cfg.get("scale", DEFAULT_SCALE))
@@ -341,6 +317,7 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         self._srv_kwargs: dict = {}       # переменные tkinter из чужого потока не читаем
 
         self._build_menu()
+        self.bind("<space>", self._on_space)          # «Прочитать вслух»: ▶ / ❚❚ (3.8)
         self.grid_columnconfigure(2, weight=1)
         self.grid_rowconfigure(0, weight=1)
         self._build_sidebar()
@@ -872,6 +849,15 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         T.button(hdr, _("Папка"), "folder-open", kind="ghost", height=30, size=13, width=100,
                  command=lambda: _open_path(default_voices_dir())).pack(side="right", padx=6)
         ctk.CTkFrame(lst, height=1, fg_color=T.BORDER, corner_radius=0).pack(fill="x")
+        # загрузка голоса: полоса и строка хода - внизу списка (3.8: всё о голосах здесь)
+        vm_foot = ctk.CTkFrame(lst, fg_color="transparent")
+        vm_foot.pack(side="bottom", fill="x", padx=14, pady=(0, 8))
+        self.vm_prog = ctk.CTkProgressBar(vm_foot, height=6)
+        self.vm_prog.set(0)
+        self.vm_note = T.label(vm_foot, "", 12, color=T.MUTED, anchor="w", justify="left",
+                               wraplength=520)
+        self.vm_note.pack(fill="x")
+        self._vm_busy = None
         self.voice_rows = ctk.CTkScrollableFrame(lst, fg_color="transparent", corner_radius=0)
         self.voice_rows.pack(fill="both", expand=True, padx=1, pady=(0, 6))
 
@@ -1037,24 +1023,29 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         # на размеченном наборе (9 из 10 мест против 7 из 10)
         self.strict_var = ctk.BooleanVar(value=False)
 
-        cvm = T.card(page)
-        cvm.pack(fill="x", padx=24, pady=(0, 14))
-        bvm = ctk.CTkFrame(cvm, fg_color="transparent")
-        bvm.pack(fill="x", padx=18, pady=16)
-        T.section(bvm, _("Голоса")).pack(fill="x")
-        T.label(bvm, _("Быстрые готовые голоса. Встроенные можно скрыть; остальные "
-                     "скачиваются из официальных источников и удаляются."),
+        # куда идёт звук потоком (3.8: «звук идёт не в наушники»)
+        cao = T.card(page)
+        cao.pack(fill="x", padx=24, pady=(0, 14))
+        bao = ctk.CTkFrame(cao, fg_color="transparent")
+        bao.pack(fill="x", padx=18, pady=16)
+        T.section(bao, _("Устройство вывода")).pack(fill="x")
+        T.label(bao, _("«Как в системе» - звук идёт туда же, куда у системы, и сам переходит в "
+                     "наушники, когда их подключают."),
                 12, color=T.MUTED, anchor="w", justify="left", wraplength=640).pack(
             fill="x", pady=(2, 6))
-        self.vm_rows = ctk.CTkFrame(bvm, fg_color="transparent")
-        self.vm_rows.pack(fill="x")
-        self.vm_prog = ctk.CTkProgressBar(bvm, height=6)
-        self.vm_prog.set(0)
-        self.vm_note = T.label(bvm, "", 12, color=T.MUTED, anchor="w", justify="left",
-                               wraplength=640)
-        self.vm_note.pack(fill="x", pady=(6, 0))
-        self._vm_busy = None
-        self._vm_refresh()
+        from core import audio_out
+        try:
+            devs = audio_out.outputs()
+        except Exception:
+            devs = []
+        cur = self.cfg.get("audio_out") or audio_out.SYSTEM
+        self.out_var = ctk.StringVar(value=_("Как в системе") if cur == audio_out.SYSTEM else cur)
+        self.out_menu = ctk.CTkOptionMenu(bao, variable=self.out_var, height=32, width=320,
+                                          values=[_("Как в системе")] + devs,
+                                          font=T.font(13), dropdown_font=T.font(13),
+                                          command=lambda *_a: self._on_audio_out())
+        self.out_menu.pack(anchor="w")
+        self.out_menu._herald_data = True              # имена устройств - данные системы
 
         cr = T.card(page)
         cr.pack(fill="x", padx=24, pady=(0, 14))
@@ -1268,7 +1259,7 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
             save_config(self.cfg)
             self._update_tech()
 
-    def _learn_book(self, dur: float, took: float):
+    def _learn_book(self, dur: float, took: float, fresh: float | None = None):
         """Книга досчитана: запомнить для прогноза настоящее ожидание на секунду
         звука (со всеми проверками, пересчётами и сборкой) и поправку длины звука
         этого голоса (3.5: прогноз 3:01 против факта 3:22)."""
@@ -1279,13 +1270,18 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         k = dur / (self.est.audio_sec / rate)
         ak = self.cfg.setdefault("audio_k", {})
         ak[v.id] = round(k if v.id not in ak else 0.3 * ak[v.id] + 0.7 * k, 3)
-        if not v.ready:
+        # 3.8: куски из кэша - не замер скорости. Ожидание считаем на секунду
+        # НОВОГО звука; если нового почти не было - не запоминаем вовсе
+        if fresh is not None and fresh < dur - 1:
+            dur = fresh
+        if not v.ready and dur >= 20:
             key = self._rtf_key()
             rw = self.cfg.setdefault("rtf_wall", {})
             w = took / dur
             for k_ in (f"{key}|{v.id}", f"{key}|*"):     # голос и режим целиком
                 rw[k_] = round(w if k_ not in rw else 0.3 * rw[k_] + 0.7 * w, 3)
         save_config(self.cfg)
+        self._cache_key = None              # книга теперь в кэше - пересчитать
         self.show_estimate()
 
     def _len(self) -> str:
@@ -1308,64 +1304,28 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         return profiles.engine_kwargs(p or self.profile(), self._quality())
 
     # --- менеджер голосов (3.7) ---
-    def _vm_refresh(self):
-        """Строки менеджера голосов: имя · пол · язык · движок · размер, кнопки."""
+    # --- голоса: послушать, скачать, удалить (3.7; с 3.8 - на странице «Голоса») ---
+    def _vm_listen_id(self, vid: str):
         from core import voice_store as VS
-        for w in self.vm_rows.winfo_children():
-            w.destroy()
-        hidden = self._hidden_voices()
-        eng_title = {"silero": "Silero", "vosk": "Vosk", "piper": "Piper"}
-        vosk_shown = False
-        for v in VS.CATALOG:
-            if v.engine == "vosk" and not vosk_shown:
-                vosk_shown = True
-                n = sum(1 for x in VS.CATALOG if x.engine == "vosk")
-                have = VS.installed(v)
-                line = ctk.CTkFrame(self.vm_rows, fg_color="transparent")
-                line.pack(fill="x", pady=(8, 2))
-                size = VS.size_on_disk(v) if have else VS.download_size(v)
-                T.label(line, _('Пакет Vosk: {0} голоса, {1}').format(n, _mb(size))
-                        + ("" if have else _(" · не скачан")), 13, bold=True, anchor="w").pack(
-                    side="left")
-                self._vm_btn(line, v, have)
-            line = ctk.CTkFrame(self.vm_rows, fg_color="transparent")
-            line.pack(fill="x", pady=1)
-            have = VS.installed(v)
-            if v.engine == "silero":
-                where = _("встроен")
-            elif v.engine == "vosk":
-                where = _("в пакете Vosk")
-            else:
-                where = _mb(VS.size_on_disk(v) if have else VS.download_size(v)) + (
-                    "" if have else _(" · не скачан"))
-            text = " · ".join((_(v.title), _(GENDER.get(v.gender, "")), _(LANG_MARK.get(v.language, "")),
-                               eng_title[v.engine], where))
-            lbl = T.label(line, ("    " if v.engine == "vosk" else "") + text, 13, anchor="w",
-                          color=T.MUTED if (v.id in hidden or not have) else T.TEXT)
-            lbl.pack(side="left")
-            if v.engine == "silero":
-                T.button(line, _("Показать") if v.id in hidden else _("Скрыть"), None, kind="ghost",
-                         height=26, size=12, width=90,
-                         command=lambda vid=v.id: self._vm_toggle_hidden(vid)).pack(side="right")
-            elif v.engine == "piper":
-                self._vm_btn(line, v, have)
-            if have or v.engine == "piper":
-                T.button(line, _("Послушать"), "play", kind="ghost", height=26, size=12, width=110,
-                         command=lambda vv=v: self._vm_listen(vv)).pack(side="right", padx=(0, 6))
+        v = VS.by_id(vid)
+        if v is not None:
+            return self._vm_listen(v)
+        self.select_fx_voice(vid)                  # клон - фраза его звучанием
+        self._fx_play()
 
-    def _vm_btn(self, line, v, have: bool):
-        T.button(line, _("Удалить") if have else _("Скачать"), "trash-2" if have else "upload",
-                 kind="ghost", height=26, size=12, width=110,
-                 command=(lambda: self._vm_delete(v)) if have else (lambda: self._vm_download(v))
-                 ).pack(side="right")
+    def _vm_download_id(self, vid: str):
+        from core import voice_store as VS
+        v = VS.by_id(vid)
+        if v is not None:
+            self._vm_download(v)
 
     def _vm_toggle_hidden(self, vid: str):
         h = self._hidden_voices()
         h.symmetric_difference_update({vid})
         self.cfg["hidden_voices"] = sorted(h)
         save_config(self.cfg)
-        self._vm_refresh()
         self.refresh_voices()
+        self._refresh_voice_rows()
 
     def _vm_listen(self, v):
         """Образец: Silero и скачанные - синтез фразы; Piper без загрузки - официальный."""
@@ -1420,20 +1380,40 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
                 self._vm_busy = None
                 self.vm_prog.pack_forget()
                 self.vm_note.configure(text=tr_msg(str(err)) if err else _('Готово: {0} скачан').format(what))
-                self._vm_refresh()
                 self.refresh_voices()
+                self._refresh_voice_rows()
             self.ui(end)
         threading.Thread(target=work, daemon=True).start()
 
     def _vm_delete(self, v):
+        """«Удалить…». Piper - файл голоса с диска. Vosk - один файл модели на три
+        голоса: удаление одного голоса его скрывает, а когда скрыты все три -
+        предлагаем удалить сам пакет (3.8)."""
         from core import voice_store as VS
-        what = _("пакет Vosk (все 3 голоса)") if v.engine == "vosk" else _('голос {0}').format(_(v.title))
-        if not messagebox.askyesno(_("Удалить голос"), _('Удалить {0} с диска?\nЕго можно будет скачать снова.').format(what)):
-            return
-        VS.delete(v)
-        self.vm_note.configure(text=_('Удалено: {0}').format(what))
-        self._vm_refresh()
+        if v.engine == "vosk":
+            vosk = [x.id for x in VS.CATALOG if x.engine == "vosk"]
+            if not messagebox.askyesno(_("Удалить голос"), _('Скрыть голос {0}? Он входит в пакет Vosk вместе с другими - файл пакета останется, пока нужен им.').format(self._vname(v.id, v.title))):
+                return
+            h = self._hidden_voices() | {v.id}
+            self.cfg["hidden_voices"] = sorted(h)
+            save_config(self.cfg)
+            note = _('Скрыт: {0}').format(self._vname(v.id, v.title))
+            if all(x in h for x in vosk) and VS.installed(v) and messagebox.askyesno(
+                    _("Удалить пакет Vosk"),
+                    _('Все три голоса Vosk скрыты. Удалить пакет Vosk ({0}) с диска?\nЕго можно будет скачать снова.').format(_mb(VS.size_on_disk(v)))):
+                VS.delete(v)
+                self.cfg["hidden_voices"] = sorted(h - set(vosk))   # скачают снова - видны
+                save_config(self.cfg)
+                note = _("Удалено: пакет Vosk")
+            self.vm_note.configure(text=note)
+        else:
+            what = _('голос {0}').format(self._vname(v.id, v.title))
+            if not messagebox.askyesno(_("Удалить голос"), _('Удалить {0} с диска?\nЕго можно будет скачать снова.').format(what)):
+                return
+            VS.delete(v)
+            self.vm_note.configure(text=_('Удалено: {0}').format(what))
         self.refresh_voices()
+        self._refresh_voice_rows()
 
     def _on_say_clones(self):
         self.cfg["say_clones"] = bool(self.say_clones_var.get())
@@ -1441,6 +1421,14 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         if hasattr(self, "say_mode"):
             self._say_on_kind(self.say_mode.get() if self._say_clones() else _("Быстрый"),
                               remember=False)
+
+    def _on_audio_out(self):
+        from core import audio_out
+        v = self.out_var.get()
+        name = audio_out.SYSTEM if v == _("Как в системе") else v
+        self.cfg["audio_out"] = name
+        save_config(self.cfg)
+        audio_out.set_output(name)
 
     def _on_quality(self):
         self.cfg["quality"] = self.quality_var.get()
@@ -1467,18 +1455,20 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
     # ================= голоса =================
     def _all_voices(self) -> list[_V]:
         out = []
+        names = self.cfg.get("voice_names") or {}
         try:
             for v in get_engine(clone_engine()).list_voices():
-                out.append(_V(v.id, v.id, v.language, False))
+                out.append(_V(v.id, names.get(v.id) or v.id, v.language, False))
         except Exception as e:
             log_problem("не удалось прочитать список голосов", e)
         hidden = self._hidden_voices()
-        out += [_V(v.id, v.title, v.language, True, "silero", v.gender) for v in SILERO_VOICES
-                if v.id not in hidden]
+        out += [_V(v.id, names.get(v.id) or v.title, v.language, True, "silero", v.gender)
+                for v in SILERO_VOICES if v.id not in hidden]
         # быстрые голоса Vosk / Piper - выбор Андрея 3.6, только скачанные (core/voice_store)
         try:
             from core.engines import fast
-            out += [_V(v.id, v.title, v.language, True, fast.engine_of(v.id), v.gender)
+            out += [_V(v.id, names.get(v.id) or v.title, v.language, True,
+                       fast.engine_of(v.id), v.gender)
                     for v in fast.enabled_voices() if v.id not in hidden]
         except Exception as e:
             log_problem("быстрые голоса не прочитались", e, show=False)
@@ -1541,50 +1531,165 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         self.show_estimate()
 
     def _refresh_voice_rows(self):
-        """Список голосов: вся строка - кнопка. Наведение подсвечивает, щелчок
-        выбирает голос для озвучки и открывает справа его звучание."""
+        """Список голосов (3.8): каждый голос - строкой. Клоны и готовые голоса; у
+        каждой строки «Послушать», «Скачать» (если не скачан), «✎» - своё имя,
+        «⋯» - удалить / скрыть / показать. Щелчок по строке выбирает голос для
+        озвучки и открывает справа его звучание."""
+        from core import voice_store as VS
         for w in self.voice_rows.winfo_children():
             w.destroy()
         self._voice_row_widgets = {}
         allv = self._all_voices()
-        groups = [(_("Клоны (ваши дикторы)"), [v for v in allv if not v.ready]),
-                  (_("Готовые Silero (быстро; некоммерческая лицензия)"),
-                   [v for v in allv if v.ready])]
+        hidden = self._hidden_voices()
+        clones = [v for v in allv if not v.ready]
         fxdir = default_voices_dir()
         chosen = self.current_voice()
-        for gtitle, vs in groups:
-            T.section(self.voice_rows, gtitle).pack(fill="x", padx=14, pady=(12, 4))
-            if not vs:
-                T.label(self.voice_rows, _("пока ни одного"), 12, color=T.MUTED, anchor="w").pack(
-                    fill="x", padx=14)
-            for v in vs:
-                row = ctk.CTkFrame(self.voice_rows, fg_color="transparent", corner_radius=8,
-                                   cursor=osutil.HAND)
-                row.pack(fill="x", padx=8, pady=1)
-                row.grid_columnconfigure(1, weight=1)
-                ic = ctk.CTkLabel(row, text="", image=T.icon("mic", T.MUTED, 18))
-                ic.grid(row=0, column=0, rowspan=2, padx=(10, 10), pady=(8, 0), sticky="n")
-                name = T.label(row, _(v.title), 14, bold=True, anchor="w")
-                name.grid(row=0, column=1, sticky="ew", pady=(6, 0))
-                meta = [_(LANG_MARK.get(v.language, v.language)),
-                        _("готовый") if v.ready else _("клон")]
-                if not v.ready and not load_fx(fxdir, v.id).is_neutral():
-                    meta.append(_("звучание настроено"))
-                if v.id == chosen:
-                    meta.append(_("выбран для озвучки"))
-                sub = T.label(row, "  ·  ".join(meta), 12, color=T.MUTED, anchor="w")
-                sub.grid(row=1, column=1, sticky="ew", pady=(0, 6))
-                mark = ctk.CTkLabel(row, text="", width=24, image=T.icon(
-                    "check" if v.id == chosen else "settings",
-                    T.ACCENT if v.id == chosen else T.FAINT, 16))
-                mark.grid(row=0, column=2, rowspan=2, padx=(4, 12))
-                parts = (row, ic, name, sub, mark)
-                for w in parts:
-                    w.bind("<Button-1>", lambda e, vid=v.id: self.pick_voice(vid))
-                    w.bind("<Enter>", lambda e, vid=v.id: self._voice_hover(vid, True))
-                    w.bind("<Leave>", lambda e, vid=v.id: self._voice_hover(vid, False))
-                self._voice_row_widgets[v.id] = row
-                self._voice_hover(v.id, False)
+        eng_title = {"silero": "Silero", "vosk": "Vosk", "piper": "Piper"}
+
+        def section(title):
+            T.section(self.voice_rows, title).pack(fill="x", padx=14, pady=(12, 4))
+
+        section(_("Клоны (ваши дикторы)"))
+        if not clones:
+            T.label(self.voice_rows, _("пока ни одного"), 12, color=T.MUTED, anchor="w").pack(
+                fill="x", padx=14)
+        for v in clones:
+            meta = [_(LANG_MARK.get(v.language, v.language)), _("клон")]
+            if not load_fx(fxdir, v.id).is_neutral():
+                meta.append(_("звучание настроено"))
+            if v.id == chosen:
+                meta.append(_("выбран для озвучки"))
+            self._voice_row(v.id, v.title, v.id, meta, usable=True, chosen=v.id == chosen,
+                            listen=True, download=False, menu=[("rename", _("Переименовать…"))])
+
+        section(_("Готовые голоса (без клонирования, быстро)"))
+        vosk_size = _mb(VS.VOSK_SIZE)
+        for c in VS.CATALOG:
+            have = VS.installed(c)
+            hid = c.id in hidden
+            meta = [_(GENDER.get(c.gender, "")), _(LANG_MARK.get(c.language, c.language)),
+                    eng_title[c.engine]]
+            if c.engine == "silero":
+                meta.append(_("встроен"))
+            elif c.engine == "vosk":
+                meta.append(_('входит в пакет Vosk {0}').format(vosk_size))
+            else:
+                meta.append(_mb(VS.size_on_disk(c) if have else VS.download_size(c)))
+            if not have:
+                meta.append(_("не скачан"))
+            if hid:
+                meta.append(_("скрыт"))
+            if have and c.id == chosen:
+                meta.append(_("выбран для озвучки"))
+            menu = [("rename", _("Переименовать…"))]
+            if hid:
+                menu.append(("show", _("Показать в списках")))
+            elif c.engine == "silero" or (c.engine == "vosk" and have):
+                menu.append(("hide" if c.engine == "silero" else "delete",
+                             _("Скрыть") if c.engine == "silero" else _("Удалить…")))
+            elif c.engine == "piper" and have:
+                menu.append(("delete", _("Удалить…")))
+            self._voice_row(c.id, self._vname(c.id, c.title), c.title, meta,
+                            usable=have and not hid, chosen=have and c.id == chosen,
+                            listen=have or c.engine == "piper", download=not have, menu=menu)
+
+    def _vname(self, vid: str, title: str) -> str:
+        """Имя голоса для показа: своё (✎), иначе исходное (переведённое)."""
+        return (self.cfg.get("voice_names") or {}).get(vid) or _(title)
+
+    def _voice_row(self, vid, name, orig, meta, *, usable, chosen, listen, download, menu):
+        row = ctk.CTkFrame(self.voice_rows, fg_color="transparent", corner_radius=8,
+                           cursor=osutil.HAND if usable else "")
+        row.pack(fill="x", padx=8, pady=1)
+        row.grid_columnconfigure(1, weight=1)
+        ic = ctk.CTkLabel(row, text="", image=T.icon("check" if chosen else "mic",
+                                                     T.ACCENT if chosen else T.MUTED, 18))
+        ic.grid(row=0, column=0, rowspan=2, padx=(10, 10), pady=(8, 0), sticky="n")
+        top = ctk.CTkFrame(row, fg_color="transparent")
+        top.grid(row=0, column=1, sticky="ew", pady=(6, 0))
+        nm = T.label(top, name, 14, bold=True, anchor="w",
+                     color=T.TEXT if usable else T.MUTED)
+        nm.pack(side="left")
+        T.button(top, "✎", None, kind="ghost", height=22, width=26, size=13,
+                 command=lambda: self._rename_voice(vid, orig)).pack(side="left", padx=(4, 0))
+        if name != _(orig) and name != orig:
+            T.label(top, _(orig), 11, color=T.FAINT, anchor="w").pack(side="left", padx=(6, 0))
+        sub = T.label(row, "  ·  ".join(x for x in meta if x), 12, color=T.MUTED, anchor="w")
+        sub.grid(row=1, column=1, sticky="ew", pady=(0, 6))
+        acts = ctk.CTkFrame(row, fg_color="transparent")
+        acts.grid(row=0, column=2, rowspan=2, padx=(4, 8))
+        if listen:
+            T.button(acts, _("Послушать"), "play", kind="ghost", height=28, size=12, width=110,
+                     command=lambda: self._vm_listen_id(vid)).pack(side="left")
+        if download:
+            T.button(acts, _("Скачать"), "upload", kind="default", height=28, size=12, width=100,
+                     command=lambda: self._vm_download_id(vid)).pack(side="left", padx=(4, 0))
+        T.button(acts, "⋯", None, kind="ghost", height=28, width=30, size=14,
+                 command=lambda: self._voice_menu(vid, orig, menu, acts)).pack(side="left",
+                                                                               padx=(4, 0))
+        if usable:
+            for w in (row, ic, nm, sub):
+                w.bind("<Button-1>", lambda e: self.pick_voice(vid))
+                w.bind("<Enter>", lambda e: self._voice_hover(vid, True))
+                w.bind("<Leave>", lambda e: self._voice_hover(vid, False))
+        self._voice_row_widgets[vid] = row
+        row._herald_menu = menu                        # для проверок
+        self._voice_hover(vid, False)
+
+    def _voice_menu(self, vid, orig, menu, anchor):
+        """«⋯» строки: переименовать, скрыть / показать, удалить (с подтверждением)."""
+        import tkinter as tk
+        m = tk.Menu(anchor, tearoff=0)
+        for act, title in menu:
+            m.add_command(label=title, command=lambda a=act: self._voice_action(vid, orig, a))
+        m.tk_popup(anchor.winfo_rootx(), anchor.winfo_rooty() + anchor.winfo_height())
+
+    def _voice_action(self, vid: str, orig: str, act: str):
+        from core import voice_store as VS
+        if act == "rename":
+            return self._rename_voice(vid, orig)
+        if act in ("hide", "show"):
+            return self._vm_toggle_hidden(vid)
+        if act == "delete":
+            v = VS.by_id(vid)
+            if v is not None:
+                self._vm_delete(v)
+
+    def _rename_voice(self, vid: str, orig: str):
+        """«✎»: своё имя голоса во всех списках; исходное - мелко серым рядом."""
+        dlg = ctk.CTkToplevel(self)
+        dlg.title(_("Имя голоса"))
+        T.label(dlg, _('Как показывать голос «{0}»:').format(_(orig)), 13, anchor="w").pack(
+            fill="x", padx=16, pady=(14, 6))
+        ent = ctk.CTkEntry(dlg, width=300, font=T.font(14))
+        ent.insert(0, (self.cfg.get("voice_names") or {}).get(vid, ""))
+        ent.pack(padx=16)
+        btns = ctk.CTkFrame(dlg, fg_color="transparent")
+        btns.pack(fill="x", padx=16, pady=(10, 14))
+
+        def save(name: str):
+            names = dict(self.cfg.get("voice_names") or {})
+            name = name.strip()[:60]
+            if name and name != _(orig) and name != orig:
+                names[vid] = name
+            else:
+                names.pop(vid, None)
+            self.cfg["voice_names"] = names
+            save_config(self.cfg)
+            dlg.destroy()
+            self.refresh_voices()
+            self._refresh_voice_rows()
+            if getattr(self, "_fx_voice", None) == vid:
+                self.fx_title.configure(text=self._vname(vid, orig))
+        T.button(btns, _("Сохранить"), "save", kind="primary", height=32, width=130,
+                 command=lambda: save(ent.get())).pack(side="left")
+        T.button(btns, _("Исходное имя"), "refresh-cw", kind="ghost", height=32, width=150,
+                 command=lambda: save("")).pack(side="left", padx=6)
+        ent.bind("<Return>", lambda e: save(ent.get()))
+        dlg.bind("<Escape>", lambda e: dlg.destroy())
+        dlg._save = save                                   # для проверок
+        self._rename_dlg = dlg
+        ent.focus_set()
 
     def _voice_row_color(self, vid: str, hover: bool):
         if vid == self._fx_voice:
@@ -1753,7 +1858,7 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
                 T.restyle(btn, style, icon)
                 ok = not self.running and not (btn is self.fx_play_btn and not self._fx_voice)
                 btn.configure(state="normal" if ok else "disabled")
-        if hasattr(self, "say_pause_btn"):
+        if hasattr(self, "say_stop_btn"):
             self._say_buttons()
 
     def _live_stop(self):
@@ -1912,86 +2017,17 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         win = ctk.CTkToplevel(self)
         win.title(_("Как будет прочитано"))
         win.geometry("760x680")
-        T.label(win, _("Ударение - знак над гласной. Правый щелчок по слову - «Исправить "
-                     "ударение…»: исправление действует в следующих озвучках."),
+        # только просмотр (3.8, решение Андрея: правок руками нет - трудные для клона
+        # слова программа записывает для него особым приёмом сама)
+        T.label(win, _("Ударение - знак над гласной. Так текст уходит в модель."),
                 12, color=T.MUTED, anchor="w", justify="left", wraplength=700).pack(
             fill="x", padx=16, pady=(12, 6))
         box = ctk.CTkTextbox(win, font=T.font(15), wrap="word", border_width=1)
-        box.pack(fill="both", expand=True, padx=16, pady=(0, 8))
+        box.pack(fill="both", expand=True, padx=16, pady=(0, 12))
         box.insert("1.0", to_combining(text))
         box.configure(state="disabled")
-        note = T.label(win, "", 12, color=T.OK, anchor="w")
-        note.pack(fill="x", padx=16, pady=(0, 10))
-        inner = getattr(box, "_textbox", box)
-        import tkinter as tk
-
-        def word_at(idx):
-            line = inner.get(f"{idx} linestart", f"{idx} lineend")
-            col = int(inner.index(idx).split(".")[1])
-            ok = lambda c: c.isalpha() or c in "\u0301-"  # noqa: E731
-            a = col
-            while a > 0 and ok(line[a - 1]):
-                a -= 1
-            b = col
-            while b < len(line) and ok(line[b]):
-                b += 1
-            return line[a:b].strip("-")
-
-        def fix(word):
-            plus = re.sub("(.)\u0301", "+\\1", word)
-            dlg = ctk.CTkToplevel(win)
-            dlg.title(_("Исправить ударение"))
-            T.label(dlg, _("Поставьте «+» перед ударной гласной:"), 13, anchor="w").pack(
-                fill="x", padx=16, pady=(14, 6))
-            ent = ctk.CTkEntry(dlg, width=260, font=T.font(15))
-            ent.insert(0, plus.lower())
-            ent.pack(padx=16)
-            err = T.label(dlg, "", 12, color=T.WARN, anchor="w")
-            err.pack(fill="x", padx=16, pady=(4, 0))
-
-            def ok_(*_a):
-                from core.stress import set_user_stress
-                try:
-                    w = set_user_stress(ent.get())
-                except ValueError as e:
-                    err.configure(text=tr_msg(str(e)))
-                    return
-                key = w.replace("+", "")
-                box.configure(state="normal")
-                body = box.get("1.0", "end-1c")
-                pat = re.compile(r"(?<![\w\u0301])" + r"\u0301?".join(map(re.escape, key))
-                                 + r"\u0301?(?![\w\u0301])", re.IGNORECASE)
-                new = pat.sub(lambda m: _restress(m.group(), w), body)
-                box.delete("1.0", "end")
-                box.insert("1.0", new)
-                box.configure(state="disabled")
-                note.configure(text=_('Сохранено: {0} - действует в следующих озвучках').format(to_combining(w)))
-                dlg.destroy()
-            T.button(dlg, _("Сохранить"), "save", kind="primary", height=32,
-                     command=ok_).pack(pady=(8, 14))
-            dlg._entry, dlg._ok = ent, ok_
-            win._dlg = dlg
-            ent.bind("<Return>", ok_)
-            dlg.bind("<Escape>", lambda e: dlg.destroy())
-            ent.focus_set()
-
-        menu = tk.Menu(inner, tearoff=0)
-
-        def popup(event):
-            idx = inner.index(f"@{event.x},{event.y}")
-            w = word_at(idx)
-            if not w:
-                return "break"
-            menu.delete(0, "end")
-            menu.add_command(label=_('Исправить ударение: «{0}»…').format(w), command=lambda: fix(w))
-            menu.tk_popup(event.x_root, event.y_root)
-            return "break"
-        for seq in ("<Button-2>", "<Button-3>"):
-            inner.bind(seq, popup)
-        if sys.platform == "darwin":
-            inner.bind("<Control-Button-1>", popup)
         win.bind("<Escape>", lambda e: win.destroy())
-        win._word_at, win._fix, win._box, win._note = word_at, fix, box, note   # для проверок
+        win._box = box                                                          # для проверок
         self._read_win = win
 
     # ================= вкладка «Прочитать вслух» (3.5) =================
@@ -2046,12 +2082,10 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         inner.bind("<FocusIn>", lambda e: self._say_warm())
         ctrl = ctk.CTkFrame(left, fg_color="transparent")
         ctrl.pack(fill="x", padx=14, pady=(0, 12))
+        # одна кнопка ▶ / ❚❚ (3.8); пробел - то же самое, если курсор не в тексте
         self.say_btn = T.button(ctrl, _("Прочитать"), "play", kind="primary", height=34, size=13,
-                                width=140, command=self.do_say)
+                                width=150, command=self._say_toggle)
         self.say_btn.pack(side="left")
-        self.say_pause_btn = T.button(ctrl, "", "pause", height=34, width=44,
-                                      command=self._say_pause)
-        self.say_pause_btn.pack(side="left", padx=(6, 0))
         self.say_stop_btn = T.button(ctrl, "", "square", height=34, width=44,
                                      command=self._say_stop)
         self.say_stop_btn.pack(side="left", padx=(6, 0))
@@ -2269,7 +2303,7 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
             have, hidden = {v.id for v in out}, self._hidden_voices()
             for c in VS.CATALOG:
                 if c.engine != "silero" and c.id not in have and c.id not in hidden:
-                    x = _V(c.id, c.title, c.language, True, c.engine, c.gender)
+                    x = _V(c.id, self._vname(c.id, c.title), c.language, True, c.engine, c.gender)
                     x.missing = True
                     out.append(x)
         return out
@@ -2464,11 +2498,27 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
     def _say_buttons(self):
         on = self._live_kind == "say" and self._live is not None
         paused = on and self._live.paused
-        self.say_btn.configure(text=_("Читаю…") if on and not paused else _("Прочитать"),
-                               state="disabled" if self.running or (on and not paused) else "normal")
-        T.restyle(self.say_btn, "primary", "play")
-        self.say_pause_btn.configure(state="normal" if on and not paused else "disabled")
+        playing = on and not paused
+        self.say_btn.configure(
+            text=_("Пауза") if playing else _("Продолжить") if paused else _("Прочитать"),
+            state="disabled" if self.running and not on else "normal")
+        T.restyle(self.say_btn, "primary", "pause" if playing else "play")
         self.say_stop_btn.configure(state="normal" if on else "disabled")
+
+    def _say_toggle(self, *_a):
+        """▶ / ❚❚: читает - пауза; на паузе - дальше; иначе - прочитать."""
+        if self._live_kind == "say" and self._live is not None and not self._live.paused:
+            self._say_pause()
+        else:
+            self.do_say()
+
+    def _on_space(self, event):
+        """Пробел на странице «Прочитать вслух» - ▶ / ❚❚, если курсор не в поле ввода."""
+        import tkinter as tk
+        if self.page != "say" or isinstance(event.widget, (tk.Text, tk.Entry)):
+            return None
+        self._say_toggle()
+        return "break"
 
     def do_say(self):
         """▶: прочитать с начала (или с выбранного предложения); на паузе - продолжить."""
@@ -2771,10 +2821,48 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         lang = {"ru": _("русская книга"), "en": _("английская книга")}.get(getattr(e, "language", "ru"), "")
         parts = _("один файл") if self.single_file() else _files(e.chapters)
         wait = audio_sec * self._rtf()
+        # 3.8: куски, уже посчитанные этим голосом и режимом, берутся из кэша за
+        # секунды - ждать только остальные («Проба пера 3» второй раз: 2:19 против 0:55)
+        ci = self._cache_info_for()
+        done_line = ""
+        if ci and ci["cached"]:
+            left = 1.0 - ci["cached_chars"] / max(1, ci["chars"])
+            wait = wait * left + CACHED_CHUNK_SEC * ci["cached"]
+            done_line = "\n" + _('{0} из {1} кусков уже посчитаны - они возьмутся из готового.').format(ci["cached"], ci["n"])
         night = _("  Удобно поставить на ночь.") if wait > 3 * 3600 else ""
         self.est_label.configure(text=(
-            _('{0} · {1} · звука {2}\nЖдать около {3} · на диске ~{4}.{5}').format(lang, parts, _fmt_hms(audio_sec), _fmt_hms(wait), size, night)))
+            _('{0} · {1} · звука {2}\nЖдать около {3} · на диске ~{4}.{5}').format(lang, parts, _fmt_hms(audio_sec), _fmt_hms(wait), size, night) + done_line))
         self._check_resume()
+
+    def _cache_info_for(self):
+        """Что из книги уже в кэше синтеза (считается в фоне, 3.8). None - не знаем."""
+        if not self.book_path or self.running:
+            return None
+        engine, kw = self._eng_choice()
+        voice = self.current_voice()
+        key = (self.book_path, engine, repr(sorted(kw.items())), voice,
+               getattr(self.est, "language", "ru"))
+        if getattr(self, "_cache_key", None) == key:
+            return self._cache_info
+        self._cache_key, self._cache_info = key, None
+        lang = key[4]
+
+        def work():
+            info = None
+            try:
+                info = cached_share(self.book_path, engine=engine, eng_kwargs=kw,
+                                    voice=voice, language=lang)
+            except Exception as e:
+                log_problem("не узнал, что из книги уже в кэше", e, show=False)
+
+            def done():
+                if getattr(self, "_cache_key", None) == key:
+                    self._cache_info = info
+                    if info and info["cached"]:
+                        self.show_estimate()
+            self.ui(done)
+        threading.Thread(target=work, daemon=True).start()
+        return None
 
     # --- список частей ---
     def _clear_parts(self):
@@ -3229,7 +3317,7 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
                 what = _("один файл") if res.chapters == 1 else _files(res.chapters)
                 self._logln(f"\nГотово. Звука {_fmt_hms(res.duration)}, счёт {_fmt_hms(took)} "
                             f"(на секунду звука {took / max(res.duration, 1):.2f} с)")
-                self.ui(lambda: self._learn_book(res.duration, took))
+                self.ui(lambda: self._learn_book(res.duration, took, res.fresh_sec))
                 if res.mp3_dir:
                     self._logln(f"Папка: {res.mp3_dir}")
 

@@ -9,26 +9,28 @@ NARRATION
    starts as soon as it's ready, and the preview is saved as a file next to
    the book.
 4. “How it will be read” - the text as the app will read it, with stress marks.
-   Wrong stress - right-click the word, “Fix stress…”.
 5. “Narrate book”. Parts appear in the list as they're ready - you can listen
    right away. “Pause”, “Stop”; after a stop - “Continue” from the same place.
    If another app is using the GPU, the window tells you and offers to wait.
 
 READ ALOUD
 Paste text (“From clipboard”, “Open file…”) and click “Read” - the sound starts
-in a fraction of a second. The voice is on the right, along with tempo, pitch,
+in a fraction of a second. The same button is “Pause” and “Continue” (or Space,
+when the cursor is not in the text); ■ stops. The voice is on the right, along with tempo, pitch,
 bass and brightness. The sentence being read is highlighted; click a sentence
 to read from there. “Save” - save what was read as an mp3.
 
 VOICES
 A clone is made from a recording of a narrator: “Add voice sample…” - the app
-picks a clean passage by itself. On the right - the voice sound (tempo, pitch,
-bass, brightness), “Listen”, “Save”.
+picks a clean passage by itself. All ready-made voices are here too, one per
+row: “Listen”, “Download” (Vosk, Piper), “✎” - your own name for the lists,
+“⋯” - hide or delete. On the right - the voice sound (tempo, pitch, bass,
+brightness), “Listen”, “Save”.
 
 SETTINGS
 Engine and “Quality / speed” (“Faster”, “Balanced”, “Maximum quality”),
-pauses, word check by sound, fast voices (download, delete, hide), narration
-for other apps, log.
+pauses, word check by sound, output device (“Same as system” - sound moves to
+headphones by itself), narration for other apps, log.
 
 MENU BOTTOM AND TOP
 “Theme” - system, light or dark. Top right - the interface language RU | EN

@@ -240,32 +240,81 @@ class _Sink:
 
 
 class SoundSink(_Sink):
-    """Звуковая карта через sounddevice (PortAudio) - Mac, Windows, Linux."""
+    """Звуковая карта через sounddevice (PortAudio) - Mac, Windows, Linux.
+
+    3.8: звук идёт на текущее устройство системы и переходит на новое на лету
+    (наушники подключили во время чтения) - см. core/audio_out."""
 
     BLOCK = 1024
+    WATCH_SEC = 0.5
 
     def __init__(self):
         super().__init__()
         import sounddevice  # noqa: F401 - нет пакета/устройства - пусть упадёт здесь
         self._stream = None
+        self._slock = threading.Lock()
+        self.switches = 0               # сколько раз звук переходил на другое устройство
 
-    def open(self, sr: int) -> None:
+    def _make_stream(self):
         import sounddevice as sd
-        super().open(sr)
+        from . import audio_out
 
         def cb(outdata, frames, _t, _status):
             a, end = self._pull(frames)
             outdata[:, 0] = a
             if end:
                 raise sd.CallbackStop
-        self._stream = sd.OutputStream(samplerate=sr, channels=1, dtype="float32",
-                                       blocksize=self.BLOCK, callback=cb,
-                                       finished_callback=self.done.set)
-        self._stream.start()
+
+        me: list = [None]
+
+        def fin():
+            audio_out.stream_closed()
+            if me[0] is self._stream:        # прежний поток (переход на другое устройство) - молча
+                self.done.set()
+        st = sd.OutputStream(samplerate=self.sr, channels=1, dtype="float32",
+                             blocksize=self.BLOCK, callback=cb, finished_callback=fin,
+                             device=audio_out.device_for_stream())
+        me[0] = st
+        audio_out.stream_opened()
+        self._stream = st
+        st.start()
+        return st
+
+    def open(self, sr: int) -> None:
+        from . import audio_out
+        super().open(sr)
+        self._make_stream()
+        if audio_out.output_setting() == audio_out.SYSTEM and audio_out.system_default() is not None:
+            threading.Thread(target=self._watch, args=(audio_out.system_default(),),
+                             daemon=True, name="audio-out-watch").start()
+
+    def _watch(self, seen: int) -> None:
+        """Устройство системы сменилось - переоткрыть поток на новом."""
+        from . import audio_out
+        while not self.stopped and not self.done.is_set():
+            time.sleep(self.WATCH_SEC)
+            cur = audio_out.system_default()
+            if cur is None or cur == seen or self.stopped or self.done.is_set():
+                continue
+            seen = cur
+            with self._slock:
+                old, self._stream = self._stream, None
+                try:
+                    if old is not None:
+                        old.abort()
+                        old.close()
+                    audio_out._refresh_portaudio(force=True)
+                    if not self.stopped:
+                        self._make_stream()
+                        self.switches += 1
+                except Exception:
+                    self._stream = None
+                    self.done.set()         # звук вывести некуда - честно закончить
 
     def stop(self) -> None:
         super().stop()
-        s, self._stream = self._stream, None
+        with self._slock:
+            s, self._stream = self._stream, None
         if s is not None:
             try:
                 s.abort()

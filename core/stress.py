@@ -296,81 +296,10 @@ def _homographs_from_silero(ru_out: str, src: str) -> str:
     return ru_out
 
 
-# --- ударения пользователя (3.7) -----------------------------------------
-# Андрей дописывает слово с ударением («взял+ись») - оно важнее RUAccent. Файл -
-# рядом с настройками (папка программы после установки закрыта на запись).
-USER_DICT = os.path.join(os.path.expanduser("~"), ".cache", "text2audio", "dicts",
-                         "ударения_пользователя.txt")
-_user_cache: tuple[float, dict] | None = None
-
-
-def user_stress() -> dict[str, str]:
-    """{слово без ударения: слово с «+»} из файла пользователя (перечитывается,
-    если файл изменился)."""
-    global _user_cache
-    try:
-        st = os.stat(USER_DICT)
-        mt = (st.st_mtime_ns, st.st_size)
-    except OSError:
-        return {}
-    if _user_cache is None or _user_cache[0] != mt:
-        d = {}
-        for line in open(USER_DICT, encoding="utf-8"):
-            w = line.split("#", 1)[0].strip()
-            if "+" in w and _WORD.fullmatch(w):
-                d[_key(w)] = w.lower()
-        _user_cache = (mt, d)
-    return _user_cache[1]
-
-
-def set_user_stress(word: str) -> str:
-    """Добавить или заменить слово с ударением в словаре пользователя."""
-    w = word.strip().lower()
-    if "+" not in w or not _WORD.fullmatch(w):
-        raise ValueError("нужно слово с «+» перед ударной гласной, например «взял+ись»")
-    os.makedirs(os.path.dirname(USER_DICT), exist_ok=True)
-    lines = []
-    if os.path.exists(USER_DICT):
-        lines = [x for x in open(USER_DICT, encoding="utf-8").read().splitlines()
-                 if _key(x.split("#", 1)[0].strip() or "-") != _key(w)]
-    if not lines:
-        lines = ["# Ударения пользователя Herald: слово с «+» перед ударной гласной,",
-                 "# по одному в строке. Они важнее автоматической расстановки."]
-    lines.append(w)
-    with open(USER_DICT, "w", encoding="utf-8") as f:
-        f.write("\n".join(lines) + "\n")
-    global _user_cache
-    _user_cache = None            # на Windows время записи грубое - две правки подряд
-    return w
-
-
-def _apply_user(text: str) -> str:
-    d = user_stress()
-    if not d:
-        return text
-
-    def sub(m):
-        w = m.group()
-        u = d.get(_key(w))
-        if u is None:
-            return w
-        # заглавные буквы - как в тексте, ударение - как у пользователя
-        out, j = [], 0
-        for ch in u:
-            if ch == "+":
-                out.append("+")
-                continue
-            while j < len(w) and w[j] == "+":
-                j += 1
-            out.append(w[j] if j < len(w) and w[j].lower() == ch else ch)
-            j += 1
-        return "".join(out)
-    return _WORD.sub(sub, text)
-
-
 def add_stress_text(text: str) -> str:
-    """Ударения для подготовки книги: RUAccent + омографы + слова пользователя."""
-    return _apply_user(_add_stress_auto(text))
+    """Ударения для подготовки книги: RUAccent + омографы (3.8: ручного словаря нет -
+    решение Андрея 17.10, всё автоматически)."""
+    return _add_stress_auto(text)
 
 
 def _add_stress_auto(text: str) -> str:
