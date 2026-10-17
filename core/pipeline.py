@@ -1149,6 +1149,52 @@ def _save_state(state_dir: str, state: dict) -> None:
     os.replace(tmp, p)              # атомарно: сбой посреди записи не портит файл
 
 
+SERVICE_DIR = "_служебное"
+READ_TEXT = "текст с ударениями.txt"
+
+
+def save_read_text(book_dir: str, prepared) -> str | None:
+    """Как будет прочитано (3.7): текст каждой части ровно в том виде, в каком он
+    уйдёт в модель - с числами словами и ударениями («+» перед ударной гласной).
+    По нему видно, дошло ли ударение до синтеза. Лежит в _служебное/ рядом с
+    частями; окно показывает его по кнопке «Как будет прочитано»."""
+    try:
+        d = os.path.join(book_dir, SERVICE_DIR)
+        os.makedirs(d, exist_ok=True)
+        path = os.path.join(d, READ_TEXT)
+        with open(path, "w", encoding="utf-8") as f:
+            for ci, (title, chunks) in enumerate(prepared, 1):
+                f.write(f"=== Часть {ci}{'. ' + title if title else ''} ===\n\n")
+                for c in chunks:
+                    f.write(_with_end_punct(c[0]) + "\n")
+                f.write("\n")
+        return path
+    except OSError as e:
+        log_problem("не записался «текст с ударениями»", e, show=False)
+        return None
+
+
+def prepare_read_text(path: str, opts: "ConvertOptions") -> str:
+    """«Как будет прочитано» без озвучки: та же подготовка, что в convert_book."""
+    doc = read_document(path)
+    chapters = build_chapters(doc, opts.minutes_per_file)
+    lang = detect_language(doc.text or " ".join(c.text for c in chapters[:3]))
+    bodies = [_prepare_text(ch.text, "+", opts.expand_numbers, opts.use_stress, lang)
+              for ch in chapters]
+    if opts.use_stress and lang == "ru":
+        bodies, _u = unify_book(bodies)
+    out = []
+    for ci, (ch, body) in enumerate(zip(chapters, bodies), 1):
+        chunks = _chunk_paragraphs(body, 187, opts.gap_sec, opts.para_gap_sec, opts.dialog_gap_sec)
+        out.append(f"=== Часть {ci}{'. ' + ch.title if ch.title else ''} ===\n\n"
+                   + "\n".join(_with_end_punct(c[0]) for c in chunks) + "\n")
+    return "\n".join(out)
+
+
+def read_text_path(path: str, out_dir: str | None = None) -> str:
+    return os.path.join(output_dir_for(path, out_dir), SERVICE_DIR, READ_TEXT)
+
+
 def output_dir_for(path: str, out_dir: str | None = None) -> str:
     """Куда ляжет озвучка книги (та же логика, что в convert_book)."""
     doc = read_document(path)
@@ -1337,6 +1383,7 @@ def convert_book(path: str, *, engine: str = "f5", eng_kwargs: dict | None = Non
     base = _safe_name(book_title)
     book_dir = os.path.join(out_dir, base)
     os.makedirs(book_dir, exist_ok=True)
+    save_read_text(book_dir, prepared)
     mp3_dir = book_dir if opts.make_chapter_mp3 else None
     # сырые части — в «.herald» рядом с результатом (см. «продолжение после сбоя»)
     workdir = os.path.join(book_dir, STATE_DIR)

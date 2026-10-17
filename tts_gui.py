@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import os
 import queue
+import re
 import subprocess
 import sys
 import threading
@@ -69,6 +70,33 @@ GENDER = {"м": "муж.", "ж": "жен."}
 
 
 # --- мелочи ----------------------------------------------------------------
+def _restress(word: str, plus: str) -> str:
+    """Слово (с комбинируемым ударением) - с ударением из «plus», регистр - как был."""
+    letters = [c for c in word if c != "\u0301"]
+    out, j = [], 0
+    for ch in plus:
+        if ch == "+":
+            continue
+        c = letters[j] if j < len(letters) else ch
+        out.append(c)
+        j += 1
+        if j - 1 < len(plus) and _stressed_at(plus, j - 1):
+            out.append("\u0301")
+    return "".join(out)
+
+
+def _stressed_at(plus: str, letter_idx: int) -> bool:
+    """Стоит ли ударение на букве номер letter_idx в слове с «+»."""
+    k = -1
+    for i, ch in enumerate(plus):
+        if ch == "+":
+            continue
+        k += 1
+        if k == letter_idx:
+            return i > 0 and plus[i - 1] == "+"
+    return False
+
+
 def _clone_engine(engine: str) -> bool:
     """Клон F5 (темп в модель, долгий старт) или готовый быстрый голос."""
     return engine in ("f5mlx", "f5torch", "f5")
@@ -626,6 +654,9 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         self.preview_btn.pack(fill="x")
         T.label(o, "Минута из середины книги - послушать голос до многочасовой озвучки.",
                 12, color=T.MUTED, anchor="w", justify="left", wraplength=290).pack(fill="x", pady=(6, 0))
+        self.readtext_btn = T.button(o, "Как будет прочитано", "file-text", kind="ghost",
+                                     height=30, size=13, command=self.show_read_text)
+        self.readtext_btn.pack(fill="x", pady=(8, 0))
         self._setting_widgets = [self.voice_menu, self.len_menu, self.fmt_menu]
 
     # ================= страница «Голоса» =================
@@ -1501,6 +1532,120 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
             except Exception as e:
                 log_problem("быстрый голос не загрузился заранее", e, show=False)
         threading.Thread(target=work, daemon=True).start()
+
+    # ================= «Как будет прочитано» (3.7) =================
+    def show_read_text(self):
+        """Текст книги так, как он уйдёт в модель: числа словами, ударения.
+        Правый щелчок по слову - «Исправить ударение…» (словарь пользователя)."""
+        if not self.book_path:
+            messagebox.showwarning("Нет книги", "Перетащите книгу в окно.")
+            return
+        path = self.book_path
+        self.readtext_btn.configure(state="disabled", text="Готовлю текст…")
+
+        def work():
+            try:
+                from core import pipeline as P
+                saved = P.read_text_path(path)
+                if os.path.exists(saved) and os.path.getmtime(saved) >= os.path.getmtime(path):
+                    text = open(saved, encoding="utf-8").read()
+                else:
+                    text = P.prepare_read_text(path, ConvertOptions())
+                self.ui(lambda: self._read_text_window(text))
+            except Exception as e:
+                log_problem("«как будет прочитано» не получилось", e, show=False)
+                self.ui(lambda: messagebox.showerror("Ошибка", str(e)))
+            finally:
+                self.ui(lambda: self.readtext_btn.configure(state="normal",
+                                                            text="Как будет прочитано"))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _read_text_window(self, text: str):
+        from core.stress import to_combining
+        win = ctk.CTkToplevel(self)
+        win.title("Как будет прочитано")
+        win.geometry("760x680")
+        T.label(win, "Ударение - знак над гласной. Правый щелчок по слову - «Исправить "
+                     "ударение…»: исправление действует в следующих озвучках.",
+                12, color=T.MUTED, anchor="w", justify="left", wraplength=700).pack(
+            fill="x", padx=16, pady=(12, 6))
+        box = ctk.CTkTextbox(win, font=T.font(15), wrap="word", border_width=1)
+        box.pack(fill="both", expand=True, padx=16, pady=(0, 8))
+        box.insert("1.0", to_combining(text))
+        box.configure(state="disabled")
+        note = T.label(win, "", 12, color=T.OK, anchor="w")
+        note.pack(fill="x", padx=16, pady=(0, 10))
+        inner = getattr(box, "_textbox", box)
+        import tkinter as tk
+
+        def word_at(idx):
+            line = inner.get(f"{idx} linestart", f"{idx} lineend")
+            col = int(inner.index(idx).split(".")[1])
+            ok = lambda c: c.isalpha() or c in "\u0301-"  # noqa: E731
+            a = col
+            while a > 0 and ok(line[a - 1]):
+                a -= 1
+            b = col
+            while b < len(line) and ok(line[b]):
+                b += 1
+            return line[a:b].strip("-")
+
+        def fix(word):
+            plus = re.sub("(.)\u0301", "+\\1", word)
+            dlg = ctk.CTkToplevel(win)
+            dlg.title("Исправить ударение")
+            T.label(dlg, "Поставьте «+» перед ударной гласной:", 13, anchor="w").pack(
+                fill="x", padx=16, pady=(14, 6))
+            ent = ctk.CTkEntry(dlg, width=260, font=T.font(15))
+            ent.insert(0, plus.lower())
+            ent.pack(padx=16)
+            err = T.label(dlg, "", 12, color=T.WARN, anchor="w")
+            err.pack(fill="x", padx=16, pady=(4, 0))
+
+            def ok_(*_):
+                from core.stress import set_user_stress
+                try:
+                    w = set_user_stress(ent.get())
+                except ValueError as e:
+                    err.configure(text=str(e))
+                    return
+                key = w.replace("+", "")
+                box.configure(state="normal")
+                body = box.get("1.0", "end-1c")
+                pat = re.compile(r"(?<![\w\u0301])" + r"\u0301?".join(map(re.escape, key))
+                                 + r"\u0301?(?![\w\u0301])", re.IGNORECASE)
+                new = pat.sub(lambda m: _restress(m.group(), w), body)
+                box.delete("1.0", "end")
+                box.insert("1.0", new)
+                box.configure(state="disabled")
+                note.configure(text=f"Сохранено: {to_combining(w)} - действует в следующих озвучках")
+                dlg.destroy()
+            T.button(dlg, "Сохранить", "save", kind="primary", height=32,
+                     command=ok_).pack(pady=(8, 14))
+            dlg._entry, dlg._ok = ent, ok_
+            win._dlg = dlg
+            ent.bind("<Return>", ok_)
+            dlg.bind("<Escape>", lambda e: dlg.destroy())
+            ent.focus_set()
+
+        menu = tk.Menu(inner, tearoff=0)
+
+        def popup(event):
+            idx = inner.index(f"@{event.x},{event.y}")
+            w = word_at(idx)
+            if not w:
+                return "break"
+            menu.delete(0, "end")
+            menu.add_command(label=f"Исправить ударение: «{w}»…", command=lambda: fix(w))
+            menu.tk_popup(event.x_root, event.y_root)
+            return "break"
+        for seq in ("<Button-2>", "<Button-3>"):
+            inner.bind(seq, popup)
+        if sys.platform == "darwin":
+            inner.bind("<Control-Button-1>", popup)
+        win.bind("<Escape>", lambda e: win.destroy())
+        win._word_at, win._fix, win._box, win._note = word_at, fix, box, note   # для проверок
+        self._read_win = win
 
     # ================= вкладка «Прочитать вслух» (3.5) =================
     SAY_KEYS = {"a": "all", "c": "copy", "v": "paste", "x": "cut", "z": "undo"}

@@ -30,6 +30,7 @@ RUAccent, как раньше.
 
 from __future__ import annotations
 
+import os
 import re
 import threading
 
@@ -227,8 +228,49 @@ def _silero_text(text: str) -> str:
     return "".join(out)
 
 
+# Уверенность RUAccent в выборе омографа (3.7). Сам RUAccent её не отдаёт -
+# выбор омографа (omograph_model.classify) заменён копией с той же логикой,
+# которая заодно запоминает вероятность выбранного варианта для каждого слова.
+_CONF: dict[str, float] = {}
+# Ниже этой уверенности RUAccent омограф берётся у silero-stress. Подбор 3.7
+# (Инструменты разработки/bench_stress_stages.py): 30 трудных фраз - 27 верно
+# (silero всегда - 24, один RUAccent - 24), 49 омографов - 44 (43 и 43)
+SILERO_BELOW = 0.8
+
+
+def _wrap_classify(acc) -> None:
+    om = getattr(acc, "omograph_model", None)
+    if om is None or getattr(om, "_herald_conf", False):
+        return
+    import numpy as np
+
+    def classify(texts, hypotheses, num_hypotheses):
+        outs, pos = [], 0
+        for n in num_hypotheses:
+            t = re.sub(r"\s+(?=(?:[,.?!:;…]))", "", texts[pos])
+            hs = hypotheses[pos:pos + n]
+            probs = []
+            for h in hs:
+                inp = om.tokenizer(t, h, max_length=512, truncation=True, return_tensors="np")
+                inp = {k: v.astype(np.int64) for k, v in inp.items()}
+                o = om.softmax(om.session.run(None, inp)[0])
+                probs.append(float(o[0][1]))
+            best = int(np.argmax(probs))
+            tot = sum(probs) or 1.0
+            k = _key(hs[best])
+            _CONF[k] = min(_CONF.get(k, 1.0), probs[best] / tot)
+            outs.append(hs[best])
+            pos += n
+        return outs
+    om.classify = classify
+    om._herald_conf = True
+
+
 def _homographs_from_silero(ru_out: str, src: str) -> str:
-    """В тексте RUAccent заменить омографы на выбор silero-stress."""
+    """Омографы: выбор RUAccent; если он не уверен (ниже SILERO_BELOW) - silero.
+
+    До 3.7 silero-stress перебивал ВСЕ омографы - и портил «взял+ись», «глаз+а»,
+    «в+олны», которые RUAccent ставил верно (жалоба Андрея на «Пробу пера»)."""
     import difflib
     acc = _get_accentizer()
     if _get_silero() is None or acc is None:
@@ -246,15 +288,93 @@ def _homographs_from_silero(ru_out: str, src: str) -> str:
             continue
         for m, w in zip(rm[i1:i2], sw[j1:j2]):
             k = _key(m.group())
-            if (k in homos or k in yo_homos) and _stress_idx(m.group()) != _stress_idx(w):
+            if ((k in homos or k in yo_homos) and _stress_idx(m.group()) != _stress_idx(w)
+                    and _CONF.get(k, 0.0) < SILERO_BELOW):
                 repl.append((m.start(), m.end(), w))
     for a, b, w in reversed(repl):
         ru_out = ru_out[:a] + w + ru_out[b:]
     return ru_out
 
 
+# --- ударения пользователя (3.7) -----------------------------------------
+# Андрей дописывает слово с ударением («взял+ись») - оно важнее RUAccent. Файл -
+# рядом с настройками (папка программы после установки закрыта на запись).
+USER_DICT = os.path.join(os.path.expanduser("~"), ".cache", "text2audio", "dicts",
+                         "ударения_пользователя.txt")
+_user_cache: tuple[float, dict] | None = None
+
+
+def user_stress() -> dict[str, str]:
+    """{слово без ударения: слово с «+»} из файла пользователя (перечитывается,
+    если файл изменился)."""
+    global _user_cache
+    try:
+        mt = os.path.getmtime(USER_DICT)
+    except OSError:
+        return {}
+    if _user_cache is None or _user_cache[0] != mt:
+        d = {}
+        for line in open(USER_DICT, encoding="utf-8"):
+            w = line.split("#", 1)[0].strip()
+            if "+" in w and _WORD.fullmatch(w):
+                d[_key(w)] = w.lower()
+        _user_cache = (mt, d)
+    return _user_cache[1]
+
+
+def set_user_stress(word: str) -> str:
+    """Добавить или заменить слово с ударением в словаре пользователя."""
+    w = word.strip().lower()
+    if "+" not in w or not _WORD.fullmatch(w):
+        raise ValueError("нужно слово с «+» перед ударной гласной, например «взял+ись»")
+    os.makedirs(os.path.dirname(USER_DICT), exist_ok=True)
+    lines = []
+    if os.path.exists(USER_DICT):
+        lines = [x for x in open(USER_DICT, encoding="utf-8").read().splitlines()
+                 if _key(x.split("#", 1)[0].strip() or "-") != _key(w)]
+    if not lines:
+        lines = ["# Ударения пользователя Herald: слово с «+» перед ударной гласной,",
+                 "# по одному в строке. Они важнее автоматической расстановки."]
+    lines.append(w)
+    with open(USER_DICT, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+    return w
+
+
+def _apply_user(text: str) -> str:
+    d = user_stress()
+    if not d:
+        return text
+
+    def sub(m):
+        w = m.group()
+        u = d.get(_key(w))
+        if u is None:
+            return w
+        # заглавные буквы - как в тексте, ударение - как у пользователя
+        out, j = [], 0
+        for ch in u:
+            if ch == "+":
+                out.append("+")
+                continue
+            while j < len(w) and w[j] == "+":
+                j += 1
+            out.append(w[j] if j < len(w) and w[j].lower() == ch else ch)
+            j += 1
+        return "".join(out)
+    return _WORD.sub(sub, text)
+
+
 def add_stress_text(text: str) -> str:
-    """Ударения для подготовки книги: RUAccent + омографы от silero-stress."""
+    """Ударения для подготовки книги: RUAccent + омографы + слова пользователя."""
+    return _apply_user(_add_stress_auto(text))
+
+
+def _add_stress_auto(text: str) -> str:
+    acc = _get_accentizer()
+    if acc is not None:
+        _wrap_classify(acc)
+    _CONF.clear()
     out = add_stress(text)
     if out is text or "+" not in out:
         return out

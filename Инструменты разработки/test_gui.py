@@ -261,7 +261,11 @@ def main() -> int:
         wait_cpu = app._rtf()
         app._show_accel("mlx")
         must("Apple" in app.accel_hint.cget("text"), app.accel_hint.cget("text"))
-        must(wait_cpu > app._rtf() * 5, f"прогноз на процессоре {wait_cpu} против {app._rtf()}")
+        # с прикидкой видеоядра, а не с замером: замер у Андрея мог быть снят
+        # под чужой нагрузкой (3,25 вместо ~1,2) - тест не должен от этого зависеть
+        from core import profiles
+        mlx_prior = profiles.rtf_for(app.profile(), "mlx", app._quality())
+        must(wait_cpu > mlx_prior * 5, f"прогноз на процессоре {wait_cpu} против {mlx_prior}")
     check("чем считается: на процессоре - предупреждение и честный прогноз", accel)
 
     print("паузы:")
@@ -592,21 +596,32 @@ def main() -> int:
         app.say_box.insert("1.0", "Проверка буфера")
         inner.focus_force()
         app.update()
+        def press(ks):
+            # Tk отдаёт клавишу только виджету с фокусом; если человек в это
+            # время работает в другом окне, фокус надо вернуть (иначе тест плавает)
+            for _ in range(5):
+                inner.focus_force()
+                app.update()
+                if app.focus_get() is inner:
+                    break
+                time.sleep(0.1)
+            inner.event_generate(f"<{mod}-KeyPress>", keysym=ks)
+            app.update()
         for ks in ("a", "Cyrillic_ef"):              # выделить всё
             inner.tag_remove("sel", "1.0", "end")
-            inner.event_generate(f"<{mod}-KeyPress>", keysym=ks)
+            press(ks)
             must(inner.tag_ranges("sel"), f"{mod}+{ks}: не выделилось")
         app.clipboard_clear()
-        inner.event_generate(f"<{mod}-KeyPress>", keysym="Cyrillic_es")      # Cmd+С (рус.)
+        press("Cyrillic_es")      # Cmd+С (рус.)
         app.update()
         must(app.clipboard_get() == "Проверка буфера", "Cmd+С при русской раскладке")
-        inner.event_generate(f"<{mod}-KeyPress>", keysym="Cyrillic_che")     # Cmd+Ч - вырезать
+        press("Cyrillic_che")     # Cmd+Ч - вырезать
         app.update()
         must(app._say_text() == "", "Cmd+Ч - вырезать")
-        inner.event_generate(f"<{mod}-KeyPress>", keysym="Cyrillic_em")      # Cmd+М - вставить
+        press("Cyrillic_em")      # Cmd+М - вставить
         app.update()
         must(app._say_text() == "Проверка буфера", "Cmd+М - вставить")
-        inner.event_generate(f"<{mod}-KeyPress>", keysym="z")                # отменить вставку
+        press("z")                # отменить вставку
         app.update()
         must(app._say_text() == "", f"Cmd+Z: «{app._say_text()}»")
         must(app._say_key_action(type("E", (), {"keysym": "??", "keycode": 8 << 24 if
@@ -742,6 +757,47 @@ def main() -> int:
         app._srv_toggle()
         must(app._srv is None, "сервис не выключился")
     check("сервис /speak: только этот компьютер, включается и выключается", server)
+
+    def read_text():
+        """«Как будет прочитано»: ударение знаком, правый щелчок - исправить."""
+        import tempfile
+        from core import stress as ST
+        keep_dict, keep_prep = ST.USER_DICT, P.prepare_read_text
+        ST.USER_DICT = os.path.join(tempfile.mkdtemp(), "у.txt")
+        ST._user_cache = None
+        P.prepare_read_text = lambda path, opts: "=== Часть 1 ===\n\nОни вз+ялись за дело.\n"
+        real_path = P.read_text_path
+        P.read_text_path = lambda path, out_dir=None: "/нет/такого/файла"
+        try:
+            app._set_book(book)
+            app.show_read_text()
+            must(pump(lambda: getattr(app, "_read_win", None) is not None
+                      and app._read_win.winfo_exists(), 10), "окно не открылось")
+            win = app._read_win
+            box = next(w for w in win.winfo_children() if isinstance(w, ctk.CTkTextbox))
+            body = box.get("1.0", "end")
+            must("вз\u044f\u0301лись" in body, f"ударение знаком: {body!r}")
+            inner = box._textbox
+            idx = inner.search("лись", "1.0")
+            w = win._word_at(idx)
+            must(w.replace("\u0301", "") == "взялись", f"слово под курсором: {w!r}")
+            win._fix(w)                    # «Исправить ударение…» (меню на Mac модально)
+            app.update()
+            dlg = win._dlg
+            must(dlg._entry.get() == "вз+ялись", f"в окне исправления: {dlg._entry.get()!r}")
+            dlg._entry.delete(0, "end")
+            dlg._entry.insert(0, "взял+ись")
+            dlg._ok()
+            app.update()
+            must("взялись" in ST.user_stress() and ST.user_stress()["взялись"] == "взял+ись",
+                 "слово не попало в словарь пользователя")
+            must("взял\u0438\u0301сь" in box.get("1.0", "end"), "окно не показало исправление")
+        finally:
+            ST.USER_DICT, P.prepare_read_text, P.read_text_path = keep_dict, keep_prep, real_path
+            ST._user_cache = None
+            if getattr(app, "_read_win", None) is not None:
+                app._read_win.destroy()
+    check("«Как будет прочитано»: ударения знаком, меню по правому щелчку", read_text)
 
     G.S.speak, G.S.default_sink, G.preview_sample = real_speak, real_sink, real_preview
 
