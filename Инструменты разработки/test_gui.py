@@ -773,8 +773,9 @@ def main() -> int:
         """«Как будет прочитано»: ударение знаком, только просмотр (3.8)."""
         keep_prep = P.prepare_read_text
         P.prepare_read_text = lambda path, opts: "=== Часть 1 ===\n\nОни вз+ялись за дело.\n"
-        real_path = P.read_text_path
+        real_path, real_disp = P.read_text_path, P.read_disputed
         P.read_text_path = lambda path, out_dir=None: "/нет/такого/файла"
+        P.read_disputed = lambda path, out_dir=None: ["взялись"]
         try:
             app._set_book(book)
             app.show_read_text()
@@ -785,11 +786,12 @@ def main() -> int:
             must("вз\u044f\u0301лись" in body, f"ударение знаком: {body!r}")
             must(str(box.cget("state")) == "disabled", "текст можно править")
             must(not hasattr(app._read_win, "_fix"), "осталось «Исправить ударение»")
+            must(app._read_win._disputed == 1, "спорное слово (RUAccent против silero) не подсвечено")
         finally:
-            P.prepare_read_text, P.read_text_path = keep_prep, real_path
+            P.prepare_read_text, P.read_text_path, P.read_disputed = keep_prep, real_path, real_disp
             if getattr(app, "_read_win", None) is not None:
                 app._read_win.destroy()
-    check("«Как будет прочитано»: ударения знаком, только просмотр", read_text)
+    check("«Как будет прочитано»: ударения знаком, спорные подсвечены, только просмотр", read_text)
 
     def busy_gpu():
         """Честный прогноз во время работы и «видеокарта занята» (3.7)."""

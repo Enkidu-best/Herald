@@ -36,5 +36,10 @@ MENU BOTTOM AND TOP
 “Theme” - system, light or dark. Top right - the interface language RU | EN
 and “Aa” - text size. “≡” next to the name collapses the menu.
 
+LICENSES
+Fine for commercial projects: the ESpeech engine, the Vosk and Piper voices; not
+allowed: Silero and the main F5 engine (Misha) - non-commercial only. Cloning
+someone's voice - only with the narrator's consent.
+
 Everything runs on this computer; the internet is needed only for a one-time
 download of models and voices.

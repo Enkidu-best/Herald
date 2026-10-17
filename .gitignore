@@ -1,6 +1,7 @@
 # окружение и кэши
 .venv/
 .venv-candidates/
+.venv-mlxaudio/
 __pycache__/
 *.pyc
 .DS_Store

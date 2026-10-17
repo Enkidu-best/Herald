@@ -92,6 +92,7 @@ class ConvertOptions:
     # склеиваются в один файл, а по отдельности удаляются.
     single_file: bool = False
     use_cache: bool = True           # кэш синтеза по хешу текста (core/synthcache)
+    narrator: str = ""               # чтец в тегах (album_artist); пусто - имя голоса
     # Строгая проверка слов всего куска (3.2): пропавшие и неразборчивые слова в
     # середине - пересинтез с другим зерном. Замер: пропавших слов 9 -> 2, но
     # счёт на 50-58 % дольше, поэтому это настройка (по умолчанию включена).
@@ -329,6 +330,17 @@ CLONE_ENGINES = ("f5mlx", "f5torch", "f5")   # темп - параметр дв�
 SOUND_CHECK = True            # 3.3: проверка слов по звуку (core/align)
 EDGES_BY_SOUND = True         # 3.5: края куска у клона - по звуку, без Whisper
 WORD_RETRIES = 2
+STRESS_RETRIES = 2
+# Проверка ударения по звуку у слов с риском (3.8, core/stresscheck): ударение
+# не там - пересчёт куска с другим зерном. По умолчанию ВЫКЛЮЧЕНА: задание 10а
+# заменило этот путь (модель, которая слушается ударений); на слух не проверена.
+# HERALD_STRESS_CHECK=1 - включить для опытов.
+STRESS_CHECK = os.environ.get("HERALD_STRESS_CHECK", "0") == "1"
+STRESS_TAG = " (ударение)"
+# Движок, который слушается ударений (Qwen3-TTS ru-stress, 3.8 / 10а): готовый
+# кусок проверяет meter2 (core/meter); ударение не там - пересчёт, не больше
+# STRESS_RETRIES раз. HERALD_METER_CHECK=0 - выключить.
+METER_CHECK = os.environ.get("HERALD_METER_CHECK", "1") != "0"
 _align_failed = False
 
 
@@ -863,6 +875,12 @@ def _synth_chunks(eng: TTSEngine, voice: str, chunks, sr: int,
     vdir = default_voices_dir()
     ekey = eng.cache_key()
     used_mul: dict[int, float] = {}
+    stress_on = STRESS_CHECK and sound_check and lang == "ru" and _clone(eng)
+    meter_on = (METER_CHECK and lang == "ru" and getattr(eng, "name", "") == "mlxaudio"
+                and getattr(eng, "model", "") == "qwen-stress")
+    if stress_on:
+        from . import stresscheck as SC
+        hard = SC.hard_words(ekey)
 
     def key_of(i, m=None):
         return synthcache.key(ekey, vdir, voice, texts[i], muls[i] if m is None else m)
@@ -943,6 +961,10 @@ def _synth_chunks(eng: TTSEngine, voice: str, chunks, sr: int,
             # слов (иначе без неё снова Whisper на видеоядре - медленнее, чем с ней)
             ws = (_sound_words(audio, sr, texts[i])
                   if len(audio) and lang == "ru" and (sound_check or sound_edges) else None)
+            lp = None
+            if ws and stress_on:
+                from .align import aligner as _al
+                lp = getattr(_al(), "last_lp", None)
             if sound_edges and ws:
                 from .align import edges_ok
                 edges = not risk and (len(audio) / sr < 1.0 or edges_ok(ws, texts[i]))
@@ -963,13 +985,29 @@ def _synth_chunks(eng: TTSEngine, voice: str, chunks, sr: int,
                     # крайне растянутая гласная - тоже повод пересчитать (3.4)
                     bad = bad + [w + " (тянется)" for w in stretched(ws, audio, sr)]
                     worst = min(w.post_mean for w in ws)
+                    if lp is not None:
+                        # ударение по звуку у редких слов, омографов и трудных (3.8)
+                        try:
+                            wrong = SC.wrong_words(ws, lp, texts[i], _al(), hard,
+                                                   [SC.NEW_REFS_PER_CHUNK])
+                        except Exception as e:
+                            log_problem("проверка ударения по звуку не сработала", e, show=False)
+                            wrong = []
+                        bad = bad + [w + STRESS_TAG for w in wrong]
+            if meter_on and len(audio):
+                try:
+                    from . import meter
+                    bad = bad + [w + STRESS_TAG for w in meter.wrong_words(audio, sr, texts[i])]
+                except Exception as e:
+                    log_problem("meter2 не проверил ударения", e, show=False)
             if bad or not edges:
                 heard_txt = " ".join(w for w, _s, _e in (h or []))
                 log_info(f"проверка куска: края {'да' if edges else 'НЕТ'}, слова не так: "
                          f"{bad} | слова: {heard_txt[:300]}")
             # из дублей: края целы, потом без растянутых гласных, потом лучшее худшее слово
             long_ = sum(1 for b in bad if b.endswith(" (тянется)"))
-            return h, edges and not bad, (edges, -long_, worst, -len(bad)), edges, bad
+            n_stress = sum(1 for b in bad if b.endswith(STRESS_TAG))
+            return h, edges and not bad, (edges, -long_, -n_stress, worst, -len(bad)), edges, bad
 
         best: dict[int, tuple] = {}
         need = []
@@ -990,10 +1028,12 @@ def _synth_chunks(eng: TTSEngine, voice: str, chunks, sr: int,
             if not ok:
                 need.append((i, edges))
         tried = set()
-        first_bad = {i: set(best[i][3]) for i, _e in need}
+        # стойкий пропуск слова - по словам, не по ударениям: ударение чинит зерно,
+        # а чтение по предложениям тут ни при чём
+        first_bad = {i: {b for b in best[i][3] if not b.endswith(STRESS_TAG)} for i, _e in need}
         last_bad = dict(first_bad)
         for attempt in range(1, max(TAIL_RETRIES, WORD_RETRIES if (strict_words or sound_check)
-                                    else 0) + 1):
+                                    else 0, STRESS_RETRIES if meter_on else 0) + 1):
             if not need:
                 break
             st["retries"] += len(need)
@@ -1030,13 +1070,24 @@ def _synth_chunks(eng: TTSEngine, voice: str, chunks, sr: int,
                 t0 = time.monotonic()
                 h, ok, score, edges, bad = judge(i, w, r)
                 _spent([i], t0)
-                last_bad[i] = set(bad)
+                last_bad[i] = {b for b in bad if not b.endswith(STRESS_TAG)}
                 if score > best[i][0]:
                     best[i] = (score, w, h, bad)
-                if not ok:
+                only_stress = bad and edges and all(b.endswith(STRESS_TAG) for b in bad)
+                if only_stress:
+                    st["stress_retries"] = st.get("stress_retries", 0) + 1
+                if not ok and not (only_stress and attempt >= STRESS_RETRIES):
                     still.append((i, edges))
             need = still
         st["retry_chunks"] = st.get("retry_chunks", 0) + len(tried)
+        if stress_on:
+            # и после пересчётов ударение не там - слово трудное для этой модели:
+            # дальше оно проверяется всегда (список пополняется сам)
+            stubborn = [SC._plain(b[:-len(STRESS_TAG)])
+                        for _s, _w, _h, bad in best.values() for b in bad if b.endswith(STRESS_TAG)]
+            if stubborn:
+                SC.remember_hard(ekey, stubborn)
+                st["stress_bad"] = st.get("stress_bad", 0) + len(stubborn)
         for i, (score, w, h, bad) in best.items():
             got[i] = (w, None, False, False)
             heard[i] = h
@@ -1155,6 +1206,7 @@ def _save_state(state_dir: str, state: dict) -> None:
 
 SERVICE_DIR = "_служебное"
 READ_TEXT = "текст с ударениями.txt"
+DISPUTED_FILE = "спорные ударения.txt"      # RUAccent и silero-stress разошлись (3.8)
 CHUNK_LIST = "куски.json"           # 3.8: по нему прогноз видит, что уже в кэше
 
 
@@ -1179,8 +1231,30 @@ def save_read_text(book_dir: str, prepared) -> str | None:
         return None
 
 
+def save_disputed(book_dir: str, words) -> None:
+    try:
+        d = os.path.join(book_dir, SERVICE_DIR)
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, DISPUTED_FILE), "w", encoding="utf-8") as f:
+            f.write("\n".join(words) + ("\n" if words else ""))
+    except OSError as e:
+        log_problem("не записались спорные ударения", e, show=False)
+
+
+def read_disputed(path: str, out_dir: str | None = None) -> list[str]:
+    """Спорные слова книги (после озвучки или «Как будет прочитано»)."""
+    try:
+        p = os.path.join(output_dir_for(path, out_dir), SERVICE_DIR, DISPUTED_FILE)
+        return [l.strip() for l in open(p, encoding="utf-8") if l.strip()]
+    except OSError:
+        return []
+
+
 def prepare_read_text(path: str, opts: "ConvertOptions") -> str:
-    """«Как будет прочитано» без озвучки: та же подготовка, что в convert_book."""
+    """«Как будет прочитано» без озвучки: та же подготовка, что в convert_book.
+    Спорные ударения (RUAccent против silero-stress) - в _служебное/."""
+    from .stress import take_disputed
+    take_disputed()
     doc = read_document(path)
     chapters = build_chapters(doc, opts.minutes_per_file)
     lang = detect_language(doc.text or " ".join(c.text for c in chapters[:3]))
@@ -1193,11 +1267,36 @@ def prepare_read_text(path: str, opts: "ConvertOptions") -> str:
         chunks = _chunk_paragraphs(body, 187, opts.gap_sec, opts.para_gap_sec, opts.dialog_gap_sec)
         out.append(f"=== Часть {ci}{'. ' + ch.title if ch.title else ''} ===\n\n"
                    + "\n".join(_with_end_punct(c[0]) for c in chunks) + "\n")
+    try:
+        save_disputed(output_dir_for(path), take_disputed())
+    except Exception as e:
+        log_problem("спорные ударения не сохранились", e, show=False)
     return "\n".join(out)
 
 
 def read_text_path(path: str, out_dir: str | None = None) -> str:
     return os.path.join(output_dir_for(path, out_dir), SERVICE_DIR, READ_TEXT)
+
+
+def _calibrate_stress(eng, voice: str, lang: str, say, should_stop=None) -> None:
+    """Новая модель (установка / обновление): один раз прогнать тестовый набор
+    ударений - какие слова клон читает не так (core/stresscheck). ~3 мин."""
+    if not (STRESS_CHECK and lang == "ru"
+            and os.environ.get("HERALD_STRESS_CALIBRATE", "1") != "0"):
+        return
+    try:
+        from . import stresscheck as SC
+        from .align import aligner
+        from .engines import accel_label
+        if SC.calibrated(eng.cache_key()) or accel_label() == "cpu":
+            return                    # на процессоре набор шёл бы четверть часа
+        say(0.05, "Проверяю, как модель ставит ударения (один раз для модели, ~3 мин)…")
+        from .stream import ENGINE_LOCK
+        with ENGINE_LOCK:
+            bad = SC.calibrate(eng, voice, aligner(), should_stop=should_stop)
+        log_info(f"тестовый набор ударений: трудные для модели - {', '.join(bad) or 'нет'}")
+    except Exception as e:
+        log_problem("тестовый набор ударений не прогнался", e, show=False)
 
 
 def save_chunk_list(book_dir: str, prepared, gap_sec: float, src: str) -> None:
@@ -1411,6 +1510,8 @@ def convert_book(path: str, *, engine: str = "f5", eng_kwargs: dict | None = Non
         raise ReaderError("Не удалось извлечь текст из файла.")
 
     say(0.04, "Готовлю текст (числа, ударения)…")
+    from .stress import take_disputed
+    take_disputed()
     # заголовок уже стоит первой строкой в ch.text (см. chapters.py), отдельно
     # его добавлять нельзя — иначе название прочитается дважды
     bodies = [_prepare_text(ch.text, stress_fmt, opts.expand_numbers,
@@ -1443,10 +1544,12 @@ def convert_book(path: str, *, engine: str = "f5", eng_kwargs: dict | None = Non
                     "книга будет без них", e)
 
     book_title = clean_book_title(doc.title or doc.base_title)
+    narrator = opts.narrator or voice          # чтец в тегах (имя голоса или своё, «✎»)
     base = _safe_name(book_title)
     book_dir = os.path.join(out_dir, base)
     os.makedirs(book_dir, exist_ok=True)
     save_read_text(book_dir, prepared)
+    save_disputed(book_dir, take_disputed())
     save_chunk_list(book_dir, prepared, opts.gap_sec, path)
     mp3_dir = book_dir if opts.make_chapter_mp3 else None
     # сырые части — в «.herald» рядом с результатом (см. «продолжение после сбоя»)
@@ -1488,7 +1591,7 @@ def convert_book(path: str, *, engine: str = "f5", eng_kwargs: dict | None = Non
                 if not (reuse and os.path.exists(mp3)):
                     encode_chapter_mp3(tagged, mp3, title=book_title, author=doc.author,
                                        hd=opts.hd_filter, fmt=opts.audio_format,
-                                       fx=fx_chain)
+                                       fx=fx_chain, narrator=narrator)
             except Exception as e:
                 log_problem(f"не записался файл части {ci}", e)
                 mp3 = None
@@ -1538,6 +1641,7 @@ def convert_book(path: str, *, engine: str = "f5", eng_kwargs: dict | None = Non
             eng = _loaded_engine(engine, eng_kwargs) if len(reused) < len(prepared) else None
             if eng is not None and opts.sound_check and _clone(eng):
                 _prepare_sound_check(say, eng_kwargs)
+                _calibrate_stress(eng, voice, doc_lang, say, should_stop)
             paused = [0.0]
 
             def gate():
@@ -1621,7 +1725,8 @@ def convert_book(path: str, *, engine: str = "f5", eng_kwargs: dict | None = Non
         folder = mp3_dir or out_dir
         single_path = os.path.join(folder, base + ext)
         concat_to_single(ordered, single_path, title=book_title, author=doc.author,
-                         hd=opts.hd_filter, fmt=opts.audio_format, fx=fx_chain)
+                         hd=opts.hd_filter, fmt=opts.audio_format, fx=fx_chain,
+                         narrator=narrator)
         # по отдельности части больше не нужны: остаётся один файл
         if mp3_dir:
             for n in range(1, len(prepared) + 1):
@@ -1633,7 +1738,7 @@ def convert_book(path: str, *, engine: str = "f5", eng_kwargs: dict | None = Non
     if opts.make_m4b:
         say(0.96, "Собираю аудиокнигу .m4b…")
         m4b_path = os.path.join(out_dir, base + ".m4b")
-        assemble_m4b(ordered, m4b_path, title=book_title, author=doc.author,
+        assemble_m4b(ordered, m4b_path, title=book_title, author=doc.author, narrator=narrator,
                      cover_bytes=doc.cover.data if doc.cover else None,
                      cover_ext=doc.cover.ext if doc.cover else "jpg")
 

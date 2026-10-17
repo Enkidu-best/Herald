@@ -12,6 +12,7 @@ permissions:
 env:
   PYTHONUTF8: "1"
   PYTHONIOENCODING: "utf-8"
+  HERALD_STRESS_CALIBRATE: "0"     # тестовый набор ударений - не на процессоре CI
 
 jobs:
   build:

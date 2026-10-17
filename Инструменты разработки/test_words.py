@@ -82,6 +82,28 @@ def main() -> int:
                   "Ветер дул к берегу."), "безударная гласная на конце - не ошибка")
     must(not edges_ok(ch(("Перед", "", -9.0), ("берегу", "берегу", -0.3)),
                       "Перед берегу."), "первое слово съедено")
+    print("Ударение по звуку - какие слова проверять (3.8):")
+    import tempfile
+    from core import stresscheck as SC
+    must(SC.risky("+отмель") and SC.risky("п+очерком"), "редкие слова Андрея - под проверкой")
+    must(not SC.risky("мол+око") and not SC.risky("к+омната"), "частые слова - без проверки")
+    must(SC.risky("дор+ога") == 2, "омограф (дорóга / дóрога) - под проверкой")
+    must(not SC.risky("+он") and not SC.risky("ещё"), "односложные и с «ё» - без проверки")
+    must(SC.risky("мол+око", {"молоко": 1}) == 3, "слово, трудное для модели, - проверяется первым")
+    must(SC._parts("С+еверная +отмель, сл+ово-в-сл+ово.") ==
+         ["С+еверная", "+отмель", "сл+ово", "в", "сл+ово"], "слова - как у выравнивателя")
+    keep = SC.hard_path
+    tmp = tempfile.mkdtemp()
+    SC.hard_path = lambda: _os.path.join(tmp, "трудные.json")
+    try:
+        SC.remember_hard("модель-1", ["отмель", "отмель", "каторжник"])
+        must(SC.hard_words("модель-1") == {"отмель": 2, "каторжник": 1}
+             and SC.hard_words("модель-2") == {}, "трудные слова - по ключу модели, с повторами")
+        must(SC.calibrated("модель-1") and not SC.calibrated("модель-2"),
+             "новая модель - тестовый набор ещё не прогнан")
+    finally:
+        SC.hard_path = keep
+    must(len(SC.test_set()) >= 20 and "+отмель" in SC.test_set(), "тестовый набор на месте")
     print("Растянутая гласная (3.4, «никогооо»):")
     import numpy as np
     from core.align import stretched

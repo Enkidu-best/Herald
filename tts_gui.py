@@ -1987,8 +1987,8 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
 
     # ================= «Как будет прочитано» (3.7) =================
     def show_read_text(self):
-        """Текст книги так, как он уйдёт в модель: числа словами, ударения.
-        Правый щелчок по слову - «Исправить ударение…» (словарь пользователя)."""
+        """Текст книги так, как он уйдёт в модель: числа словами, ударения; слова,
+        где RUAccent и silero-stress разошлись, подсвечены (3.8). Только просмотр."""
         if not self.book_path:
             messagebox.showwarning(_("Нет книги"), _("Перетащите книгу в окно."))
             return
@@ -2003,7 +2003,8 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
                     text = open(saved, encoding="utf-8").read()
                 else:
                     text = P.prepare_read_text(path, ConvertOptions())
-                self.ui(lambda: self._read_text_window(text))
+                disputed = P.read_disputed(path)
+                self.ui(lambda: self._read_text_window(text, disputed))
             except Exception as e:
                 log_problem("«как будет прочитано» не получилось", e, show=False)
                 self.ui(lambda: messagebox.showerror("Ошибка", str(e)))
@@ -2012,20 +2013,32 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
                                                             text=_("Как будет прочитано")))
         threading.Thread(target=work, daemon=True).start()
 
-    def _read_text_window(self, text: str):
+    def _read_text_window(self, text: str, disputed=()):
         from core.stress import to_combining
         win = ctk.CTkToplevel(self)
         win.title(_("Как будет прочитано"))
         win.geometry("760x680")
         # только просмотр (3.8, решение Андрея: правок руками нет - трудные для клона
         # слова программа записывает для него особым приёмом сама)
-        T.label(win, _("Ударение - знак над гласной. Так текст уходит в модель."),
-                12, color=T.MUTED, anchor="w", justify="left", wraplength=700).pack(
+        note = _("Ударение - знак над гласной. Так текст уходит в модель.")
+        if disputed:
+            note += " " + _("Подсвечены слова, где два расстановщика ударений (RUAccent и "
+                            "silero-stress) разошлись: {0}.").format(len(disputed))
+        T.label(win, note, 12, color=T.MUTED, anchor="w", justify="left", wraplength=700).pack(
             fill="x", padx=16, pady=(12, 6))
         box = ctk.CTkTextbox(win, font=T.font(15), wrap="word", border_width=1)
         box.pack(fill="both", expand=True, padx=16, pady=(0, 12))
-        box.insert("1.0", to_combining(text))
+        body = to_combining(text)
+        box.insert("1.0", body)
+        inner = getattr(box, "_textbox", box)
+        inner.tag_configure("disputed", background=SAY_HL_BG, foreground=SAY_HL_FG, underline=True)
+        if disputed:
+            want = {w.lower().replace("ё", "е") for w in disputed}
+            for m in re.finditer(r"[А-Яа-яЁё\u0301]+", body):
+                if m.group().replace("\u0301", "").lower().replace("ё", "е") in want:
+                    inner.tag_add("disputed", f"1.0+{m.start()}c", f"1.0+{m.end()}c")
         box.configure(state="disabled")
+        win._disputed = len(inner.tag_ranges("disputed")) // 2                 # для проверок
         win.bind("<Escape>", lambda e: win.destroy())
         win._box = box                                                          # для проверок
         self._read_win = win
@@ -2987,7 +3000,13 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
                               minutes_per_file=self.file_minutes(),
                               audio_format=self._fmt(), single_file=self.single_file(),
                               strict_words=bool(self.strict_var.get()),
-                              sound_check=bool(self.sound_var.get()), **pauses)
+                              sound_check=bool(self.sound_var.get()),
+                              narrator=self._narrator(), **pauses)
+
+    def _narrator(self) -> str:
+        """Чтец для тегов файла: своё имя голоса («✎») или исходное, без «(муж.)»."""
+        v = self._voice_obj()
+        return (v.title if v else self.current_voice()).split(" (")[0]
 
     def _ready(self) -> bool:
         if not self.book_path or not os.path.isfile(self.book_path):

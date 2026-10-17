@@ -117,6 +117,32 @@ def _get_accentizer():
     return _ACCENTIZER
 
 
+_TITLE = re.compile(r"\b([А-ЯЁ])([а-яё]+)\b")
+
+
+def _lower_titles(text: str) -> str:
+    """«Северная» -> «северная»: слова с заглавной RUAccent размечает хуже (карточка
+    ru-stress-cf: 95,2 % против 97,4 % в нижнем регистре; 3.8, задание 10а).
+    АББРЕВИАТУРЫ не трогаем."""
+    return _TITLE.sub(lambda m: m.group(1).lower() + m.group(2), text)
+
+
+def _restore_case(src: str, out: str) -> str:
+    """Регистр букв - как в исходном тексте; «+» из разметки сохраняются. Если
+    буквы разошлись (RUAccent что-то поменял) - разметка как есть."""
+    res, j = [], 0
+    for ch in out:
+        if ch == "+":
+            res.append(ch)
+            continue
+        if j < len(src) and src[j].lower() == ch.lower():
+            res.append(src[j])
+            j += 1
+        else:
+            return out
+    return "".join(res) if j == len(src) else out
+
+
 def add_stress(text: str) -> str:
     """Вернуть текст с ударениями ('+' перед ударной гласной). При сбое - как есть."""
     if not text or not text.strip():
@@ -125,7 +151,7 @@ def add_stress(text: str) -> str:
     if acc is None:
         return text
     try:
-        return _fix_dialog_dash(acc.process_all(text))
+        return _fix_dialog_dash(_restore_case(text, acc.process_all(_lower_titles(text))))
     except Exception as e:
         # RUAccent может спотыкаться на отдельных фрагментах - не роняем
         # начитку, но и молча не глотаем: фраза без ударений звучит заметно
@@ -236,6 +262,16 @@ _CONF: dict[str, float] = {}
 # (Инструменты разработки/bench_stress_stages.py): 30 трудных фраз - 27 верно
 # (silero всегда - 24, один RUAccent - 24), 49 омографов - 44 (43 и 43)
 SILERO_BELOW = 0.8
+# Слова, где RUAccent и silero-stress поставили разные ударения (3.8, задание 10а,
+# п. 3.1): «Как будет прочитано» их подсвечивает - только просмотр, правки нет.
+DISPUTED: set[str] = set()
+
+
+def take_disputed() -> list[str]:
+    """Спорные слова, накопленные с прошлого вызова (и очистить список)."""
+    out = sorted(DISPUTED)
+    DISPUTED.clear()
+    return out
 
 
 def _wrap_classify(acc) -> None:
@@ -288,6 +324,8 @@ def _homographs_from_silero(ru_out: str, src: str) -> str:
             continue
         for m, w in zip(rm[i1:i2], sw[j1:j2]):
             k = _key(m.group())
+            if "+" in m.group() and "+" in w and _stress_idx(m.group()) != _stress_idx(w):
+                DISPUTED.add(k)
             if ((k in homos or k in yo_homos) and _stress_idx(m.group()) != _stress_idx(w)
                     and _CONF.get(k, 0.0) < SILERO_BELOW):
                 repl.append((m.start(), m.end(), w))

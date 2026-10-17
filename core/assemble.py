@@ -75,8 +75,11 @@ def _esc_meta(v: str) -> str:
     return v
 
 
-def _ffmetadata(chapters: list[RenderedChapter], title: str, author: str) -> str:
+def _ffmetadata(chapters: list[RenderedChapter], title: str, author: str,
+                narrator: str = "") -> str:
     lines = [";FFMETADATA1"]
+    if narrator:                    # чтец - в album_artist, как в аудиокнигах (3.8, abogen)
+        lines.append(f"album_artist={_esc_meta(narrator)}")
     if title:
         lines.append(f"title={_esc_meta(title)}")
     if author:
@@ -164,7 +167,7 @@ def _prepare_cover(cover_bytes: bytes | None, cover_ext: str, title: str,
 def assemble_m4b(chapters: list[RenderedChapter], out_path: str, *,
                  title: str = "", author: str = "",
                  cover_bytes: bytes | None = None, cover_ext: str = "jpg",
-                 bitrate: str = "96k") -> str:
+                 bitrate: str = "96k", narrator: str = "") -> str:
     """Склеить главы в один .m4b с закладками и обложкой."""
     ff = _ff()
     workdir = tempfile.mkdtemp(prefix="t2a_")
@@ -176,7 +179,7 @@ def assemble_m4b(chapters: list[RenderedChapter], out_path: str, *,
                 f.write(f"file '{ch.wav_path}'\n")
         metafile = os.path.join(workdir, "meta.txt")
         with open(metafile, "w", encoding="utf-8") as f:
-            f.write(_ffmetadata(chapters, title, author))
+            f.write(_ffmetadata(chapters, title, author, narrator))
         cover = _prepare_cover(cover_bytes, cover_ext, title, author, workdir)
 
         cmd = [
@@ -222,7 +225,7 @@ def _chain(hd: bool, fx: str) -> str:
 def encode_chapter_mp3(ch: RenderedChapter, out_path: str, *,
                        title: str = "", author: str = "", quality: str = "2",
                        hd: bool = True, fmt: str = DEFAULT_FORMAT,
-                       fx: str = "") -> str:
+                       fx: str = "", narrator: str = "") -> str:
     ff = _ff()
     cmd = [
         ff, "-y", "-hide_banner", "-loglevel", "error",
@@ -236,6 +239,7 @@ def encode_chapter_mp3(ch: RenderedChapter, out_path: str, *,
         "-metadata", f"title={ch.title}",
         "-metadata", f"artist={author}",
         "-metadata", f"album={title}",
+    ] + (["-metadata", f"album_artist={narrator}"] if narrator else []) + [
         out_path,
     ]
     subprocess.run(cmd, check=True)
@@ -263,7 +267,7 @@ def polish_wav_to_mp3(wav_path: str, out_path: str, *, hd: bool = True,
 
 def concat_to_single(chapters: list[RenderedChapter], out_path: str, *,
                      title: str = "", author: str = "", hd: bool = True,
-                     fmt: str = DEFAULT_FORMAT, fx: str = "") -> str:
+                     fmt: str = DEFAULT_FORMAT, fx: str = "", narrator: str = "") -> str:
     """Все части - одним файлом. Склеиваются wav, а кодируется результат один раз.
 
     Склеивать уже готовые mp3 нельзя: у каждого свой заголовок с длительностью,
@@ -282,7 +286,10 @@ def concat_to_single(chapters: list[RenderedChapter], out_path: str, *,
         cmd += ["-af", chain]
     _ext, codec = FORMATS.get(fmt, FORMATS[DEFAULT_FORMAT])
     cmd += codec + ["-metadata", f"title={title}", "-metadata", f"artist={author}",
-                    "-metadata", f"album={title}", out_path]
+                    "-metadata", f"album={title}"]
+    if narrator:
+        cmd += ["-metadata", f"album_artist={narrator}"]
+    cmd += [out_path]
     try:
         subprocess.run(cmd, check=True)
     finally:

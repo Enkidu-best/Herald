@@ -143,6 +143,7 @@ class Aligner:
         import torchaudio.functional as AF
         a = _resample(np.asarray(audio, dtype=np.float32).reshape(-1), sr, SR)
         lp = self.emissions(a)
+        self.last_lp = lp                           # для проверки ударения (3.8)
         words = self._words(text)
         if not words or len(lp) == 0:
             return []

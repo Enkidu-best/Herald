@@ -52,7 +52,19 @@ with open(book, "a", encoding="utf-8") as f:
     f.write("\n\nНовый абзац.")
 must(P.cached_share(book, engine="silero", eng_kwargs={}, voice="aidar") is None,
      "файл книги поменялся - старый список не годится")
+# чтец в тегах (3.8, идея abogen): album_artist - имя голоса
+import json as _json
+import subprocess
+from core.assemble import encode_chapter_mp3, RenderedChapter, write_wav
+wav = os.path.join(tmp, "ч.wav")
+dur = write_wav(np.zeros(24000, np.float32), 24000, wav)
+mp3 = encode_chapter_mp3(RenderedChapter("Часть 1", wav, dur), os.path.join(tmp, "ч.mp3"),
+                         title="Книга", author="Автор", narrator="Вячеслав Герасимов")
+tags = _json.loads(subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format_tags",
+                                   "-of", "json", mp3], capture_output=True, text=True).stdout)
+tags = {k.lower(): v for k, v in tags.get("format", {}).get("tags", {}).items()}
+must(tags.get("album_artist") == "Вячеслав Герасимов", f"чтец в тегах файла: {tags}")
 import shutil
 shutil.rmtree(tmp, ignore_errors=True)
-print("OK: прогноз с кэшем" if ok else "ПРОВАЛ")
+print("OK: прогноз с кэшем, чтец в тегах" if ok else "ПРОВАЛ")
 sys.exit(0 if ok else 1)
