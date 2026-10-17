@@ -53,6 +53,10 @@ def main() -> int:
                     help="подменить константу на время замера (варианты п. 1)")
     ap.add_argument("--kw", action="append", default=[], metavar="ИМЯ=ЧИСЛО",
                     help="параметр движка (например cfg_steps=8)")
+    ap.add_argument("--cold", action="store_true",
+                    help="как сразу после открытия окна: модели не загружены, загрузка - в счёт")
+    ap.add_argument("--quality", default=None, help="режим fast / balanced / max")
+    ap.add_argument("--engine", default=None, help="silero - готовый голос вместо клона")
     ap.add_argument("--out", default=None)
     a = ap.parse_args()
     import core.pipeline as P
@@ -67,18 +71,30 @@ def main() -> int:
         setattr(m, name, type(getattr(m, name))(v) if not isinstance(getattr(m, name), bool)
                 else v.lower() in ("1", "true", "да"))
         print("подмена:", k, "=", getattr(m, name))
-    kw = dict(profiles.get(None).kwargs)
+    kw = (profiles.engine_kwargs(profiles.get(None), a.quality) if a.quality
+          else dict(profiles.get(None).kwargs))
     for s_ in a.kw:
         k_, v_ = s_.split("=", 1)
         kw[k_] = int(v_) if v_.lstrip("-").isdigit() else v_
-    eng = P._loaded_engine(clone_engine(), dict(kw, language="ru"))
-    if a.max_chars:
-        type(eng).max_chunk_chars = a.max_chars
-    eng.synth_batch(["Пров+ерка св+язи."], a.voice)             # прогрев
-    if not a.no_check:
-        from core import align
-        align.aligner().load()
-    P._listen(eng.synth_batch(["Пров+ерка."], a.voice)[0], 24000, "ru", P._ASR_MODEL)
+    engine_id = a.engine or clone_engine()
+    if a.engine == "silero":
+        kw = {}
+    from core import align
+    if a.cold:
+        # загрузка моделей - в счёт, как в окне сразу после открытия
+        timed(F.F5MLXEngine, "_load_in_thread", "загрузка клона F5")
+        timed(align.Aligner, "load", "загрузка выравнивателя (проверка слов)")
+        from core import asr
+        timed(asr, "transcribe", "_распознавание (с загрузкой Whisper)")
+        timed(P, "_loaded_engine", "_взять движок (с загрузкой)")
+    else:
+        eng = P._loaded_engine(engine_id, dict(kw, language="ru") if a.engine != "silero" else {})
+        if a.max_chars:
+            type(eng).max_chunk_chars = a.max_chars
+        eng.synth_batch(["Пров+ерка св+язи."], a.voice)             # прогрев
+        if not a.no_check:
+            align.aligner().load()
+        P._listen(eng.synth_batch(["Пров+ерка."], a.voice)[0], 24000, "ru", P._ASR_MODEL)
     if a.no_edges:
         P._listen = lambda *x, **k: None
     timed(P, "_prepare_text", "подготовка текста (числа, ударения)")
@@ -101,7 +117,7 @@ def main() -> int:
     opts = P.ConvertOptions(use_cache=False, sound_check=not a.no_check)
     stats = {}
     t0 = time.monotonic()
-    res = P.convert_book(a.book, engine=clone_engine(), eng_kwargs=dict(kw), voice=a.voice,
+    res = P.convert_book(a.book, engine=engine_id, eng_kwargs=dict(kw), voice=a.voice,
                          out_dir=out, options=opts, on_rtf=lambda r: stats.setdefault("rtf", r))
     wall = time.monotonic() - t0
     import soundfile as sf

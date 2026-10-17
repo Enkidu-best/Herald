@@ -305,6 +305,8 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         self._live_rtf: float | None = None
         self._pause_vars: dict = {}
         self._accel = "mlx" if osutil.IS_APPLE_SILICON else "cpu"
+        self._prog_hist: list = []
+        self._wait_lock = False
         # звук потоком (core/stream): пробник, «Прослушать», «Прочитать вслух».
         # Одновременно звучит один; новый останавливает прежний
         self._live = None
@@ -522,6 +524,14 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         self.status = T.label(lft, "Перетащите книгу - и нажмите «Озвучить книгу».", 13,
                               color=T.MUTED, anchor="w")
         self.status.pack(fill="x", pady=(4, 0))
+        # видеокарта занята другой программой (3.7) - строка с кнопкой, по надобности
+        self.busy_line = ctk.CTkFrame(lft, fg_color="transparent")
+        self.busy_note = T.label(self.busy_line, "", 12, color=T.WARN, anchor="w")
+        self.busy_note.pack(side="left")
+        self.busy_btn = T.button(self.busy_line, "Подождать, пока освободится", "pause",
+                                 kind="ghost", height=26, size=12, width=230,
+                                 command=self._wait_free)
+        self.busy_btn.pack(side="left", padx=(10, 0))
         prow2 = ctk.CTkFrame(lft, fg_color="transparent")
         prow2.pack(fill="x", pady=(4, 0))
         self.part_label = T.label(prow2, "", 12, color=T.FAINT, anchor="w", width=230)
@@ -2746,6 +2756,9 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
             self._t0 = time.time()
             self._live_rtf = None
             self._synth_t0 = None
+            self._prog_hist = []
+            self._rate_base = self._rate_recent = None
+            self._wait_lock = False
             self._step = 0
             self._tick()
         else:
@@ -2753,6 +2766,8 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
             T.restyle(self.start_btn, "primary", "play")
             self.part_label.configure(text="")
             self.part_progress.set(0)
+            if hasattr(self, "busy_line"):
+                self.busy_line.pack_forget()
         if status:
             self.status.configure(text=status)
 
@@ -2766,7 +2781,81 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         if self.running:
             now = self._paused_at if self._pause_flag.is_set() else time.time()
             self.timer.configure(text=_fmt_clock(now - self._t0))
+            self._tick_n = getattr(self, "_tick_n", 0) + 1
+            if self._tick_n % 10 == 0 and not self._pause_flag.is_set():
+                self._eta_refresh()                  # «осталось ≈» - каждые 10 с (3.7)
             self.after(1000, self._tick)
+
+    # --- честный прогноз во время работы (3.7) ---
+    def _eta(self) -> float | None:
+        """Сколько ещё ждать - по скорости последних минут, а не всей работы:
+        если видеокарту заняла другая программа, прогноз это видит сразу."""
+        h = [x for x in self._prog_hist if x[1] < 1.0]
+        if len(h) < 2:
+            return None
+        now = time.time()
+        recent = [x for x in h if now - x[0] <= 180] or h[-2:]
+        if len(recent) < 2:
+            recent = h[-2:]
+        (t0, f0), (t1, f1) = recent[0], recent[-1]
+        if f1 - f0 < 0.005 or t1 - t0 < 1:
+            return None
+        rate = (f1 - f0) / (t1 - t0)
+        self._rate_recent = rate
+        if getattr(self, "_rate_base", None) is None and f1 >= 0.15:
+            self._rate_base = (f1 - h[0][1]) / max(1.0, t1 - h[0][0])
+        return max(0.0, (1.0 - f1) / rate - (now - t1))
+
+    def _eta_refresh(self):
+        if self._step != 2 or not self._prog_hist:
+            return
+        rest = self._eta()
+        t = self.status.cget("text")
+        if rest is not None and " · осталось ≈ " in t:
+            head, tail = t.split(" · осталось ≈ ", 1)
+            tail = tail.split(" · ", 1)
+            self.status.configure(text=f"{head} · осталось ≈ {_fmt_hms(rest)}"
+                                  + (" · " + tail[1] if len(tail) > 1 else ""))
+        self._busy_check(rest)
+
+    def _busy_check(self, rest):
+        """Видеокарта занята другой программой - сказать и предложить подождать."""
+        from core import busy
+        owner = busy.lock_owner()
+        slow = busy.slowed(getattr(self, "_rate_recent", None), getattr(self, "_rate_base", None))
+        if owner or slow:
+            who = f"программой «{owner}»" if owner else "другой программой"
+            eta = f" (≈ {_fmt_hms(rest)})" if rest is not None else ""
+            self.busy_note.configure(text=f"Видеокарта занята {who} - озвучка идёт медленнее{eta}")
+            if not self.busy_line.winfo_ismapped():
+                self.busy_line.pack(fill="x", pady=(4, 0))
+        elif self.busy_line.winfo_ismapped() and not self._wait_lock:
+            self.busy_line.pack_forget()
+
+    def _wait_free(self):
+        """«Подождать, пока освободится»: пауза до снятия чужого замка."""
+        if not self.running or self._wait_lock:
+            return
+        self._wait_lock = True
+        if not self._pause_flag.is_set():
+            self.do_pause()
+        self.busy_btn.configure(state="disabled", text="Жду…")
+        self.status.configure(text="Пауза - жду, пока видеокарта освободится")
+
+        def poll():
+            from core import busy
+            if not self.running:
+                self._wait_lock = False
+                return
+            if busy.lock_free():
+                self._wait_lock = False
+                self.busy_btn.configure(state="normal", text="Подождать, пока освободится")
+                self.busy_line.pack_forget()
+                if self._pause_flag.is_set():
+                    self.do_pause()                  # продолжить
+                return
+            self.after(10000, poll)
+        self.after(10000, poll)
 
     # прогресс из конвейера (вызывается из фонового потока)
     def _progress(self, fr: float, msg: str):
@@ -2792,10 +2881,10 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
             sfr = max(0.0, min(1.0, (fr - 0.05) / 0.9))
             if self._synth_t0 is None:
                 self._synth_t0, self._synth_fr = time.time(), sfr
-            elif sfr - self._synth_fr > 0.01:
-                spent = time.time() - self._synth_t0
-                rest = spent / (sfr - self._synth_fr) * (1 - sfr)
-                left = f" · осталось ~{_fmt_hms(rest)}"
+            self._prog_hist.append((time.time(), sfr))
+            rest = self._eta()
+            if rest is not None:
+                left = f" · осталось ≈ {_fmt_hms(rest)}"
             detail = msg.replace("Озвучиваю: ", "").replace("часть", "часть", 1)
             rtf = (f" · RTF {self._live_rtf:.2f}".replace(".", ",")
                    if self._live_rtf else "")
@@ -2903,8 +2992,10 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
                 ext = FORMATS.get(fmt, FORMATS[DEFAULT_FORMAT])[0]
                 out_path = os.path.splitext(path)[0] + " - пробник" + ext
                 # с поправками голоса - как в книге (до 3.4 пробник шёл без них)
-                polish_wav_to_mp3(out, out_path, fmt=fmt,
-                                  fx=load_fx(default_voices_dir(), voice).filter_chain())
+                vfx = load_fx(default_voices_dir(), voice)
+                chain = (vfx.filter_chain() if _clone_engine(engine)
+                         else S.with_tempo(vfx.filter_chain(), vfx.speed or 1.0))
+                polish_wav_to_mp3(out, out_path, fmt=fmt, fx=chain)
                 shutil.rmtree(os.path.dirname(out), ignore_errors=True)
                 dur = len(a) / sr
                 fs = live.first_sound

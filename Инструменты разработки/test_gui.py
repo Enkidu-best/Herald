@@ -395,6 +395,7 @@ def main() -> int:
         must(app.status.cget("text").startswith("Шаг 1 из 3"), app.status.cget("text"))
         app._show_progress(0.2, "Озвучиваю: часть 4 из 27")
         app._synth_t0 -= 60
+        app._prog_hist = [(t_ - 60, f_) for t_, f_ in app._prog_hist]   # минуту назад
         app._show_progress(0.3, "Озвучиваю: часть 5 из 27")
         t = app.status.cget("text")
         must(t.startswith("Шаг 2 из 3 · Озвучка - часть 5 из 27, 30 %") and "осталось" in t, t)
@@ -799,6 +800,41 @@ def main() -> int:
             if getattr(app, "_read_win", None) is not None:
                 app._read_win.destroy()
     check("«Как будет прочитано»: ударения знаком, меню по правому щелчку", read_text)
+
+    def busy_gpu():
+        """Честный прогноз во время работы и «видеокарта занята» (3.7)."""
+        from core import busy
+        real_owner, real_free = busy.lock_owner, busy.lock_free
+        app.show("book")
+        app._set_busy(True, "тест")
+        try:
+            app._step = 2
+            t = time.time()
+            # быстро в начале, потом в 3 раза медленнее - как при чужой нагрузке
+            app._prog_hist = [(t - 400, 0.0), (t - 300, 0.2), (t - 170, 0.25), (t - 10, 0.3)]
+            app._rate_base = None
+            rest = app._eta()
+            must(rest is not None and rest > 1500, f"прогноз по недавней скорости: {rest}")
+            app.status.configure(text="Шаг 2 из 3 · Озвучка - часть 1, 30 % · осталось ≈ 9 мин")
+            busy.lock_owner = lambda: "Понятный документ"
+            busy.lock_free = lambda: False
+            app._eta_refresh()
+            app.update()
+            must(app.busy_line.winfo_ismapped(), "строка «видеокарта занята» не появилась")
+            must("«Понятный документ»" in app.busy_note.cget("text"), app.busy_note.cget("text"))
+            must("осталось ≈" in app.status.cget("text") and "9 мин" not in app.status.cget("text"),
+                 f"прогноз не обновился: {app.status.cget('text')}")
+            app._wait_free()
+            must(app._pause_flag.is_set() and app._wait_lock, "«Подождать» не поставил паузу")
+            busy.lock_free = lambda: True
+            busy.lock_owner = lambda: None
+            must(pump(lambda: not app._pause_flag.is_set(), 15), "после снятия замка не продолжил")
+            app.update()
+            must(not app.busy_line.winfo_ismapped(), "строка занятости осталась")
+        finally:
+            busy.lock_owner, busy.lock_free = real_owner, real_free
+            app._set_busy(False)
+    check("прогноз по недавней скорости, «видеокарта занята», «Подождать»", busy_gpu, limit=40)
 
     def voice_manager():
         """Настройки → «Голоса»: скрыть / показать, скачать (с прогрессом), нет

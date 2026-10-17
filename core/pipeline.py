@@ -323,6 +323,7 @@ _ASR_MODEL = "small"          # core/asr: MLX на Mac, faster-whisper на Wind
 # распознаватель «дописывает» обрубленное по смыслу (урок 3.1).
 _ASR_FULL = "turbo"
 STRICT_WORDS = False          # 3.3: выключена - на слух выигрыша не дала, а время +50 %
+CLONE_ENGINES = ("f5mlx", "f5torch", "f5")   # темп - параметр движка только у клона
 SOUND_CHECK = True            # 3.3: проверка слов по звуку (core/align)
 EDGES_BY_SOUND = True         # 3.5: края куска у клона - по звуку, без Whisper
 WORD_RETRIES = 2
@@ -1375,6 +1376,11 @@ def convert_book(path: str, *, engine: str = "f5", eng_kwargs: dict | None = Non
     fx_chain = ""
     try:
         fx_chain = load_fx(default_voices_dir(), voice).filter_chain()
+        if engine not in CLONE_ENGINES:
+            # готовый голос: темп - после синтеза (у движка нет параметра темпа;
+            # до 3.7 книга голосом с сохранённым темпом падала - поймано стендом)
+            from .stream import with_tempo
+            fx_chain = with_tempo(fx_chain, load_fx(default_voices_dir(), voice).speed or 1.0)
     except Exception as e:
         log_problem(f"не прочитались настройки звучания голоса «{voice}», "
                     "книга будет без них", e)
@@ -1461,7 +1467,7 @@ def convert_book(path: str, *, engine: str = "f5", eng_kwargs: dict | None = Non
             say(0.05, _model_msg(engine, eng_kwargs))
             try:
                 vs = load_fx(default_voices_dir(), voice).speed
-                if vs != 1.0:
+                if vs != 1.0 and engine in CLONE_ENGINES:
                     eng_kwargs = dict(eng_kwargs,
                                       speed=eng_kwargs.get("speed", 1.0) * vs)
             except Exception as e:
@@ -1645,7 +1651,7 @@ def preview_sample(path: str, *, engine: str = "f5", eng_kwargs: dict | None = N
     try:
         from .engines.f5 import default_voices_dir
         vs = load_fx(default_voices_dir(), voice).speed
-        if vs != 1.0:
+        if vs != 1.0 and engine in CLONE_ENGINES:
             eng_kwargs = dict(eng_kwargs or {},
                               speed=(eng_kwargs or {}).get("speed", 1.0) * vs)
     except Exception as e:
