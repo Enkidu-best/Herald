@@ -28,7 +28,10 @@ import time
 import urllib.request
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PY = os.path.join(ROOT, ".venv", "bin", "python")
+# Python Herald: окружение проекта, если есть (как у Interview Coach), иначе текущий (CI)
+_VENV = os.path.join(ROOT, ".venv", "Scripts" if os.name == "nt" else "bin",
+                     "python.exe" if os.name == "nt" else "python")
+PY = _VENV if os.path.exists(_VENV) else sys.executable
 # то же выражение, что в Interview Coach (coach/herald.py, _FV)
 FV = re.compile(r'FastVoice\(\s*"([^"]+)",\s*"([^"]+)",\s*"([^"]*)",\s*"(\w\w)",\s*"(\w+)"')
 FAILED: list[str] = []
