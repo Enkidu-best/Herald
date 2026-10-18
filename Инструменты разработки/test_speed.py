@@ -50,7 +50,8 @@ def main() -> int:
         must(calls == n, f"«{p.title}»: вызовов сети {calls}")
     must(profiles.DEFAULT_PROFILE == "main" and "variant" not in profiles.get(None).kwargs,
          "по умолчанию - Misha на 12 шагах (выбор Андрея 15.10)")
-    must(set(profiles.PROFILES) == set(want), "32 шага в окно не выведены")
+    must({k for k, p in profiles.PROFILES.items() if p.engine.startswith("f5")} == set(want),
+         "32 шага в окно не выведены")
     must(not any(ch.isdigit() for p in profiles.PROFILES.values() for ch in p.title),
          "в названиях профилей нет цифр")
 

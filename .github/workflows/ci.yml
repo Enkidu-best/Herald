@@ -48,6 +48,8 @@ jobs:
         run: python "Инструменты разработки/test_stress.py"
       - name: Прогноз с кэшем и чтец в тегах (без модели)
         run: python "Инструменты разработки/test_forecast_cache.py"
+      - name: /speak для Interview Coach - как раньше (WAV 48 кГц, каталог голосов)
+        run: python "Инструменты разработки/scenario_speak.py"
       - name: Словарь интерфейса EN - нет пропущенных ключей
         run: python "Инструменты разработки/i18n_keys.py" --missing
       - name: Голоса - нет сети, Piper с pypi.org, Vosk, удаление
@@ -93,6 +95,8 @@ jobs:
         run: python "Инструменты разработки/test_stress.py"
       - name: Прогноз с кэшем и чтец в тегах (без модели)
         run: python "Инструменты разработки/test_forecast_cache.py"
+      - name: /speak для Interview Coach - как раньше (WAV 48 кГц, каталог голосов)
+        run: python "Инструменты разработки/scenario_speak.py"
       - name: Словарь интерфейса EN - нет пропущенных ключей
         run: python "Инструменты разработки/i18n_keys.py" --missing
       - name: Голоса - нет сети, Piper с pypi.org, Vosk, удаление

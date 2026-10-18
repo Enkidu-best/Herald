@@ -1443,7 +1443,10 @@ def _model_msg(engine: str, kw: dict | None) -> str:
 
 
 def _clone(eng) -> bool:
-    return str(getattr(eng, "name", "")).startswith("f5")
+    """Клон по образцу: F5 и (3.8) модели mlx-audio. Им - проверка слов и краёв по
+    звуку с пересчётом: Qwen ru-stress в слепом наборе 3.8 пропустил 3 фразы из 40."""
+    name = str(getattr(eng, "name", ""))
+    return name.startswith("f5") or name == "mlxaudio"
 
 
 def _prepare_sound_check(say, kw: dict | None) -> None:

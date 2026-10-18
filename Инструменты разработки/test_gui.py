@@ -216,11 +216,18 @@ def main() -> int:
 
     def profiles_switch():
         from core import profiles
-        must(list(profiles.PROFILES) == ["main", "espeech", "draft"], list(profiles.PROFILES))
-        must(len(app._profile_radios) == 3, "в Настройках не три движка")
+        f5 = [k for k, p in profiles.PROFILES.items() if p.engine.startswith("f5")]
+        must(f5 == ["main", "espeech", "draft"], list(profiles.PROFILES))
+        shown = [p for p in profiles.PROFILES.values() if profiles.available(p)]
+        must(len(app._profile_radios) == len(shown), "в Настройках не те движки")
         clone = next(v for v in app._voices if not v.ready)
         app.voice_var.set(clone.label())
-        for key in profiles.PROFILES:
+        # 3.8: Qwen ru-stress - свой движок (mlx-audio), виден только там, где может работать
+        if profiles.available(profiles.PROFILES["qwen"]):
+            app.profile_var.set("qwen")
+            app._on_profile()
+            must(app._eng_choice()[0] == "mlxaudio", f"Qwen: {app._eng_choice()}")
+        for key in f5:
             app.profile_var.set(key)
             app._on_profile()
             app.update()
@@ -248,7 +255,7 @@ def main() -> int:
         app.voice_var.set(clone.label())
         must(any(v.ready for v in app._voices) and any(not v.ready for v in app._voices),
              "в списке озвучки не все голоса")
-    check("три движка в Настройках (B16, C16, черновик), Silero - выбором голоса",
+    check("движки в Настройках (основной, ESpeech, черновик, Qwen там, где есть), Silero - выбором голоса",
           profiles_switch)
     app.voice_var.set(next(v.label() for v in app._voices if v.id == cfg_backup.get("voice"))
                       if any(v.id == cfg_backup.get("voice") for v in app._voices)
