@@ -27,11 +27,15 @@ import traceback
 
 _model = None
 _sr = 24000
+# ответы - в настоящий stdout; всё, что печатают сами библиотеки, - в stderr
+# (иначе их строки ломают протокол)
+_OUT = sys.stdout
+sys.stdout = sys.stderr
 
 
 def _reply(d: dict) -> None:
-    sys.stdout.write(json.dumps(d, ensure_ascii=False) + "\n")
-    sys.stdout.flush()
+    _OUT.write(json.dumps(d, ensure_ascii=False) + "\n")
+    _OUT.flush()
 
 
 def _load(model: str) -> dict:

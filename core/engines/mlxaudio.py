@@ -98,9 +98,12 @@ class MlxAudioEngine(TTSEngine):
         with self._lock:
             self._proc.stdin.write(json.dumps(d, ensure_ascii=False) + "\n")
             self._proc.stdin.flush()
-            line = self._proc.stdout.readline()
-        if not line:
-            raise RuntimeError("процесс mlx-audio завершился")
+            while True:
+                line = self._proc.stdout.readline()
+                if not line:
+                    raise RuntimeError("процесс mlx-audio завершился")
+                if line.startswith("{"):
+                    break                      # посторонние строки библиотек пропускаем
         r = json.loads(line)
         if not r.get("ok"):
             raise RuntimeError(f"mlx-audio: {r.get('error')}")
@@ -129,6 +132,12 @@ class MlxAudioEngine(TTSEngine):
                 p.kill()
         self._loaded = False
 
+    def _lang(self) -> str:
+        """Язык для модели: у Qwen и VoxCPM - слово, у Chatterbox - код."""
+        if self.model == "chatterbox":
+            return self.language or "ru"
+        return {"ru": "Russian", "en": "English"}.get(self.language, MODELS[self.model]["lang"])
+
     def _ref(self, voice: str) -> tuple[str, str]:
         from .f5 import default_voices_dir
         d = default_voices_dir()
@@ -150,7 +159,7 @@ class MlxAudioEngine(TTSEngine):
         out = tempfile.mktemp(suffix=".wav", prefix="herald_mlxa_")
         try:
             r = self._call({"op": "synth", "text": text, "out": out, "ref_audio": wav,
-                            "ref_text": ref_text, "lang": MODELS[self.model]["lang"],
+                            "ref_text": ref_text, "lang": self._lang(),
                             "seed": seed if seed is not None else self.seed, "stream": stream})
             self.last_stats = r
             a, _sr = sf.read(out, dtype="float32")

@@ -768,7 +768,7 @@ def speak(text: str, *, engine: str, voice: str, live: Live | None,
     opts = opts or P.ConvertOptions()
     lang = language or detect_language(text or "")
     kw = dict(eng_kwargs or {})
-    if engine in ("f5mlx", "f5", "f5torch") and "language" not in kw:
+    if engine in ("f5mlx", "f5", "f5torch", "mlxaudio") and "language" not in kw:
         kw["language"] = lang
     try:
         fx = load_fx(default_voices_dir(), voice)

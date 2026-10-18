@@ -48,6 +48,10 @@ PROFILES: dict[str, Profile] = {p.key: p for p in (
             {"steps": 12, "schedule": "epss", "variant": "espeech"}, rtf=1.4,
             hint="Почти так же хорош, чуть больше шума или металла. Лицензия "
                  "Apache-2.0 - можно и для продукта. Первый запуск скачивает 2,7 ГБ."),
+    Profile("qwen", "Qwen ru-stress (слушается ударений)", "mlxaudio",
+            {"model": "qwen-stress", "bits": 8}, rtf=0.95,
+            hint="Читает ударения так, как их ставит программа (о́тмель, ка́торжник). "
+                 "Новый, проверяется вашим слухом. Только Mac; модель - 2,9 ГБ."),
     Profile("draft", "Черновик", "f5mlx",
             {"steps": 7, "schedule": "epss"}, rtf=0.85,
             hint="Быстрее, но с шумом и металлическим призвуком. Для проверки текста "
@@ -116,6 +120,19 @@ def engine_kwargs(p: Profile, quality_key: str | None = None) -> dict:
 def rtf_for(p: Profile, accel: str, quality_key: str | None = None) -> float:
     mul = quality(quality_key).rtf_mul if p.clone and p.kwargs.get("steps") == 12 else 1.0
     return p.rtf * mul * ACCEL_MUL.get(accel, 1.0)
+
+
+def available(p: Profile) -> bool:
+    """Можно ли выбрать профиль на этом компьютере (Qwen - только Mac с моделью)."""
+    if p.engine != "mlxaudio":
+        return True
+    try:
+        import os
+        from .engines.mlxaudio import available as venv_ok, model_path
+        return venv_ok() and os.path.exists(os.path.join(
+            model_path(p.kwargs.get("model", "qwen-stress"), p.kwargs.get("bits", 8)), "config.json"))
+    except Exception:
+        return False
 
 
 def get(key: str | None) -> Profile:

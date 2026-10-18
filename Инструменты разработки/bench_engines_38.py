@@ -85,12 +85,21 @@ def synth(a) -> int:
                 p = wav_path(name, voice, i)
                 if _os.path.exists(p):
                     continue
-                if name == "f5":
-                    mx.random.seed(SEED + i)
-                    au = eng.synth_batch([t], voice)[0]
-                else:
-                    au = eng.synth_chunk(t, voice, seed=SEED + i)
-                sf.write(p, au, eng.sample_rate)
+                # длинный абзац - кусками, как в программе (паузы как в книге)
+                import core.pipeline as P
+                pieces = (P._chunk_paragraphs(t, eng.max_chunk_chars, 0.4, 0.8, 1.1)
+                          if len(t) > eng.max_chunk_chars else [(t, 0.0, 1.0, ())])
+                parts = []
+                for k, pc in enumerate(pieces):
+                    txt = P._with_end_punct(pc[0])
+                    if name == "f5":
+                        mx.random.seed(SEED + i * 10 + k)
+                        au = eng.synth_batch([txt], voice)[0]
+                    else:
+                        au = eng.synth_chunk(txt, voice, seed=SEED + i * 10 + k)
+                    parts += [np.asarray(au, np.float32),
+                              np.zeros(int(pc[1] * eng.sample_rate), np.float32)]
+                sf.write(p, np.concatenate(parts), eng.sample_rate)
                 print(f"{name} / {voice}: {i + 1}/{len(texts)}", flush=True)
         if hasattr(eng, "close"):
             eng.close()

@@ -930,7 +930,7 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
             fill="x", pady=(2, 8))
         self.profile_var = ctk.StringVar(value=profiles.get(self.cfg.get("profile")).key)
         self._profile_radios = []
-        for p in profiles.PROFILES.values():
+        for p in [x for x in profiles.PROFILES.values() if profiles.available(x)]:
             line = ctk.CTkFrame(b, fg_color="transparent")
             line.pack(fill="x", pady=(8, 0))
             r = ctk.CTkRadioButton(line, text=_(p.title), value=p.key, variable=self.profile_var,
@@ -1795,7 +1795,7 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
             kw = dict(self._prof_kwargs(), speed=fx.speed)
             if lang != "ru":
                 kw.pop("variant", None)
-            engine, text = clone_engine(), self.FX_PHRASE.get(lang, self.FX_PHRASE["ru"])
+            engine, text = self._clone_engine_for(), self.FX_PHRASE.get(lang, self.FX_PHRASE["ru"])
 
         def done(audio, sr):
             if audio is None or not len(audio):
@@ -2459,7 +2459,7 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         kw = self._prof_kwargs()
         if lang != "ru":
             kw.pop("variant", None)
-        return clone_engine(), kw, vid, lang, hint
+        return self._clone_engine_for(), kw, vid, lang, hint
 
     def _say_speed(self, engine, kw, vid):
         prior = (profiles.SILERO.rtf if not _clone_engine(engine)
@@ -2661,7 +2661,7 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
                 self.prof_note.configure(text=_("У ESpeech только русский голос"))
                 return
         text = self.FX_PHRASE.get(v.language, self.FX_PHRASE["ru"])
-        self._speak_job(kind, text, clone_engine(), kw, v.id, prepared=True,
+        self._speak_job(kind, text, self._clone_engine_for(p), kw, v.id, prepared=True,
                         note=self.prof_note)
 
     # --- озвучка для других программ ---
@@ -2988,7 +2988,12 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         kw = self._prof_kwargs()
         if v is not None and v.language != "ru":
             kw.pop("variant", None)
-        return clone_engine(), kw
+        return self._clone_engine_for(), kw
+
+    def _clone_engine_for(self, p: profiles.Profile | None = None) -> str:
+        """Движок клона по профилю: Qwen ru-stress - свой (mlx-audio, 3.8 / 10а)."""
+        p = p or self.profile()
+        return "mlxaudio" if p.engine == "mlxaudio" else clone_engine()
 
     # совместимость с тестами и CLI
     def _eng_kwargs(self) -> dict:

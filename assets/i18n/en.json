@@ -340,6 +340,8 @@
  "Удалить…": "Delete…",
  "Подсвечены слова, где два расстановщика ударений (RUAccent и silero-stress) разошлись: {0}.": "Highlighted are words where the two stress tools (RUAccent and silero-stress) disagree: {0}.",
  "Проверяю, как модель ставит ударения (один раз для модели, ~3 мин)…": "Checking how the model places stress (once per model, ~3 min)…",
+ "Qwen ru-stress (слушается ударений)": "Qwen ru-stress (follows stress marks)",
+ "Читает ударения так, как их ставит программа (о́тмель, ка́торжник). Новый, проверяется вашим слухом. Только Mac; модель - 2,9 ГБ.": "Reads Russian stress exactly as the app marks it. New, being checked by your ear. Mac only; the model is 2.9 GB.",
  "__patterns__": {
   "Скачиваю движок Piper…": "Downloading the Piper engine…",
   "Озвучено глав: (\\d+) из (\\d+)": "Chapters done: \\1 of \\2",

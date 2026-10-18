@@ -1374,7 +1374,7 @@ def resume_info(path: str, *, engine: str, eng_kwargs: dict, voice: str,
         if not st or st.get("finished"):
             return None
         kw = dict(eng_kwargs)
-        if engine in ("f5mlx", "f5", "f5torch") and "language" not in kw and language:
+        if engine in ("f5mlx", "f5", "f5torch", "mlxaudio") and "language" not in kw and language:
             kw["language"] = language
         if st.get("fingerprint") != settings_fingerprint(engine, kw, voice, options):
             return None
@@ -1493,7 +1493,7 @@ def convert_book(path: str, *, engine: str = "f5", eng_kwargs: dict | None = Non
     out_dir = out_dir or os.path.dirname(os.path.abspath(path))
     # язык книги выбирает и модель синтеза, и нужны ли ударения
     doc_lang = detect_language(read_document(path).text or "")
-    if engine in ("f5mlx", "f5", "f5torch") and "language" not in eng_kwargs:
+    if engine in ("f5mlx", "f5", "f5torch", "mlxaudio") and "language" not in eng_kwargs:
         eng_kwargs = dict(eng_kwargs, language=doc_lang)
     meta = get_engine(engine, **eng_kwargs)      # без загрузки модели: только метаданные
     sr = meta.sample_rate
@@ -1808,7 +1808,7 @@ def preview_sample(path: str, *, engine: str = "f5", eng_kwargs: dict | None = N
         ch = max(chapters, key=lambda c: len(c.text))
 
     doc_lang = detect_language(doc.text or "")
-    if engine in ("f5mlx", "f5", "f5torch") and "language" not in (eng_kwargs or {}):
+    if engine in ("f5mlx", "f5", "f5torch", "mlxaudio") and "language" not in (eng_kwargs or {}):
         eng_kwargs = dict(eng_kwargs or {}, language=doc_lang)
     say(0.05, _model_msg(engine, eng_kwargs))
     # темп голоса подмешиваем в параметры, иначе кэш отдаст движок с прошлым
