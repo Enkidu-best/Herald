@@ -49,6 +49,31 @@ def _load(model: str) -> dict:
             "mem_gb": round(mx.get_active_memory() / 1e9, 2)}
 
 
+_orig_spk = None
+
+
+def _centroid(d: dict) -> dict:
+    """Средний вектор голоса по фрагментам (папка wav 24 кГц) вместо вектора образца
+    (3.9: голос ровнее). {"dir": None} - вернуть обычный."""
+    global _orig_spk
+    import glob as _g
+    import mlx.core as mx
+    from mlx_audio.utils import load_audio
+    if _orig_spk is None:
+        _orig_spk = _model.extract_speaker_embedding
+    if not d.get("dir"):
+        _model.extract_speaker_embedding = _orig_spk
+        return {"n": 0}
+    embs = []
+    for f in sorted(_g.glob(d["dir"] + "/*.wav")):
+        a = load_audio(f, sample_rate=24000)
+        embs.append(_orig_spk(a[None] if a.ndim == 1 else a))
+    c = mx.mean(mx.concatenate(embs, axis=0), axis=0, keepdims=True)
+    mx.eval(c)
+    _model.extract_speaker_embedding = lambda audio, sr=24000, _c=c: _c
+    return {"n": len(embs)}
+
+
 def _kwargs(fn, d: dict) -> dict:
     """Параметры, которые эта модель понимает (у моделей mlx-audio они разные)."""
     try:
@@ -109,6 +134,8 @@ def main() -> int:
                 return 0
             if op == "load":
                 _reply({"ok": True, **_load(d["model"])})
+            elif op == "centroid":
+                _reply({"ok": True, **_centroid(d)})
             elif op == "synth":
                 _reply({"ok": True, **_synth(d)})
             else:

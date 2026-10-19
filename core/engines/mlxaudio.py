@@ -58,10 +58,24 @@ def available() -> bool:
     return os.path.exists(VENV_PY)
 
 
+_VOW = "аеёиоуыэюяАЕЁИОУЫЭЮЯ"
+
+
+def strip_short(text: str) -> str:
+    """Без знака ударения у односложных слов: «н+а борт+у» -> «на борт+у». Два знака
+    подряд («на́ борту́») ru-stress сдвигает («на бАрту»); замер 3.9 на 50 трудных
+    словах: 45 -> 48 верных по звуку (meter2)."""
+    import re
+    return re.sub(r"[А-Яа-яЁё+]+",
+                  lambda m: m.group(0).replace("+", "") if sum(c in _VOW for c in m.group(0)) <= 1
+                  else m.group(0), text)
+
+
 def plus_to_acute(text: str) -> str:
-    """«з+амок» -> «за́мок»: U+0301 после ударной гласной (так учили ru-stress)."""
+    """«з+амок» -> «за́мок»: U+0301 после ударной гласной (так учили ru-stress);
+    у односложных слов знака нет (strip_short)."""
     from ..stress import to_combining
-    return to_combining(text)
+    return to_combining(strip_short(text))
 
 
 class MlxAudioEngine(TTSEngine):
@@ -72,7 +86,8 @@ class MlxAudioEngine(TTSEngine):
     max_chunk_chars = 300
 
     def __init__(self, model: str = "qwen-stress", bits: int = 8, language: str = "ru",
-                 seed: int | None = None, **_kw) -> None:
+                 seed: int | None = None, centroid: str | None = None,
+                 temperature: float | None = None, top_p: float | None = None, **_kw) -> None:
         super().__init__()
         self.model = model
         self.bits = bits
@@ -82,6 +97,11 @@ class MlxAudioEngine(TTSEngine):
         self._proc = None
         self._lock = threading.Lock()
         self.last_stats: dict = {}
+        # 3.9: одно зерно на всю книгу (голос ровнее); повтор того же текста (пересчёт)
+        # - следующее зерно, иначе пересчёт дал бы тот же звук
+        self._calls: dict[str, int] = {}
+        self.centroid = centroid          # папка фрагментов чтеца - средний вектор голоса
+        self.extra = {k: v for k, v in (("temperature", temperature), ("top_p", top_p)) if v is not None}
         if MODELS[model]["stress"] is None:
             self.stress_format = None     # «+» модель прочитала бы вслух
 
@@ -91,7 +111,8 @@ class MlxAudioEngine(TTSEngine):
         return F5Engine().list_voices()
 
     def cache_key(self) -> str:
-        return f"mlxaudio|{self.model}|{model_path(self.model, self.bits)}|{self.bits}"
+        return (f"mlxaudio|{self.model}|{model_path(self.model, self.bits)}|{self.bits}|"
+                f"{self.seed}|{self.centroid}|{sorted(self.extra.items())}")
 
     # --- процесс ---
     def _call(self, d: dict) -> dict:
@@ -120,6 +141,8 @@ class MlxAudioEngine(TTSEngine):
         r = self._call({"op": "load", "model": model_path(self.model, self.bits)})
         self.sample_rate = int(r["sr"])
         self.load_stats = r
+        if self.centroid:
+            self._call({"op": "centroid", "dir": self.centroid})
 
     def close(self) -> None:
         p, self._proc = self._proc, None
@@ -140,9 +163,12 @@ class MlxAudioEngine(TTSEngine):
 
     def _ref(self, voice: str) -> tuple[str, str]:
         from .f5 import default_voices_dir
-        d = default_voices_dir()
-        wav = os.path.join(d, voice + ".wav")
-        txt = os.path.join(d, voice + ".txt")
+        if voice.endswith(".wav") and os.path.isabs(voice):        # образец по пути (3.9)
+            wav, txt = voice, voice[:-4] + ".txt"
+        else:
+            d = default_voices_dir()
+            wav = os.path.join(d, voice + ".wav")
+            txt = os.path.join(d, voice + ".txt")
         ref_text = open(txt, encoding="utf-8").read().replace("+", "").strip() \
             if os.path.exists(txt) else None
         return wav, ref_text
@@ -158,9 +184,13 @@ class MlxAudioEngine(TTSEngine):
         wav, ref_text = self._ref(voice)
         out = tempfile.mktemp(suffix=".wav", prefix="herald_mlxa_")
         try:
+            if seed is None and self.seed is not None:
+                k = self._calls.get(text, 0)
+                self._calls[text] = k + 1
+                seed = self.seed + 1000 * k
             r = self._call({"op": "synth", "text": text, "out": out, "ref_audio": wav,
-                            "ref_text": ref_text, "lang": self._lang(),
-                            "seed": seed if seed is not None else self.seed, "stream": stream})
+                            "ref_text": ref_text, "lang": self._lang(), "seed": seed,
+                            "stream": stream, "extra": self.extra})
             self.last_stats = r
             a, _sr = sf.read(out, dtype="float32")
         finally:

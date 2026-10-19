@@ -2,6 +2,7 @@
 .venv/
 .venv-candidates/
 .venv-mlxaudio/
+.venv-train/
 __pycache__/
 *.pyc
 .DS_Store

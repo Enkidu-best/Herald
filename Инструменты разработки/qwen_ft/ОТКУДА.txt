@@ -1,0 +1,3 @@
+Файлы из QwenLM/Qwen3-TTS (finetuning/), лицензия Apache-2.0 - без изменений:
+  dataset.py - сборка примеров для дообучения (текст, коды звука, мел образца).
+Источник: https://github.com/QwenLM/Qwen3-TTS/tree/main/finetuning

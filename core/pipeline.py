@@ -54,13 +54,25 @@ def _loaded_engine(engine_id: str, eng_kwargs: dict) -> TTSEngine:
         big = engine_id in ("f5mlx", "f5torch", "f5")
         for k in [k for k in _ENGINE_CACHE if (k[0] in ("f5mlx", "f5torch", "f5")) == big
                   and (big or k[0] == engine_id)]:
-            del _ENGINE_CACHE[k]
+            _close(_ENGINE_CACHE.pop(k))
         _ENGINE_CACHE[key] = eng
     return eng
 
 
+def _close(eng) -> None:
+    """Движок в отдельном процессе (mlx-audio, 3.8) - остановить процесс, иначе модель
+    так и висит в памяти."""
+    if hasattr(eng, "close"):
+        try:
+            eng.close()
+        except Exception:
+            pass
+
+
 def unload_engines() -> None:
     """Выгрузить модели (сервис после простоя)."""
+    for eng in list(_ENGINE_CACHE.values()):
+        _close(eng)
     _ENGINE_CACHE.clear()
     import gc
     gc.collect()
