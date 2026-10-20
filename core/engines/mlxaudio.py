@@ -87,7 +87,8 @@ class MlxAudioEngine(TTSEngine):
 
     def __init__(self, model: str = "qwen-stress", bits: int = 8, language: str = "ru",
                  seed: int | None = None, centroid: str | None = None,
-                 temperature: float | None = None, top_p: float | None = None, **_kw) -> None:
+                 temperature: float | None = None, top_p: float | None = None,
+                 max_chars: int | None = None, **_kw) -> None:
         super().__init__()
         self.model = model
         self.bits = bits
@@ -101,6 +102,8 @@ class MlxAudioEngine(TTSEngine):
         # - следующее зерно, иначе пересчёт дал бы тот же звук
         self._calls: dict[str, int] = {}
         self.centroid = centroid          # папка фрагментов чтеца - средний вектор голоса
+        if max_chars:                     # длиннее кусок - живее интонация (замер 3.9)
+            self.max_chunk_chars = int(max_chars)
         self.extra = {k: v for k, v in (("temperature", temperature), ("top_p", top_p)) if v is not None}
         if MODELS[model]["stress"] is None:
             self.stress_format = None     # «+» модель прочитала бы вслух

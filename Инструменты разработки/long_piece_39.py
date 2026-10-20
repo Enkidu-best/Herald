@@ -30,7 +30,9 @@ VOICES = {
     "01": (_os.path.abspath(f"{BANK}/образцы/Голос 06.wav"), None),
     "02": (_os.path.abspath(f"{BANK}/образцы/Голос 05.wav"), None),
     "03": (_os.path.abspath(f"{BANK}/образцы/Голос 03.wav"), None),
-    "05": ("Вячеслав Герасимов", _os.path.abspath(f"{BANK}/фрагменты/Вячеслав Герасимов")),
+    # Герасимову - «живой» образец (размах тона 9,1 -> 14,2 полутона на абзаце, п. 3)
+    "05": (_os.path.abspath(f"{BANK}/интонация/живой образец - Вячеслав Герасимов.wav"),
+           _os.path.abspath(f"{BANK}/фрагменты/Вячеслав Герасимов")),
     "06": ("Игорь Ященко", _os.path.abspath(f"{BANK}/фрагменты/Игорь Ященко")),
 }
 
@@ -66,13 +68,16 @@ def main() -> int:
     stats = {}
     for num in _sys.argv[1:] or list(VOICES):
         voice, centroid = VOICES[num]
-        work = _os.path.join(BANK, "длинный кусок", f"Голос {num}")
+        work = _os.path.abspath(_os.path.join(BANK, "длинный кусок", f"Голос {num}"))  # как в окне - путь целиком
         shutil.rmtree(work, ignore_errors=True)
-        kw = {"model": "qwen-stress", "bits": 8, "seed": 7}
+        # п. 3: кусок до 600 знаков и temperature 1,0 / top_p 0,95 - живее и без потерь слов
+        kw = {"model": "qwen-stress", "bits": 8, "seed": 7, "max_chars": 600,
+              "temperature": 1.0, "top_p": 0.95}
         if centroid:
             kw["centroid"] = centroid
         opts = P.ConvertOptions(use_cache=False, single_file=True, minutes_per_file=60,
-                                make_m4b=False, make_chapter_mp3=True, sound_check=True)
+                                make_m4b=False, make_chapter_mp3=True, sound_check=True,
+                                narrator=f"Голос {num}")
         t0 = time.time()
         res = P.convert_book(src, engine="mlxaudio", eng_kwargs=kw, voice=voice, out_dir=work, options=opts)
         took = time.time() - t0
