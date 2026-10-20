@@ -58,6 +58,23 @@ def available() -> bool:
     return os.path.exists(VENV_PY)
 
 
+def own_voices_dir() -> str:
+    """Свои голоса ru-stress («Диктор 1-3», 11а): образцы из её же записей - их
+    видит только этот движок (F5 такой образец не нужен). Голоса для личного
+    использования: в git и в установщик не входят, кладёт их
+    «Инструменты разработки/install_dictors_11a.py»."""
+    from .f5 import default_voices_dir
+    return os.path.join(default_voices_dir(), "qwen")
+
+
+def own_voices() -> list[str]:
+    d = own_voices_dir()
+    if not os.path.isdir(d):
+        return []
+    return sorted(f[:-4] for f in os.listdir(d)
+                  if f.endswith(".wav") and os.path.isfile(os.path.join(d, f[:-4] + ".txt")))
+
+
 _VOW = "аеёиоуыэюяАЕЁИОУЫЭЮЯ"
 
 
@@ -108,10 +125,11 @@ class MlxAudioEngine(TTSEngine):
         if MODELS[model]["stress"] is None:
             self.stress_format = None     # «+» модель прочитала бы вслух
 
-    # --- голоса: те же образцы, что у F5 ---
+    # --- голоса: свои голоса модели («Диктор 1-3», 11а), затем образцы F5 ---
     def list_voices(self) -> list[Voice]:
         from .f5 import F5Engine
-        return F5Engine().list_voices()
+        own = [Voice(n, n, "", "ru") for n in own_voices()]
+        return own + [v for v in F5Engine().list_voices() if v.id not in set(own_voices())]
 
     def cache_key(self) -> str:
         return (f"mlxaudio|{self.model}|{model_path(self.model, self.bits)}|{self.bits}|"
@@ -169,7 +187,7 @@ class MlxAudioEngine(TTSEngine):
         if voice.endswith(".wav") and os.path.isabs(voice):        # образец по пути (3.9)
             wav, txt = voice, voice[:-4] + ".txt"
         else:
-            d = default_voices_dir()
+            d = own_voices_dir() if voice in own_voices() else default_voices_dir()
             wav = os.path.join(d, voice + ".wav")
             txt = os.path.join(d, voice + ".txt")
         ref_text = open(txt, encoding="utf-8").read().replace("+", "").strip() \

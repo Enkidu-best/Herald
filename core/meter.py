@@ -64,9 +64,10 @@ def marked_index(word_with_mark: str) -> int:
 
 
 def wrong_words(audio, sr: int, text_marked: str, only: set[str] | None = None,
-                min_margin: float = 0.3) -> list[str]:
+                min_margin: float = 0.3, timed: bool = False) -> list:
     """Слова, где ударение по звуку не там, где в тексте («+» или U+0301).
-    only - проверять только эти слова (без ударения, нижний регистр)."""
+    only - проверять только эти слова (без ударения, нижний регистр);
+    timed - [(слово, начало в записи, с)] вместо [слово] (11а, п. 5)."""
     import re
     marked = [w for w in re.findall(r"[А-Яа-яЁё+́]+(?:-[А-Яа-яЁё+́]+)*", text_marked)]
     res = judge(audio, sr, text_marked)
@@ -82,5 +83,5 @@ def wrong_words(audio, sr: int, text_marked: str, only: set[str] | None = None,
         if only is not None and plain not in only:
             continue
         if r["best"] != marked_index(m) and (r.get("margin") or 0) >= min_margin:
-            out.append(m)
+            out.append((m, float(r.get("start") or 0.0)) if timed else m)
     return out

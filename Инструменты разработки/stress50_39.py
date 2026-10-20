@@ -69,7 +69,11 @@ def main() -> int:
         else:
             chunks.append([r])
     conds = _sys.argv[1:] or ["A", "B", "C"]
-    eng = MlxAudioEngine(model="qwen-stress", bits=8, seed=7)
+    # 11а: настройки движка по умолчанию (профиль qwen), зерно - SEED (три прогона подряд)
+    from core.profiles import PROFILES, engine_kwargs
+    kw = engine_kwargs(PROFILES["qwen"])
+    kw["seed"] = int(_os.environ.get("SEED", kw.get("seed") or 7))
+    eng = MlxAudioEngine(**kw)
     eng.ensure_loaded()
     res = {}
     _os.makedirs(OUT, exist_ok=True)
@@ -92,7 +96,7 @@ def main() -> int:
     res["разметка неверна"] = [f"{w}: {got} вместо {t}" for _ci, w, t, got in wrong]
     print("разметка текста верна:", res["разметка текста верна"], flush=True)
     for cond in conds:
-        ok, n, retries = 0, 0, 0
+        ok, n, retries, wrong = 0, 0, 0, []
         for ci, (ch, mt) in enumerate(zip(chunks, marked)):
             text = strip_short(mt) if cond in ("B", "C", "D") else mt
             if cond == "D":
@@ -119,9 +123,13 @@ def main() -> int:
                                                                           min_margin=0.0)}
             ok += len(words - bad)
             n += len(words)
-        res[cond] = {"верно": ok, "из": n, "пересчётов": retries}
+            wrong += sorted(bad)
+        res[cond] = {"верно": ok, "из": n, "пересчётов": retries, "не так": wrong}
         print(f"{cond}: ударение верно {ok} из {n}, пересчётов {retries}", flush=True)
     eng.close()
+    tag = _os.environ.get("RUN")
+    if tag:                                   # 11а: прогоны подряд - под своими именами
+        res = {f"{k} {tag}" if k in conds else k: v for k, v in res.items()}
     path = _os.path.join(OUT, "итог.json")
     old = json.load(open(path, encoding="utf-8")) if _os.path.exists(path) else {}
     old.update(res)

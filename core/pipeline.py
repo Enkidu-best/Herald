@@ -835,6 +835,40 @@ def _prefetch_pool():
     return _PREFETCH
 
 
+def _note_stress_doubt(st: dict, audio: np.ndarray, sr: int, text: str, start: float) -> None:
+    """Ударение по звуку не там и после пересчётов (11а, п. 5): слово и время в записи
+    части - в список книги «ударения под сомнением» (делать ничего не нужно)."""
+    try:
+        from . import meter
+        for w, t in meter.wrong_words(audio, sr, text, timed=True):
+            st.setdefault("stress_doubt", []).append((round(start + t, 1), w.replace("+", "")))
+    except Exception as e:
+        log_problem("время сомнительного ударения не записалось", e, show=False)
+
+
+STRESS_DOUBT_FILE = "ударения под сомнением.txt"
+
+
+def save_stress_doubt(book_dir: str, part: int, title: str, doubt: list, book_start: float) -> None:
+    """Дописать в _служебное/ строки «Часть NN, мм:сс (от начала книги ч:мм:сс) - слово»."""
+    if not doubt:
+        return
+    def hms(x):
+        x = int(x)
+        return f"{x // 3600}:{x % 3600 // 60:02d}:{x % 60:02d}" if x >= 3600 else f"{x // 60}:{x % 60:02d}"
+    try:
+        d = os.path.join(book_dir, SERVICE_DIR)
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, STRESS_DOUBT_FILE), "a", encoding="utf-8") as f:
+            for t, w in doubt:
+                f.write(f"Часть {part:02d}{' (' + title + ')' if title else ''}, {hms(t)} "
+                        f"(от начала книги {hms(book_start + t)}) - {w}\n")
+        log_info(f"часть {part}: ударение под сомнением после пересчётов - "
+                 + ", ".join(f"{w} ({hms(t)})" for t, w in doubt[:20]))
+    except OSError as e:
+        log_problem("список сомнительных ударений не записался", e, show=False)
+
+
 def _synth_chunks(eng: TTSEngine, voice: str, chunks, sr: int,
                   gap_sec: float, on_chunk=None, should_stop=None,
                   lang: str = "ru", pause_gate=None, batch_size: int | None = None,
@@ -926,6 +960,7 @@ def _synth_chunks(eng: TTSEngine, voice: str, chunks, sr: int,
         for i in idx:
             cost[i] = cost.get(i, 0.0) + dt
 
+    stress_left: set[int] = set()       # ударение не там и после пересчётов (п. 5 11а)
     pool = _prefetch_pool()
     fut = None
     for gi, g in enumerate(groups):
@@ -1106,6 +1141,8 @@ def _synth_chunks(eng: TTSEngine, voice: str, chunks, sr: int,
             st["bad_words"] = st.get("bad_words", 0) + len(bad)
             if bad:
                 st.setdefault("bad_list", []).extend(bad)
+            if meter_on and any(b.endswith(STRESS_TAG) for b in bad):
+                stress_left.add(i)
         for i in g:
             audio, _w, cached, _r = got[i]
             if not cached and len(audio):
@@ -1118,6 +1155,9 @@ def _synth_chunks(eng: TTSEngine, voice: str, chunks, sr: int,
                 audio, nfit = _fit_inner_pauses(audio, sr, texts[i], items[i][3], heard[i])
                 st["pauses_fit"] += nfit
                 joiner.add(audio, items[i][1], cost.get(i))
+                if i in stress_left:
+                    _note_stress_doubt(st, audio, sr, texts[i],
+                                       sum(len(x) for x in joiner.out) / sr - len(audio) / sr)
             if on_chunk:
                 on_chunk()
             if live is not None and live.should_stop():
@@ -1253,6 +1293,23 @@ def save_disputed(book_dir: str, words) -> None:
         log_problem("не записались спорные ударения", e, show=False)
 
 
+DECISIONS_FILE = "ударения книги.json"
+
+
+def save_decisions(book_dir: str) -> None:
+    """п. 4 11а: спорные формы книги и как они решены (словарь) - один раз на
+    книгу, для просмотра и сверки; сами решения уже в тексте частей."""
+    from .stress import take_decisions
+    dec = take_decisions()
+    try:
+        d = os.path.join(book_dir, SERVICE_DIR)
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, DECISIONS_FILE), "w", encoding="utf-8") as f:
+            json.dump(dict(sorted(dec.items())), f, ensure_ascii=False, indent=1)
+    except OSError as e:
+        log_problem("ударения книги не записались", e, show=False)
+
+
 def read_disputed(path: str, out_dir: str | None = None) -> list[str]:
     """Спорные слова книги (после озвучки или «Как будет прочитано»)."""
     try:
@@ -1265,8 +1322,9 @@ def read_disputed(path: str, out_dir: str | None = None) -> list[str]:
 def prepare_read_text(path: str, opts: "ConvertOptions") -> str:
     """«Как будет прочитано» без озвучки: та же подготовка, что в convert_book.
     Спорные ударения (RUAccent против silero-stress) - в _служебное/."""
-    from .stress import take_disputed
+    from .stress import take_disputed, take_decisions
     take_disputed()
+    take_decisions()
     doc = read_document(path)
     chapters = build_chapters(doc, opts.minutes_per_file)
     lang = detect_language(doc.text or " ".join(c.text for c in chapters[:3]))
@@ -1281,6 +1339,7 @@ def prepare_read_text(path: str, opts: "ConvertOptions") -> str:
                    + "\n".join(_with_end_punct(c[0]) for c in chunks) + "\n")
     try:
         save_disputed(output_dir_for(path), take_disputed())
+        save_decisions(output_dir_for(path))
     except Exception as e:
         log_problem("спорные ударения не сохранились", e, show=False)
     return "\n".join(out)
@@ -1525,8 +1584,9 @@ def convert_book(path: str, *, engine: str = "f5", eng_kwargs: dict | None = Non
         raise ReaderError("Не удалось извлечь текст из файла.")
 
     say(0.04, "Готовлю текст (числа, ударения)…")
-    from .stress import take_disputed
+    from .stress import take_disputed, take_decisions
     take_disputed()
+    take_decisions()
     # заголовок уже стоит первой строкой в ch.text (см. chapters.py), отдельно
     # его добавлять нельзя — иначе название прочитается дважды
     bodies = [_prepare_text(ch.text, stress_fmt, opts.expand_numbers,
@@ -1565,6 +1625,11 @@ def convert_book(path: str, *, engine: str = "f5", eng_kwargs: dict | None = Non
     os.makedirs(book_dir, exist_ok=True)
     save_read_text(book_dir, prepared)
     save_disputed(book_dir, take_disputed())
+    save_decisions(book_dir)
+    try:                            # список прошлого прогона - заново (п. 5 11а)
+        os.remove(os.path.join(book_dir, SERVICE_DIR, STRESS_DOUBT_FILE))
+    except OSError:
+        pass
     save_chunk_list(book_dir, prepared, opts.gap_sec, path)
     mp3_dir = book_dir if opts.make_chapter_mp3 else None
     # сырые части — в «.herald» рядом с результатом (см. «продолжение после сбоя»)
@@ -1694,6 +1759,8 @@ def convert_book(path: str, *, engine: str = "f5", eng_kwargs: dict | None = Non
                                           stats=stats)
                 spent = time.monotonic() - t0 - (paused[0] - p0)
                 fresh = stats.get("fresh_sec", 0) - f0
+                save_stress_doubt(book_dir, ci, title, stats.pop("stress_doubt", []),
+                                  sum(r.duration for k, r in rendered.items() if k < ci))
                 if fresh > 5:
                     rtf = spent / fresh
                     log_info(f"часть {ci}: RTF {rtf:.2f} (счёт {spent:.0f} с на "

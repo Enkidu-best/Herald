@@ -143,6 +143,29 @@ def _restore_case(src: str, out: str) -> str:
     return "".join(res) if j == len(src) else out
 
 
+# 11а, п. 1: размечать по одному предложению. Раньше RUAccent получал главу целиком
+# после _lower_titles, а предложения он находит по заглавной букве после точки - и
+# 55 предложений главы склеивались в 8 «предложений» до 2 500 знаков: модели
+# падали на 512 токенах, омограф решался по обрезанному тексту («к Мал+ому
+# Доминиону», хотя в одном предложении RUAccent уверенно ставит «м+алому»).
+BY_SENTENCE = True
+# Соседние предложения - контекст для выбора омографа (знаки - только своему).
+# Выключено замером 11а: на 50 и 300 словах ничего не дало, а в длинном куске
+# 3.9 предыдущая фраза сбила «Св+язи требует» на «Связ+и».
+NEIGHBORS = False
+CTX_CHARS = 300
+_CTX = {"before": "", "after": ""}
+
+
+def sentences(text: str) -> list[tuple[int, int]]:
+    """Границы предложений (по исходному регистру - так их видит razdel)."""
+    try:
+        from razdel import sentenize
+        return [(s.start, s.stop) for s in sentenize(text)]
+    except Exception:
+        return [(m.start(), m.end()) for m in re.finditer(r"[^.!?…\n]+[.!?…]*", text)]
+
+
 def add_stress(text: str) -> str:
     """Вернуть текст с ударениями ('+' перед ударной гласной). При сбое - как есть."""
     if not text or not text.strip():
@@ -150,6 +173,8 @@ def add_stress(text: str) -> str:
     acc = _get_accentizer()
     if acc is None:
         return text
+    if BY_SENTENCE:
+        return _fix_dialog_dash(_by_sentence(text, lambda s, low, b, a: _ruaccent_one(acc, s, low)))
     try:
         return _fix_dialog_dash(_restore_case(text, acc.process_all(_lower_titles(text))))
     except Exception as e:
@@ -170,6 +195,42 @@ def add_stress(text: str) -> str:
         if lost:
             log_problem(f"без ударений осталось фраз: {lost}", None, show=True)
         return _fix_dialog_dash(" ".join(out))
+
+
+def _by_sentence(text: str, one) -> str:
+    """one(предложение, оно же строчными, до, после) -> размеченное предложение;
+    промежутки между предложениями (пробелы, переносы абзацев) - как были."""
+    spans = sentences(text)
+    low = [_lower_titles(text[a:b]) for a, b in spans]
+    out, pos = [], 0
+    for i, (a, b) in enumerate(spans):
+        out.append(text[pos:a])
+        before = low[i - 1][-CTX_CHARS:] if i and NEIGHBORS else ""
+        after = low[i + 1][:CTX_CHARS] if i + 1 < len(spans) and NEIGHBORS else ""
+        _CTX["before"], _CTX["after"] = before, after
+        try:
+            out.append(one(text[a:b], low[i], before, after))
+        finally:
+            _CTX["before"] = _CTX["after"] = ""
+        pos = b
+    out.append(text[pos:])
+    return "".join(out)
+
+
+def _ruaccent_one(acc, src: str, low: str) -> str:
+    """Одно предложение через RUAccent. Сверхдлинное (больше 512 токенов) - по
+    частям между запятыми; не вышло - без ударений, с записью в журнал."""
+    try:
+        return _restore_case(src, acc.process_all(low))
+    except Exception as e:
+        parts = re.split(r"(?<=[,;:])\s+", src)
+        if len(parts) > 1:
+            try:
+                return " ".join(_restore_case(p, acc.process_all(_lower_titles(p))) for p in parts)
+            except Exception:
+                pass
+        log_problem(f"фраза осталась без ударений: «{src[:60]}»", e)
+        return src
 
 
 def _fix_dialog_dash(text: str) -> str:
@@ -261,7 +322,11 @@ _CONF: dict[str, float] = {}
 # Ниже этой уверенности RUAccent омограф берётся у silero-stress. Подбор 3.7
 # (Инструменты разработки/bench_stress_stages.py): 30 трудных фраз - 27 верно
 # (silero всегда - 24, один RUAccent - 24), 49 омографов - 44 (43 и 43)
-SILERO_BELOW = 0.8
+SILERO_BELOW = 0.0
+# 11а: подмена выключена. С разметкой по предложению (и строчными буквами, 3.8)
+# RUAccent сам вернее: на 90 омографах 85 верно, с подменой silero - 81 (silero
+# помог в 2 местах, испортил 6: «стены», «печи», «проводах», «Связи требует»…).
+# 3.7 подбирал 0,8 ещё на главе одним куском.
 # Слова, где RUAccent и silero-stress поставили разные ударения (3.8, задание 10а,
 # п. 3.1): «Как будет прочитано» их подсвечивает - только просмотр, правки нет.
 DISPUTED: set[str] = set()
@@ -284,6 +349,8 @@ def _wrap_classify(acc) -> None:
         outs, pos = [], 0
         for n in num_hypotheses:
             t = re.sub(r"\s+(?=(?:[,.?!:;…]))", "", texts[pos])
+            if _CTX["before"] or _CTX["after"]:    # 11а: соседние предложения - контекст
+                t = " ".join(x for x in (_CTX["before"], t, _CTX["after"]) if x)
             hs = hypotheses[pos:pos + n]
             probs = []
             for h in hs:
@@ -340,10 +407,272 @@ def add_stress_text(text: str) -> str:
     return _add_stress_auto(text)
 
 
+# --- 11а, пп. 2-3: спорное - автоматически, по контексту ---------------------
+# Омограф (и «все/всё»), где RUAccent не уверен или разошёлся с silero-stress,
+# решает судья по предложению с соседними (core/homograph_llm, локальная модель
+# Ollama), если он есть; иначе - как в 3.7 (silero, когда RUAccent не уверен).
+JUDGE = False                   # замер 11а: модели решают омографы хуже RUAccent (77 против 85 из 90)
+JUDGE_BELOW = 0.9               # уверенность RUAccent, ниже которой омограф - сомнительный
+# Обычное слово, где RUAccent и silero-stress разошлись («щавель», «красивее»), -
+# по справочнику ударений (core/stressdict, Викисловарь); если справочник знает
+# несколько ударений формы - судья, иначе RUAccent.
+REFERENCE = True
+# И без спора: обычное слово (не омограф), у которого словарь Зализняка знает одно
+# ударение, а RUAccent поставил другое («что-ниб+удь» -> «чт+о-нибудь»).
+REFERENCE_ALL = True
+# «Омограф» RUAccent с одним ударением по Викисловарю - по словарю. Выключено:
+# на наборах 11а ничего не исправило, а «т+янущуюся» испортило (шум словаря).
+SINGLE_FORM = False
+# Омограф, у которого формы различаются числом (сте́ны им. мн. - стены́ род. ед.,
+# во́ды - воды́, ру́ки - руки́): прилагательное или причастие прямо перед ним
+# однозначно во множественном числе - форма множественного, в единственном - родительный
+# единственного. Морфология - pymorphy3 (MIT, уже в программе через ru-normalizr).
+AGREEMENT = True
+_morph: list = []
+# Решения судьи: (слово, предложение) -> вариант. Конвейер кладёт их в служебную
+# папку книги (п. 4): повторная разметка той же книги не зовёт модель и даёт то же.
+JUDGED: dict[str, str] = {}
+# п. 4: что решено по книге - форма -> {ударение, источник, мест}; конвейер сохраняет
+# в _служебное/ударения книги.json (take_decisions)
+DECISIONS: dict[str, dict] = {}
+JUDGE_STATS = {"сомнительных": 0, "судья": 0, "справочник": 0}
+_judge_model: list = []
+
+
+def _judge():
+    """Модель-судья или None (Ollama не запущена / модели нет)."""
+    if not JUDGE:
+        return None
+    if not _judge_model:
+        try:
+            from .homograph_llm import available_model
+            _judge_model.append(available_model())
+        except Exception:
+            _judge_model.append(None)
+    return _judge_model[0]
+
+
+def _token_variant(token: str, variant: str) -> str:
+    """Слово текста в виде варианта: регистр - как в тексте, «ё» и «+» - как в варианте."""
+    plain = [c for c in variant if c != "+"]
+    letters = [c for c in token if c != "+"]
+    if len(plain) != len(letters):
+        return token
+    out = []
+    for c, v in zip(letters, plain):
+        if v in "ёЁ" and c in "еЕ":
+            c = "Ё" if c.isupper() else "ё"
+        elif v in "еЕ" and c in "ёЁ":
+            c = "Е" if c.isupper() else "е"
+        out.append(c)
+    return _apply_idx("".join(out), _stress_idx(variant) if "+" in variant else ())
+
+
+def _variants(acc, k: str) -> tuple[list[str], list[set]]:
+    """Варианты слова с грамматикой: справочник; нет - варианты омографа RUAccent."""
+    vs, gr = [], []
+    if REFERENCE:
+        try:
+            from . import stressdict
+            v = stressdict.variants(k)
+            if len({stressdict.stress_of(x) for x in v}) > 1 or any("ё" in x for x in v) and k in v:
+                vs = sorted(v)
+                gr = [v[x] for x in vs]
+        except Exception:
+            vs = []
+    if len(vs) < 2:
+        vs = list(acc.omographs.get(k, []))
+        yo = getattr(acc, "yo_homographs", {}).get(k)
+        if yo:
+            vs = [k, yo]
+        gr = [set() for _ in vs]
+    return vs, gr
+
+
+def _resolve(acc, ru: str, src: str, before: str, after: str) -> str:
+    """Предложение после RUAccent -> спорные слова решены (пп. 2-3)."""
+    import difflib
+    homos = acc.omographs
+    yo_homos = getattr(acc, "yo_homographs", {})
+    si = _silero_text(src) if _get_silero() is not None else ""
+    rm = list(_WORD.finditer(ru))
+    sw = _WORD.findall(si)
+    sm = difflib.SequenceMatcher(None, [_key(m.group()) for m in rm], [_key(w) for w in sw], autojunk=False)
+    pair = {}
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        if tag == "equal":
+            for m, w in zip(rm[i1:i2], sw[j1:j2]):
+                pair[m.start()] = w
+    repl = []
+    for m in rm:
+        tok, k = m.group(), _key(m.group())
+        w = pair.get(m.start())
+        is_yo = k in yo_homos
+        if is_yo:
+            differ = w is not None and (("ё" in tok.lower()) != ("ё" in w.lower()))
+        else:
+            differ = (w is not None and "+" in tok and "+" in w and _stress_idx(tok) != _stress_idx(w))
+        homo = k in homos or is_yo
+        if differ and not is_yo:
+            DISPUTED.add(k)
+        conf = _CONF.get(k, 0.0)        # нет оценки (омограф на «ё») - как в 3.7: не уверен
+        new = None
+        single = _single_form(k) if (SINGLE_FORM and homo and not is_yo and "+" in tok) else None
+        if single is not None:
+            # «омограф» RUAccent, у которого по словарям одно ударение («м+алому» -
+            # «мал+ому» у RUAccent): решает словарь
+            if tuple(sorted(_stress_idx(tok))) != single:
+                new = _apply_idx(tok, single)
+                JUDGE_STATS["справочник"] += 1
+                _decide(k, new, "словарь (у формы одно ударение)")
+        elif (agree := _by_agreement(k, ru, m.start()) if (AGREEMENT and homo and not is_yo
+                                                             and "+" in tok) else None) is not None:
+            # согласование с прилагательным перед словом («Холодные в+оды», «этой стен+ы»)
+            if tuple(sorted(_stress_idx(tok))) != agree:
+                new = _apply_idx(tok, agree)
+                _decide(k, new, "согласование с прилагательным")
+        elif homo and (differ or (k in homos and conf < JUDGE_BELOW)):
+            JUDGE_STATS["сомнительных"] += 1
+            got = _ask_judge(acc, tok, k, src, before, after)
+            if got is not None:
+                new = got
+            elif differ and conf < SILERO_BELOW:
+                new = w                                  # как в 3.7
+        elif differ and REFERENCE:
+            new = _from_reference(acc, tok, k, src, before, after)
+        elif REFERENCE_ALL and not homo and "+" in tok:
+            new = _from_zaliznyak(tok, k)
+        if new is not None and new != tok:
+            repl.append((m.start(), m.end(), new))
+    for a, b, w in reversed(repl):
+        ru = ru[:a] + w + ru[b:]
+    return ru
+
+
+def _ask_judge(acc, tok: str, k: str, src: str, before: str, after: str) -> str | None:
+    model = _judge()
+    if model is None:
+        return None
+    vs, gr = _variants(acc, k)
+    if len(vs) < 2:
+        return None
+    ck = f"{k}\t{src.strip()}"
+    if ck not in JUDGED:
+        from .homograph_llm import choose_in_context
+        n = choose_in_context(tok.replace("+", ""), src, vs, before, after, gr, model=model)
+        if n is None:
+            return None
+        JUDGED[ck] = vs[n]
+        JUDGE_STATS["судья"] += 1
+    return _token_variant(tok, JUDGED[ck])
+
+
+def _from_reference(acc, tok: str, k: str, src: str, before: str, after: str) -> str | None:
+    try:
+        from . import stressdict
+        u = stressdict.unique(k)
+    except Exception:
+        return None
+    if u:
+        JUDGE_STATS["справочник"] += 1
+        new = _apply_idx(tok, u)
+        _decide(k, new, "словарь (RUAccent и silero разошлись)")
+        return new
+    return _ask_judge(acc, tok, k, src, before, after) if len(_variants(acc, k)[0]) > 1 else None
+
+
+def _decide(k: str, new: str, how: str) -> None:
+    d = DECISIONS.setdefault(k, {"ударение": new.lower(), "источник": how, "мест": 0})
+    d["мест"] += 1
+
+
+def take_decisions() -> dict:
+    out = dict(DECISIONS)
+    DECISIONS.clear()
+    return out
+
+
+def _by_agreement(k: str, text: str, pos: int) -> tuple | None:
+    """Ударение омографа по числу прилагательного перед ним или None."""
+    try:
+        from . import stressdict
+        opts = stressdict.options(k)
+        if len(opts) != 2:
+            return None
+        plur = [o for o, t in opts.items() if "мн" in t and ("им" in t or "вин" in t)]
+        sing = [o for o, t in opts.items() if "мн" not in t and "ед" in t and "род" in t]
+        if len(plur) != 1 or len(sing) != 1:
+            return None
+        prev = re.findall(r"([А-Яа-яЁё+-]+)\s*$", text[:pos])
+        if not prev or re.search(r"[,.;:!?…—–-]\s*$", text[:pos]):
+            return None
+        if not _morph:
+            import pymorphy3
+            _morph.append(pymorphy3.MorphAnalyzer())
+        parses = _morph[0].parse(prev[0].replace("+", "").lower())
+        adj = [p for p in parses if p.tag.POS in ("ADJF", "PRTF")]
+        if not adj or sum(p.score for p in adj) < 0.2:
+            return None
+        nums = {p.tag.number for p in parses if p.tag.POS in ("ADJF", "PRTF", "NOUN") and p.tag.number}
+        if nums == {"plur"}:
+            return plur[0]
+        if nums == {"sing"}:
+            return sing[0]
+    except Exception:
+        return None
+    return None
+
+
+def _single_form(k: str) -> tuple | None:
+    """Одно ударение формы по Викисловарю, и Зализняк не спорит, - иначе None.
+    Одного Зализняка для омографов мало: в выборке у «атлас», «орган», «ирис»,
+    «отмели» только одно из двух ударений."""
+    try:
+        from . import stressdict
+        o = stressdict.options(k)
+        if len(o) != 1:
+            return None
+        u = next(iter(o))
+        z = stressdict.zaliznyak(k)
+        return u if (z is None or z == u) else None
+    except Exception:
+        return None
+
+
+def _from_zaliznyak(tok: str, k: str) -> str | None:
+    try:
+        from . import stressdict
+        z = stressdict.zaliznyak(k)
+    except Exception:
+        return None
+    if z and tuple(sorted(_stress_idx(tok))) != z and not any(c in "ёЁ" for c in tok):
+        JUDGE_STATS["справочник"] += 1
+        new = _apply_idx(tok, z)
+        _decide(k, new, "словарь Зализняка (RUAccent ошибся)")
+        return new
+    return None
+
+
+def _one_sentence(acc, src: str, low: str, before: str, after: str) -> str:
+    _CONF.clear()
+    ru = _ruaccent_one(acc, src, low)
+    if "+" not in ru:
+        return ru
+    try:
+        out = _resolve(acc, ru, src, before, after)
+    except Exception as e:
+        log_problem("спорные ударения не решились, оставляю RUAccent", e, show=False)
+        out = ru
+    # «+» перед «ё» лишний (см. ниже)
+    return re.sub(r"\+(?=[ёЁ])", "", out)
+
+
 def _add_stress_auto(text: str) -> str:
     acc = _get_accentizer()
     if acc is not None:
         _wrap_classify(acc)
+    if BY_SENTENCE and acc is not None and text and text.strip():
+        return _fix_dialog_dash(_by_sentence(text, lambda s, low, b, a: _one_sentence(acc, s, low, b, a)))
     _CONF.clear()
     out = add_stress(text)
     if out is text or "+" not in out:
