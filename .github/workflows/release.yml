@@ -94,13 +94,20 @@ jobs:
           Start-Sleep -Seconds 3
           if (Test-Path C:\HeraldTest\Herald.exe) { throw "не удалилось" }
           "Тихая установка, пробник (Silero и клон F5) и удаление прошли" | Tee-Object -Append dist\sizes.txt
+      # место Actions (500 МБ на аккаунт): установщик - в релиз по метке; артефактом - только при ручном запуске, на 1 день
       - uses: actions/upload-artifact@v4
         with:
-          name: Herald-Setup
+          name: Herald-Report
           path: |
-            dist/Herald-Setup-*.exe
             dist/sizes.txt
             dist/smoke.json
+          retention-days: 1
+      - uses: actions/upload-artifact@v4
+        if: github.event_name == 'workflow_dispatch'
+        with:
+          name: Herald-Setup
+          path: dist/Herald-Setup-*.exe
+          retention-days: 1
       - name: В релиз
         if: startsWith(github.ref, 'refs/tags/v')
         shell: pwsh
