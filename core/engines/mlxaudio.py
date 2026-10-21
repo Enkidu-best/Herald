@@ -82,7 +82,8 @@ def trained_model(voice: str) -> str | None:
 
 def trained_gen(voice: str) -> dict:
     """Свои настройки выборки обученного голоса - «<имя>.gen.json» рядом с образцом
-    ({"temperature": 0.8, "top_p": 0.85, "top_k": 30}): обученной модели нужна выборка
+    ({"temperature": 0.8, "top_p": 0.85, "top_k": 30}; "icl": true - с образцом и его
+    расшифровкой, как клон, а не только вектор голоса): обученной модели нужна выборка
     спокойнее, чем клону (замер 21.10: слов 88 -> 91 %), а общий профиль Qwen
     («Диктор 1-3», оценка Андрея 5 из 5) не трогаем."""
     f = os.path.join(own_voices_dir(), voice + ".gen.json")
@@ -242,8 +243,10 @@ class MlxAudioEngine(TTSEngine):
         self._switch(trained or model_path(self.model, self.bits))
         extra = self.extra
         if trained:
-            ref_text, lang = None, "auto"     # как в обучении: вектор голоса, без языка
-            extra = {**self.extra, **trained_gen(voice)}
+            g = trained_gen(voice)
+            if not g.get("icl"):              # как в обучении: вектор голоса, без языка
+                ref_text, lang = None, "auto"
+            extra = {**self.extra, **{k: v for k, v in g.items() if k != "icl"}}
         out = tempfile.mktemp(suffix=".wav", prefix="herald_mlxa_")
         try:
             if seed is None and self.seed is not None:

@@ -40,8 +40,9 @@ def main() -> int:
         for ext in (".wav", ".txt"):
             shutil.copy(_os.path.join(default_voices_dir(), r + ext), _os.path.join(d, n + ext))
         open(_os.path.join(d, n + ".model"), "w", encoding="utf-8").write(folder + "\n")
-        # выборка спокойнее, чем у клона (замер 21.10: слов 88 -> 91 %, похожесть та же)
-        json.dump({"temperature": 0.8, "top_p": 0.85, "top_k": 30},
+        # с образцом и его расшифровкой (ICL) и выборкой спокойнее, чем у клона: замер 21.10 на
+        # начале главы - слов 94 % (только вектор голоса - 88-90 %, клон - 95 %), похожесть 0,83
+        json.dump({"icl": True, "temperature": 0.8, "top_p": 0.85, "top_k": 30},
                   open(_os.path.join(d, n + ".gen.json"), "w", encoding="utf-8"))
         print(f"{n} -> {trained_model(n)}")
     return 0

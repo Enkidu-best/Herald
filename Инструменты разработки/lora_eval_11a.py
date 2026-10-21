@@ -9,7 +9,8 @@
   * слова: доля слов главы, которые Whisper не услышал (грубо: числа Whisper пишет
     цифрами - они считаются неуслышанными у всех одинаково); окончания - доля
     последних слов предложений, услышанных целиком;
-  * темп - слогов в секунду речи (без пауз), у живых чтецов на их записях 5,8 / 5,6;
+  * темп - слогов услышанных слов в секунду речи (без пауз); у живых чтецов на их записях
+    5,8 / 5,6 (там текст совпадает со звуком);
   * манера Герасимова: отношение ударной гласной к безударной (у живого ~2,0).
 Пишет «Архив/голоса диктора 3.9/обученный голос/итог.json». Под ../.heavy-lock.
     python "Инструменты разработки/lora_eval_11a.py"
@@ -34,10 +35,12 @@ OUT = f"{BANK}/обученный голос"
 RUNS = {
     "Игорь Ященко": {"06 (клон по образцу)": f"{LONG}/Голос 06.mp3",
                      "F5": f"{LONG}/Старая сборка F5/Ященко (F5).mp3",
-                     "обученный": f"{LONG}/Обученный голос/Ященко (обучен).mp3"},
+                     "обученный": f"{LONG}/Обученный голос/Ященко (обучен).mp3",
+                     "обученный, только вектор": f"{LONG}/Обученный голос/Ященко (обучен, только вектор).mp3"},
     "Вячеслав Герасимов": {"05 (клон по образцу)": f"{LONG}/Голос 05.mp3",
                            "F5": f"{LONG}/Старая сборка F5/Герасимов (F5).mp3",
-                           "обученный": f"{LONG}/Обученный голос/Герасимов (обучен).mp3"},
+                           "обученный": f"{LONG}/Обученный голос/Герасимов (обучен).mp3",
+                           "обученный, только вектор": f"{LONG}/Обученный голос/Герасимов (обучен, только вектор).mp3"},
 }
 
 
@@ -84,7 +87,8 @@ def similarity(path: str, ref: np.ndarray, sim, sents) -> dict:
     # окончание слова: последнее слово предложения услышано целиком (съеденное окончание -
     # другое слово для сверки: «правил» против «правило»)
     ends_ok = sum(i in hit for i in last_i)
-    syl = sum(sum(c in "аеёиоуыэюя" for c in w) for w in src_w)
+    # темп - по УСЛЫШАННЫМ словам: по тексту пропуски слов выглядели бы как быстрая речь
+    syl = sum(sum(c in "аеёиоуыэюя" for c in w) for w in hw)
     return {"минут": round(len(a) / 16000 / 60, 1), "предложений": len(v),
             "медиана похожести": round(float(np.median(v)), 2),
             "10-й процентиль": round(float(np.percentile(v, 10)), 2),
@@ -100,13 +104,16 @@ def main() -> int:
     sim = V._sim()
     sents = [s.text for s in sentenize(open(V.SRC, encoding="utf-8").read())]
     _os.makedirs(OUT, exist_ok=True)
-    res = {}
+    path0 = f"{OUT}/итог.json"
+    res = json.load(open(path0, encoding="utf-8")) if _os.path.exists(path0) else {}
     for reader, runs in RUNS.items():
         E = [sim.emb(sim.load16(f)) for f in sorted(glob.glob(f"{BANK}/фрагменты/{reader}/*.wav"))]
         ref = np.mean(E, axis=0)
         ref /= np.linalg.norm(ref)
-        res[reader] = {}
+        res.setdefault(reader, {})
         for name, path in runs.items():
+            if _sys.argv[1:] and name not in _sys.argv[1:]:          # только эти варианты
+                continue
             if not _os.path.exists(path):
                 print(reader, name, "нет файла", path, flush=True)
                 continue
