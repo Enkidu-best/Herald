@@ -15,6 +15,7 @@
 (что ушло и почему). Под ../.heavy-lock.
 
     python "Инструменты разработки/clean_train_11a.py" "Игорь Ященко" "Вячеслав Герасимов"
+    python "Инструменты разработки/clean_train_11a.py" "Вячеслав Герасимов" --src=train_olesya_raw.jsonl --dst=train_olesya_clean.jsonl
 """
 from __future__ import annotations
 
@@ -43,9 +44,12 @@ def main() -> int:
     import librosa
     import core.pipeline as P
     from core.engines.mlxaudio import plus_to_acute
-    for voice in _sys.argv[1:]:
+    args = [x for x in _sys.argv[1:] if not x.startswith("--")]
+    opt = dict(x[2:].split("=", 1) for x in _sys.argv[1:] if x.startswith("--") and "=" in x)
+    src, dst = opt.get("src", "train_raw.jsonl"), opt.get("dst", "train_clean.jsonl")
+    for voice in args:
         d = _os.path.expanduser(f"~/.cache/text2audio/train/{voice}")
-        rows = [json.loads(l) for l in open(f"{d}/train_raw.jsonl", encoding="utf-8")]
+        rows = [json.loads(l) for l in open(f"{d}/{src}", encoding="utf-8")]
         keep, gone, allc = [], [], []
         for i, r in enumerate(rows):
             a, sr = sf.read(r["audio"], dtype="float32")
@@ -70,13 +74,14 @@ def main() -> int:
                 keep.append(r)
             if (i + 1) % 100 == 0:
                 print(f"{voice}: {i + 1}/{len(rows)}, ушло {len(gone)}", flush=True)
-        with open(f"{d}/train_clean.jsonl", "w", encoding="utf-8") as f:
+        with open(f"{d}/{dst}", "w", encoding="utf-8") as f:
             for r in keep:
                 f.write(json.dumps(r, ensure_ascii=False) + "\n")
         res = {"было": len(rows), "осталось": len(keep), "ушло": len(gone),
                "часов осталось": round(sum(r["dur"] for r in keep) / 3600, 2), "фразы": gone,
                "все": allc}
-        json.dump(res, open(f"{d}/чистка.json", "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+        json.dump(res, open(f"{d}/чистка{'' if dst == 'train_clean.jsonl' else ' ' + dst[:-6]}.json", "w",
+                            encoding="utf-8"), ensure_ascii=False, indent=1)
         print(f"{voice}: было {len(rows)}, осталось {len(keep)} ({res['часов осталось']} ч), ушло {len(gone)}",
               flush=True)
     return 0

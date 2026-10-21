@@ -1,8 +1,12 @@
 #!/bin/zsh
-# Задание 11б, шаг 4 - ночная цепочка для Ященко (Герасимов - ждёт записей, < 1 ч чистых):
-#  1) замок (живой процесс), 2) полное дообучение F5 (эпохи, лучшая по отложенным фразам),
-#  3) голос «Игорь Ященко (F5, обучен)» в программе, 4) шипение: без чистки / DFN 15 / DFN 100
-#  на абзаце - лучшее в профиль голоса, 5) длинный кусок, 6) замеры, 7) слепой набор, 8) замок.
+# Задание 11б, шаг 4 - ночная цепочка (порядок - решение Андрея 21.10 16:05):
+#  1) замок (живой процесс) после Interview Coach 12 и «Понятного документа» 06;
+#  2) полное дообучение F5 Ященко (эпохи, лучшая по отложенным фразам);
+#  3) проба Герасимова на «Олесе» (точка В3): нарезка по паузам, чистка, DeepFilterNet, проба F5 45 мин;
+#  4) Ященко: шипение (без чистки / DFN 15 / DFN 100) - лучшее в профиль голоса «Игорь Ященко
+#     (F5, обучен)», длинный кусок, замеры, слепой набор;
+#  5) набор точки В3 (два образца: «Олеся» и «К», + чистка DFN лучшего); 6) замок.
+# Полное обучение Герасимова - только после оценки Андреем точки В3.
 # Журнал - Архив/11б/ночь.log.
 #   zsh "Инструменты разработки/night_11b.sh"
 cd "$(dirname "$0")/.."
@@ -29,6 +33,24 @@ say "обучение F5, Ященко"
 caffeinate -i .venv/bin/python "$T/f5_finetune_11b.py" --voice "Игорь Ященко" --epochs 8 --frames 900 \
   --lr 1e-4 --data train_clean_dfn.jsonl --out f5-lora-full 2>&1 | grep -a "эпоха\|фраз\|готово\|Error\|Traceback" >> "$LOG" || exit 1
 [ -f "$W/model_v1.safetensors" ] || { say "весов нет - стоп"; exit 1; }
+
+say "живые чтецы: замер с интонацией"
+for r in "Игорь Ященко" "Вячеслав Герасимов"; do
+  .venv/bin/python "$T/measure_11b.py" живой "$r" 2>&1 | grep -a '^{' >> "$LOG"
+done
+
+say "Герасимов: «Олеся» - нарезка по паузам"
+G="$HOME/.cache/text2audio/train/Вячеслав Герасимов"
+.venv/bin/python "$T/prepare_olesya_11b.py" 2>&1 | grep -a "распознано\|фраз\|Error\|Traceback" >> "$LOG"
+say "Герасимов: чистка (повторное распознавание, CER ≤ 5 %)"
+.venv/bin/python "$T/clean_train_11a.py" "Вячеслав Герасимов" --src=train_olesya_raw.jsonl --dst=train_olesya_clean.jsonl \
+  2>&1 | grep -a "было\|Error\|Traceback" >> "$LOG"
+.venv-restore/bin/python "$T/dfn_dataset_11b.py" "Вячеслав Герасимов" train_olesya_clean.jsonl train_olesya_dfn.jsonl olesya/wavs_dfn \
+  2>&1 | grep -a "фраз\|Error\|Traceback" >> "$LOG"
+say "Герасимов: проба F5 на «Олесе» (45 мин)"
+rm -rf "$G/f5-lora-olesya"
+caffeinate -i .venv/bin/python "$T/f5_finetune_11b.py" --voice "Вячеслав Герасимов" --minutes 45 --frames 900 \
+  --lr 1e-4 --data train_olesya_dfn.jsonl --out f5-lora-olesya 2>&1 | grep -a "фраз\|шагов\|готово\|Error\|Traceback" >> "$LOG"
 
 say "шипение: три варианта"
 for x in "0:" "15: DFN15" "100: DFN100"; do
@@ -83,4 +105,10 @@ L="Сравнение 3.9 - голоса диктора на выбор/Длин
 say "слепой набор"
 if [ "$BEST" = "0" ]; then SEL="$D/Ященко - F5 обучен.mp3"; elif [ "$BEST" = "15" ]; then SEL="$D/Ященко - F5 обучен DFN15.mp3"; else SEL="$D/Ященко - F5 обучен DFN100.mp3"; fi
 .venv/bin/python "$T/blind_set_11b.py" "$SEL" "$D/Ященко - F5 как сейчас.mp3" > /dev/null 2>> "$LOG"
+say "точка В3 (Герасимов на «Олесе»)"
+if [ -f "$G/f5-lora-olesya/model_v1.safetensors" ]; then
+  .venv/bin/python "$T/point_v3_11b.py" "$G/f5-lora-olesya" 2>&1 | grep -a '^{\|образец\|mp3\|Error\|Traceback' >> "$LOG"
+else
+  say "точка В3: весов пробы нет - пропуск"
+fi
 say "готово"

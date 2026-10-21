@@ -30,6 +30,8 @@ def main() -> int:
     ap.add_argument("--denoise", type=float, default=0.0)
     ap.add_argument("--tag", default="")
     ap.add_argument("--remove", default=None)
+    ap.add_argument("--ref", default=None, help="голос, чей образец взять (по умолчанию - сам чтец)")
+    ap.add_argument("--name", default=None, help="имя голоса целиком (по умолчанию «<чтец> (F5, обучен)<хвост>»)")
     a = ap.parse_args()
     d = default_voices_dir()
     if a.remove:
@@ -39,9 +41,9 @@ def main() -> int:
                 _os.remove(p)
         print("убран:", a.remove)
         return 0
-    name = f"{a.reader} (F5, обучен){a.tag}"
+    name = a.name or f"{a.reader} (F5, обучен){a.tag}"
     for ext in (".wav", ".txt"):
-        shutil.copy(_os.path.join(d, a.reader + ext), _os.path.join(d, name + ext))
+        shutil.copy(_os.path.join(d, (a.ref or a.reader) + ext), _os.path.join(d, name + ext))
     open(_os.path.join(d, name + ".f5model"), "w", encoding="utf-8").write(_os.path.abspath(a.weights) + "\n")
     fx = _os.path.join(d, name + ".fx.json")
     if a.denoise:
