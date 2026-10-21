@@ -67,6 +67,31 @@ def own_voices_dir() -> str:
     return os.path.join(default_voices_dir(), "qwen")
 
 
+def trained_model(voice: str) -> str | None:
+    """Обученный голос (11а, шаг 2): рядом с образцом своего голоса - «<имя>.model»
+    с папкой модели в models_dir() (ru-stress + адаптер чтеца, lora_to_mlx_11a.py).
+    Такой голос звучит без чтения образца (только вектор голоса, как в обучении):
+    дрейфа ICL нет, голос один на всю книгу."""
+    f = os.path.join(own_voices_dir(), voice + ".model")
+    if not os.path.isfile(f):
+        return None
+    name = open(f, encoding="utf-8").read().strip()
+    path = name if os.path.isabs(name) else os.path.join(models_dir(), name)
+    return path if os.path.exists(os.path.join(path, "config.json")) else None
+
+
+def trained_gen(voice: str) -> dict:
+    """Свои настройки выборки обученного голоса - «<имя>.gen.json» рядом с образцом
+    ({"temperature": 0.8, "top_p": 0.85, "top_k": 30}): обученной модели нужна выборка
+    спокойнее, чем клону (замер 21.10: слов 88 -> 91 %), а общий профиль Qwen
+    («Диктор 1-3», оценка Андрея 5 из 5) не трогаем."""
+    f = os.path.join(own_voices_dir(), voice + ".gen.json")
+    try:
+        return json.load(open(f, encoding="utf-8")) if os.path.isfile(f) else {}
+    except (OSError, ValueError):
+        return {}
+
+
 def own_voices() -> list[str]:
     d = own_voices_dir()
     if not os.path.isdir(d):
@@ -113,6 +138,7 @@ class MlxAudioEngine(TTSEngine):
         self.seed = seed
         self.sample_rate = 24000
         self._proc = None
+        self._loaded_model = None         # папка модели, загруженной в процесс
         self._lock = threading.Lock()
         self.last_stats: dict = {}
         # 3.9: одно зерно на всю книгу (голос ровнее); повтор того же текста (пересчёт)
@@ -159,14 +185,22 @@ class MlxAudioEngine(TTSEngine):
         self._proc = subprocess.Popen([VENV_PY, WORKER], stdin=subprocess.PIPE,
                                       stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                                       text=True, encoding="utf-8", env=env)
-        r = self._call({"op": "load", "model": model_path(self.model, self.bits)})
+        self._switch(model_path(self.model, self.bits))
+
+    def _switch(self, path: str) -> None:
+        """Загрузить в процесс модель path (обученный голос - своя модель)."""
+        if self._loaded_model == path:
+            return
+        r = self._call({"op": "load", "model": path})
+        self._loaded_model = path
         self.sample_rate = int(r["sr"])
         self.load_stats = r
-        if self.centroid:
+        if self.centroid and path == model_path(self.model, self.bits):
             self._call({"op": "centroid", "dir": self.centroid})
 
     def close(self) -> None:
         p, self._proc = self._proc, None
+        self._loaded_model = None
         if p is not None:
             try:
                 p.stdin.write('{"op": "quit"}\n')
@@ -203,6 +237,13 @@ class MlxAudioEngine(TTSEngine):
         else:
             text = text.replace("+", "")
         wav, ref_text = self._ref(voice)
+        lang = self._lang()
+        trained = trained_model(voice) if self.model == "qwen-stress" else None
+        self._switch(trained or model_path(self.model, self.bits))
+        extra = self.extra
+        if trained:
+            ref_text, lang = None, "auto"     # как в обучении: вектор голоса, без языка
+            extra = {**self.extra, **trained_gen(voice)}
         out = tempfile.mktemp(suffix=".wav", prefix="herald_mlxa_")
         try:
             if seed is None and self.seed is not None:
@@ -210,8 +251,8 @@ class MlxAudioEngine(TTSEngine):
                 self._calls[text] = k + 1
                 seed = self.seed + 1000 * k
             r = self._call({"op": "synth", "text": text, "out": out, "ref_audio": wav,
-                            "ref_text": ref_text, "lang": self._lang(), "seed": seed,
-                            "stream": stream, "extra": self.extra})
+                            "ref_text": ref_text, "lang": lang, "seed": seed,
+                            "stream": stream, "extra": extra})
             self.last_stats = r
             a, _sr = sf.read(out, dtype="float32")
         finally:

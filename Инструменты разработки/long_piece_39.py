@@ -11,6 +11,7 @@
 Под ../.heavy-lock.
     python "Инструменты разработки/long_piece_39.py" [01 03 02 05 06]
     python "Инструменты разработки/long_piece_39.py" f5      # 11а, Г: Ященко и Герасимов движком F5
+    python "Инструменты разработки/long_piece_39.py" обучен  # 11а, Д: обученные голоса Qwen
 """
 from __future__ import annotations
 
@@ -96,10 +97,46 @@ def main_f5() -> int:
     return 0
 
 
+# 11а, часть Д: обученные голоса (ru-stress + адаптер чтеца, install_trained_11a.py)
+TRAINED = {"Игорь Ященко (обучен)": "Ященко (обучен)", "Вячеслав Герасимов (обучен)": "Герасимов (обучен)"}
+
+
+def main_trained() -> int:
+    import core.pipeline as P
+    from core.profiles import PROFILES, engine_kwargs
+    src = excerpt()
+    dst = _os.path.join(DST, "Обученный голос")
+    _os.makedirs(dst, exist_ok=True)
+    p = PROFILES["qwen"]
+    stats = {}
+    for voice, name in TRAINED.items():
+        work = _os.path.abspath(_os.path.join(BANK, "длинный кусок", name))
+        shutil.rmtree(work, ignore_errors=True)
+        opts = P.ConvertOptions(use_cache=False, single_file=True, minutes_per_file=60,
+                                make_m4b=False, make_chapter_mp3=True, sound_check=True, narrator=voice)
+        t0 = time.time()
+        res = P.convert_book(src, engine=p.engine, eng_kwargs=engine_kwargs(p), voice=voice,
+                             out_dir=work, options=opts)
+        took = time.time() - t0
+        mp3 = sorted(glob.glob(_os.path.join(work, "**", "*.mp3"), recursive=True))[0]
+        shutil.copy(mp3, _os.path.join(dst, f"{name}.mp3"))
+        stats[name] = {"звук, с": round(res.duration, 1), "счёт, с": round(took, 1),
+                       "на секунду звука": round(took / max(res.duration, 1), 2)}
+        print(f"{name}: {json.dumps(stats[name], ensure_ascii=False)}", flush=True)
+        P.unload_engines()
+    path = _os.path.join(BANK, "длинный кусок", "замер.json")
+    old = json.load(open(path, encoding="utf-8")) if _os.path.exists(path) else {}
+    old.update(stats)
+    json.dump(old, open(path, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+    return 0
+
+
 def main() -> int:
     import core.pipeline as P
     if _sys.argv[1:] == ["f5"]:
         return main_f5()
+    if _sys.argv[1:] == ["обучен"]:
+        return main_trained()
     src = excerpt()
     _os.makedirs(DST, exist_ok=True)
     stats = {}

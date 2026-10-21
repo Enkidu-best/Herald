@@ -31,7 +31,7 @@ import json
 import re
 
 OUT = "Архив/голоса диктора 3.9/ударения 50"
-VOICE = _os.path.abspath("Архив/голоса диктора 3.9/образцы/Голос 06.wav")
+VOICE = _os.environ.get("VOICE") or _os.path.abspath("Архив/голоса диктора 3.9/образцы/Голос 06.wav")  # 11а Д: VOICE="Игорь Ященко (обучен)"
 VOW = "аеёиоуыэюяАЕЁИОУЫЭЮЯ"
 
 

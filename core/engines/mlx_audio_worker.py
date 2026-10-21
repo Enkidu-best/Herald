@@ -9,7 +9,7 @@ F5 и выравниватель Herald живут на своих версия�
 трогает. Herald ничего не импортирует отсюда - только запускает.
 
 Протокол: по строке JSON на вход (stdin), по строке JSON на выход (stdout).
-    {"op": "load", "model": "<папка или repo>"}
+    {"op": "load", "model": "<папка или repo>"}     (повторный load - другая модель вместо прежней)
         -> {"ok": true, "sr": 24000, "sec": <загрузка, с>, "mem_gb": ...}
     {"op": "synth", "text": "...", "out": "<wav>", "ref_audio": "<wav>",
      "ref_text": "...", "lang": "Russian", "seed": 1, "stream": false}
@@ -39,9 +39,14 @@ def _reply(d: dict) -> None:
 
 
 def _load(model: str) -> dict:
-    global _model, _sr
+    global _model, _sr, _orig_spk
+    import gc
     import mlx.core as mx
     from mlx_audio.tts.utils import load_model
+    if _model is not None:            # другая модель (обученный голос) - прежнюю из памяти
+        _model, _orig_spk = None, None
+        gc.collect()
+        getattr(mx, "clear_cache", getattr(mx.metal, "clear_cache", lambda: None))()
     t0 = time.monotonic()
     _model = load_model(model)
     _sr = int(getattr(_model, "sample_rate", None) or getattr(_model, "sr", None) or 24000)
