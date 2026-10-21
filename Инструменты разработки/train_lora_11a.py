@@ -83,8 +83,14 @@ def main() -> int:
         t0 = time.time()
         tok = Qwen3TTSTokenizer.from_pretrained("Qwen/Qwen3-TTS-Tokenizer-12Hz", device_map=dev)
         with open(cpath, "a", encoding="utf-8") as f:
-            for i in range(0, len(todo), 8):
-                part = todo[i:i + 8]
+            parts, cur = [], []
+            for r in todo:                          # пакеты до 60 с звука (11б: куски по 15-25 с)
+                if cur and sum(x["dur"] for x in cur) + r["dur"] > 60:
+                    parts.append(cur)
+                    cur = []
+                cur.append(r)
+            parts += [cur] if cur else []
+            for part in parts:
                 enc = tok.encode([r["audio"] for r in part])
                 for r, c in zip(part, enc.audio_codes):
                     codes[r["audio"]] = c.cpu().tolist()

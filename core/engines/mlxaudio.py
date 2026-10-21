@@ -83,7 +83,8 @@ def trained_model(voice: str) -> str | None:
 def trained_gen(voice: str) -> dict:
     """Свои настройки выборки обученного голоса - «<имя>.gen.json» рядом с образцом
     ({"temperature": 0.8, "top_p": 0.85, "top_k": 30}; "icl": true - с образцом и его
-    расшифровкой, как клон, а не только вектор голоса): обученной модели нужна выборка
+    расшифровкой, как клон, а не только вектор голоса; "tempo_fit": 5.8 - темп каждого
+    куска к темпу живого чтеца, 11б): обученной модели нужна выборка
     спокойнее, чем клону (замер 21.10: слов 88 -> 91 %), а общий профиль Qwen
     («Диктор 1-3», оценка Андрея 5 из 5) не трогаем."""
     f = os.path.join(own_voices_dir(), voice + ".gen.json")
@@ -91,6 +92,36 @@ def trained_gen(voice: str) -> dict:
         return json.load(open(f, encoding="utf-8")) if os.path.isfile(f) else {}
     except (OSError, ValueError):
         return {}
+
+
+def speech_seconds(a: np.ndarray, sr: int) -> float:
+    """Секунды речи без пауз (кадры 10 мс громче -35 дБ от пика)."""
+    fr = max(1, sr // 100)
+    n = len(a) // fr
+    if not n:
+        return 0.0
+    rms = np.sqrt(np.mean(a[: n * fr].reshape(n, fr) ** 2, axis=1)) + 1e-9
+    return float(np.sum(20 * np.log10(rms / rms.max()) > -35)) * 0.01
+
+
+def fit_tempo(a: np.ndarray, sr: int, text: str, target: float) -> np.ndarray:
+    """11б, шаг 1 (б): темп КУСКА к темпу живого чтеца (слогов в секунду речи) вместо
+    одного растяжения на всю книгу (fx.json speed): быстрый кусок замедляется, медленный
+    ускоряется - ровно до цели (в пределах 0,8-1,25)."""
+    import subprocess
+    syl = sum(c in _VOW for c in text.replace("+", ""))
+    sp = speech_seconds(a, sr)
+    if not syl or sp < 0.5:
+        return a
+    k = min(1.25, max(0.8, target / (syl / sp)))          # atempo: < 1 - медленнее
+    if abs(k - 1.0) < 0.03:
+        return a
+    p = subprocess.run(["ffmpeg", "-v", "error", "-f", "f32le", "-ar", str(sr), "-ac", "1", "-i", "pipe:0",
+                        "-af", f"atempo={k:.4f}", "-f", "f32le", "pipe:1"],
+                       input=a.astype(np.float32).tobytes(), capture_output=True)
+    if p.returncode or not p.stdout:
+        return a
+    return np.frombuffer(p.stdout, dtype=np.float32).copy()
 
 
 def own_voices() -> list[str]:
@@ -246,7 +277,7 @@ class MlxAudioEngine(TTSEngine):
             g = trained_gen(voice)
             if not g.get("icl"):              # как в обучении: вектор голоса, без языка
                 ref_text, lang = None, "auto"
-            extra = {**self.extra, **{k: v for k, v in g.items() if k != "icl"}}
+            extra = {**self.extra, **{k: v for k, v in g.items() if k not in ("icl", "tempo_fit")}}
         out = tempfile.mktemp(suffix=".wav", prefix="herald_mlxa_")
         try:
             if seed is None and self.seed is not None:
@@ -265,4 +296,6 @@ class MlxAudioEngine(TTSEngine):
                 pass
         # темп: у этих моделей параметра нет - пайплайн растягивает звук после
         # синтеза (atempo), как у готовых голосов; speed_mul куска не применяем
+        if trained and trained_gen(voice).get("tempo_fit"):
+            a = fit_tempo(a, self.sample_rate, text, float(trained_gen(voice)["tempo_fit"]))
         return a

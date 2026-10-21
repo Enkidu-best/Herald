@@ -42,6 +42,12 @@ def main() -> int:
         for ext in (".wav", ".txt"):
             shutil.copy(src + ext, _os.path.join(d, name + ext))
         print(f"{name} (папка 3.9: Голос {num}) <- {src}.wav")
+    # 21.10: Андрею очень понравились оба «живых» образца (01 и 02) - готовы для записи;
+    # «Диктор 1» остаётся прежним, «живой» 01 - отдельным голосом рядом
+    src = f"{BANK}/живой образец/Голос 01 - живой"
+    for ext in (".wav", ".txt"):
+        shutil.copy(src + ext, _os.path.join(d, "Диктор 1 (живой)" + ext))
+    print(f"Диктор 1 (живой) <- {src}.wav")
     return 0
 
 

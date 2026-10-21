@@ -36,6 +36,7 @@ def main() -> int:
     ap.add_argument("--bits", type=int, default=8)
     ap.add_argument("--suffix", default="", help="к имени папки модели (пробы эпох)")
     ap.add_argument("--lora", default="lora", help="папка адаптера в папке чтеца")
+    ap.add_argument("--base", default=REPO, help="основа: ru-stress (11а) или Qwen/Qwen3-TTS-12Hz-1.7B-Base (11б)")
     ap.add_argument("--scale", type=float, default=1.0,
                     help="сила адаптера: 0,5-0,75 - надёжнее чтение основы, чуть меньше похожесть")
     a = ap.parse_args()
@@ -59,7 +60,7 @@ def main() -> int:
     t0 = time.time()
     # папка уже скачанной ru-stress (в кэше нет README и мелочей - snapshot_download без сети отказывает)
     src = glob.glob(os.path.expanduser(
-        "~/.cache/huggingface/hub/models--" + REPO.replace("/", "--") + "/snapshots/*"))[0]
+        "~/.cache/huggingface/hub/models--" + a.base.replace("/", "--") + "/snapshots/*"))[0]
     for name in KEEP:
         os.symlink(os.path.realpath(os.path.join(src, name)), os.path.join(tmp, name))
     W = mx.load(os.path.join(src, "model.safetensors"))
@@ -86,7 +87,8 @@ def main() -> int:
     if r.returncode or not os.path.exists(os.path.join(dst, "config.json")):
         print((r.stderr or r.stdout)[-3000:])
         return 1
-    json.dump({"voice": a.voice, "adapter": os.path.basename(ad_path), "epoch": a.epoch, "lora": a.lora, "scale": a.scale, "base": REPO,
+    json.dump({"voice": a.voice, "adapter": os.path.basename(ad_path), "epoch": a.epoch, "lora": a.lora,
+               "scale": a.scale, "base": a.base,
                "personal_use_only": True},
               open(os.path.join(dst, "herald_voice.json"), "w", encoding="utf-8"), ensure_ascii=False, indent=1)
     print(f"готово: {dst} за {time.time() - t0:.0f} с", flush=True)
