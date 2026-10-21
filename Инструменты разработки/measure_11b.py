@@ -11,6 +11,7 @@
     высокая середина, большой разброс;
   * слова - доля слов текста, найденных в распознанном (числа Whisper пишет цифрами -
     одинаково для всех);
+  * интонация (11б, п. 5) - размах тона в полутонах по тем же третям предложения;
   * DNSMOS (Microsoft, через speechmos): OVRL / SIG / BAK по окнам 10 с, среднее.
 Живой чтец - его фразы из набора для обучения (текст сверен со звуком в 11а, Д).
 
@@ -96,6 +97,36 @@ def thirds(words) -> list[float] | None:
     return out
 
 
+def pitch_thirds(a16, words) -> list[float] | None:
+    """11б, п. 5: размах тона (полутонов, 90-й / 10-й перцентиль F0) в трёх частях
+    предложения - «на одной ноте, как молитва» = узкий размах в середине и конце."""
+    import librosa
+    if len(words) < 6:
+        return None
+    n = len(words)
+    cuts = [0, n // 3, 2 * n // 3, n]
+    out = []
+    for a, b in zip(cuts, cuts[1:]):
+        t0, t1 = words[a][1], words[b - 1][2]
+        seg = a16[int(t0 * 16000):int(t1 * 16000)]
+        if len(seg) < 16000 * 0.4:
+            return None
+        f0, vf, _p = librosa.pyin(seg, fmin=60, fmax=400, sr=16000, frame_length=1024)
+        f0 = f0[vf & np.isfinite(f0)]
+        if len(f0) < 8:
+            return None
+        out.append(float(12 * np.log2(np.percentile(f0, 90) / np.percentile(f0, 10))))
+    return out
+
+
+def pitch_summary(pt: list[list[float]]) -> dict:
+    if not pt:
+        return {}
+    t = np.array(pt)
+    return {"размах тона, полутонов: начало / середина / конец": [round(float(x), 2) for x in np.median(t, axis=0)],
+            "размах тона за предложение (среднее третей)": round(float(np.median(t.mean(axis=1))), 2)}
+
+
 def dnsmos(a16) -> dict:
     from speechmos import dnsmos as D
     vals = []
@@ -136,18 +167,20 @@ def main() -> int:
     if name == "живой":
         d = _os.path.expanduser(f"~/.cache/text2audio/train/{reader}")
         items = [json.loads(l) for l in open(f"{d}/train_clean.jsonl", encoding="utf-8")][::12][:60]
-        th, sims, dn = [], [], []
+        th, sims, dn, pt = [], [], [], []
         for it in items:
             a, sr = sf.read(it["audio"], dtype="float32")
             a16 = librosa.resample(a, orig_sr=sr, target_sr=16000)
             hw = heard(P, a16)
             _s, per, _m, _n = sentences_with_words(it["text_plain"], hw)
             th += [x for x in (thirds(ws) for ws in per.values()) if x]
+            pt += [x for x in (pitch_thirds(a16, ws) for ws in per.values()) if x]
             sims.append(float(sim.emb(a16) @ ref))
         joined = np.concatenate([librosa.resample(sf.read(it["audio"], dtype="float32")[0], orig_sr=24000,
                                                   target_sr=16000) for it in items[:30]])
         r = {"набор": name, "чтец": reader, "вариант": "живой чтец (его фразы)",
-             "похожесть": round(float(np.median(sims)), 3), **summarize(th), **dnsmos(joined)}
+             "похожесть": round(float(np.median(sims)), 3), **summarize(th), **pitch_summary(pt),
+             **dnsmos(joined)}
         rows.append(r)
     else:
         text = open(_sys.argv[3], encoding="utf-8").read() if _sys.argv[3].endswith(".txt") else None
@@ -158,6 +191,7 @@ def main() -> int:
             hw = heard(P, a16)
             sents, per, matched, n = sentences_with_words(text, hw)
             th = [x for x in (thirds(ws) for ws in per.values()) if x]
+            pt = [x for x in (pitch_thirds(a16, ws) for ws in per.values()) if x]
             sims = []
             for ws in per.values():
                 t0, t1 = ws[0][1], ws[-1][2]
@@ -166,7 +200,8 @@ def main() -> int:
             r = {"набор": name, "чтец": reader, "вариант": label or _os.path.basename(path),
                  "файл": path, "с": round(len(a16) / 16000, 1),
                  "похожесть": round(float(np.median(sims)), 3) if sims else None,
-                 "слов найдено, %": round(100 * matched / max(n, 1), 1), **summarize(th), **dnsmos(a16)}
+                 "слов найдено, %": round(100 * matched / max(n, 1), 1), **summarize(th), **pitch_summary(pt),
+                 **dnsmos(a16)}
             rows.append(r)
     with open(f"{OUT}/замеры.jsonl", "a", encoding="utf-8") as f:
         for r in rows:

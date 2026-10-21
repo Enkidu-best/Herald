@@ -233,6 +233,17 @@ def _ref_text_for_model(ref_text: str) -> str:
     return ref_text
 
 
+def voice_weights(voices_dir: str, voice: str) -> str | None:
+    """Свои веса голоса (11б, шаг 4: F5, дообученный на записях чтеца): рядом с образцом
+    «<голос>.f5model» - строка с папкой, где model_v1.safetensors (формат PyTorch, как у
+    Misha) и vocab.txt. Нет файла - веса общие для всех голосов."""
+    f = os.path.join(voices_dir, voice + ".f5model")
+    if not os.path.isfile(f):
+        return None
+    d = os.path.expanduser(open(f, encoding="utf-8").read().strip())
+    return d if os.path.isfile(os.path.join(d, "model_v1.safetensors")) else None
+
+
 def _chunk_by_bytes(text: str, max_bytes: int) -> list[str]:
     """Нарезка куска на под-куски по длине в БАЙТАХ - как chunk_text в torch."""
     chunks, cur = [], ""
@@ -413,6 +424,7 @@ class F5MLXEngine(F5Engine):
         # только на первых шагах; поздние шаги уточняют детали и идут одним
         # проходом - вдвое дешевле. None - на всех шагах, как в F5 (по умолчанию)
         self.cfg_steps = cfg_steps
+        self._own_dir: str | None = None   # свои веса голоса (voice_weights) - загружены сейчас
         self._audio_cache: dict[str, tuple] = {}
         self._pace = 1.0                  # поправка темпа под образец
         self._vocoder = None
@@ -456,6 +468,8 @@ class F5MLXEngine(F5Engine):
         загружался без ошибок, но голос был не тот и речь выходила кашей).
         """
         from huggingface_hub import hf_hub_download
+        if self._own_dir:
+            return self._own_dir
         if self.variant:
             return self._prepare_variant_dir()
         mdir = _mlx_model_dir(self.language)
@@ -535,6 +549,21 @@ class F5MLXEngine(F5Engine):
             mx.eval(self._f5.parameters())
         self._loaded = True
 
+    def _use_weights_of(self, voice: str) -> None:
+        """Голос со своими весами (voice_weights) - перезагрузить модель с ними; голос без
+        них после такого - вернуть общие. Книга читается одним голосом, так что
+        перезагрузка - раз на книгу."""
+        vid = os.path.splitext(os.path.basename(voice))[0] if os.path.isfile(voice) else voice
+        own = voice_weights(self.voices_dir, vid) if self.language == "ru" else None
+        if own == self._own_dir:
+            return
+        self._own_dir = own
+        self._audio_cache.clear()
+        if self._loaded:
+            self._loaded = False
+            self._f5 = None
+            self._vocoder = None
+
     # --- образец -> mx-аудио (кэш) --------------------------------------
     def _get_ref(self, voice: str):
         vid, wav, ref_text = self._resolve_voice(voice)
@@ -603,6 +632,7 @@ class F5MLXEngine(F5Engine):
         (проверяется в test_speed.py). headroom_mul > 1 - дать модели ещё
         больше времени (повтор куска с недоговорённым концом).
         """
+        self._use_weights_of(voice)
         self.ensure_loaded()
         n = len(texts)
         speed_muls = list(speed_muls or [1.0] * n)

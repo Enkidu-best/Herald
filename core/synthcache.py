@@ -41,6 +41,16 @@ def _voice_files_hash(voices_dir: str, voice: str) -> str:
             with open(p, "rb") as f:
                 _voice_hash[k] = hashlib.sha1(f.read()).hexdigest()
         parts.append(_voice_hash[k])
+    # свои веса голоса F5 (11б): у «… (F5, обучен)» образец тот же, что у обычного голоса -
+    # без этого кэш отдал бы звук прежней модели; переобучили - старые куски не годятся
+    p = os.path.join(voices_dir, voice + ".f5model")
+    if os.path.isfile(p):
+        w = os.path.join(os.path.expanduser(open(p, encoding="utf-8").read().strip()), "model_v1.safetensors")
+        try:
+            st = os.stat(w)
+            parts.append(f"f5model:{w}:{st.st_mtime_ns}:{st.st_size}")
+        except OSError:
+            parts.append("f5model:нет")
     return ",".join(parts)
 
 

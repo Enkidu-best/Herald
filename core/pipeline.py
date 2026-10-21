@@ -149,7 +149,13 @@ def _split_sentences(text: str, max_chars: int) -> list[tuple[str, bool]]:
     кусков второй признак False - это не конец предложения, пауза там короче.
     """
     out: list[tuple[str, bool]] = []
+    sents = []
     for sent in sentenize(text):
+        # 11б: «прыж+ок! -свеч+ение…» - после разметки реплика начинается со строчной и
+        # тире прилипает к слову, razdel не видит конца предложения; граница «!?.…» перед
+        # тире реплики - всегда конец предложения
+        sents += [x for x in _DIALOG_BREAK.split(sent) if x.strip()]
+    for sent in sents:
         if len(sent) > max_chars:
             pieces = _hard_split(sent, max_chars)
             out += [(p, i == len(pieces) - 1) for i, p in enumerate(pieces)]
@@ -185,23 +191,36 @@ def _pack_sentences(text: str, max_chars: int, gap: float):
     return chunks
 
 
-def _hard_split(sent: str, max_chars: int) -> list[str]:
+_DIALOG_BREAK = re.compile(r"(?<=[.!?…])\s+(?=[-–—]\s?\S)")
+# где можно резать слишком длинное предложение - по убыванию «естественности»; слово
+# не режется никогда (11б: «капит+а. / на.» - предложение без запятых резалось по символам)
+_CLAUSE_SPLITS = (r"(?<=[;:])\s+", r"(?<=,)\s+", r"\s+(?=[-–—]\s)", r"\s+(?=[-–—]\S)", r"\s+")
+
+
+def _hard_split(sent: str, max_chars: int, level: int = 0) -> list[str]:
+    """Слишком длинное предложение -> части до max_chars: сначала по «;» и «:», потом по
+    запятым, потом перед тире, в крайнем случае по пробелу; внутри слова - никогда."""
+    sent = sent.strip()
+    if len(sent) <= max_chars:
+        return [sent] if sent else []
+    if level >= len(_CLAUSE_SPLITS):
+        return [sent]                      # одно «слово» длиннее куска: не режем
     parts, buf = [], ""
-    for token in re.split(r"(,|;| — | - )", sent):
-        if len(buf) + len(token) <= max_chars:
-            buf += token
+    for piece in re.split(_CLAUSE_SPLITS[level], sent):
+        if not piece:
+            continue
+        cand = (buf + " " + piece) if buf else piece
+        if len(cand) <= max_chars:
+            buf = cand
         else:
-            if buf.strip():
-                parts.append(buf.strip())
-            buf = token
-    if buf.strip():
-        parts.append(buf.strip())
+            if buf:
+                parts.append(buf)
+            buf = piece
+    if buf:
+        parts.append(buf)
     out = []
     for p in parts:
-        while len(p) > max_chars:
-            out.append(p[:max_chars]); p = p[max_chars:]
-        if p:
-            out.append(p)
+        out += _hard_split(p, max_chars, level + 1) if len(p) > max_chars else [p]
     return out
 
 
@@ -729,6 +748,24 @@ def _fit_inner_pauses(audio: np.ndarray, sr: int, text: str, marks,
     for start, end, target in sorted(edits, reverse=True):   # с конца: начала не сдвигаются
         audio = _set_pause(audio, sr, start, end, target)
     return audio, len(edits)
+
+
+_denoised: set[str] = set()
+
+
+def _denoise_once(wav_path: str, voice: str) -> None:
+    """Шумоподавление голоса (fx.json «denoise», 11б) - один раз на файл главы: и для
+    части, и для склейки в один файл берётся тот же WAV."""
+    if not wav_path or wav_path in _denoised:
+        return
+    try:
+        atten = load_fx(default_voices_dir(), voice).denoise
+    except Exception:
+        atten = 0.0
+    if atten:
+        from .denoise import denoise_wav
+        if denoise_wav(wav_path, atten):
+            _denoised.add(wav_path)
 
 
 def _join(pieces: list[tuple[np.ndarray, float]], sr: int) -> np.ndarray:
@@ -1669,6 +1706,7 @@ def convert_book(path: str, *, engine: str = "f5", eng_kwargs: dict | None = Non
                 else f"{name}. {r.title}", r.wav_path, r.duration)
             try:
                 if not (reuse and os.path.exists(mp3)):
+                    _denoise_once(r.wav_path, voice)
                     encode_chapter_mp3(tagged, mp3, title=book_title, author=doc.author,
                                        hd=opts.hd_filter, fmt=opts.audio_format,
                                        fx=fx_chain, narrator=narrator)
@@ -1803,6 +1841,8 @@ def convert_book(path: str, *, engine: str = "f5", eng_kwargs: dict | None = Non
     single_path = None
     if opts.single_file and ordered:
         say(0.96, "Склеиваю части в один файл…")
+        for r in ordered:
+            _denoise_once(r.wav_path, voice)
         ext = FORMATS.get(opts.audio_format, FORMATS[DEFAULT_FORMAT])[0]
         folder = mp3_dir or out_dir
         single_path = os.path.join(folder, base + ext)

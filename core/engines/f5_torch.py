@@ -61,7 +61,7 @@ class F5TorchEngine(F5MLXEngine):
     def _weights_and_vocab(self) -> tuple[str, str]:
         from huggingface_hub import hf_hub_download
         # только для проб (11б, шаг 3б): папка с дообученными весами model_v1.safetensors + vocab.txt
-        own = os.environ.get("HERALD_F5_WEIGHTS")
+        own = self._own_dir or os.environ.get("HERALD_F5_WEIGHTS")   # свои веса голоса / пробы
         if own:
             return os.path.join(own, "model_v1.safetensors"), os.path.join(own, "vocab.txt")
         if self.variant:

@@ -34,10 +34,11 @@ class VoiceFX:
     pitch: float = 0.0        # полутона, -4…+4
     bass: float = 0.0         # дБ на 110 Гц, -6…+6
     brightness: float = 0.0   # дБ полкой с 7 кГц, -6…+6
+    denoise: float = 0.0      # 11б: шумоподавление DeepFilterNet готового звука, предел в дБ (0 - нет)
 
     def is_neutral(self) -> bool:
         return (self.speed == 1.0 and not (self.pitch or self.bass
-                                           or self.brightness))
+                                           or self.brightness or self.denoise))
 
     def filter_chain(self) -> str:
         """Цепочка фильтров ffmpeg. Пустая строка - если менять нечего."""
