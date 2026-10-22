@@ -13,6 +13,7 @@
     python "Инструменты разработки/long_piece_39.py" f5      # 11а, Г: Ященко и Герасимов движком F5
     python "Инструменты разработки/long_piece_39.py" обучен  # 11а, Д: обученные голоса Qwen
     python "Инструменты разработки/long_piece_39.py" f5обучен  # 11б, шаг 4: дообученный F5
+    python "Инструменты разработки/long_piece_39.py" f5обучен "<голос>=<имя файла>" ...  # 11б: свои голоса
 """
 from __future__ import annotations
 
@@ -102,7 +103,7 @@ def main_f5() -> int:
 F5_TRAINED = {"Игорь Ященко (F5, обучен)": "Ященко (F5, обучен)"}
 
 
-def main_f5_trained() -> int:
+def main_f5_trained(pairs: list[str] | None = None) -> int:
     import core.pipeline as P
     from core.profiles import PROFILES, engine_kwargs
     src = excerpt()
@@ -110,7 +111,8 @@ def main_f5_trained() -> int:
     _os.makedirs(dst, exist_ok=True)
     p = PROFILES["main"]
     stats = {}
-    for voice, name in F5_TRAINED.items():
+    voices = dict(x.split("=", 1) for x in pairs) if pairs else F5_TRAINED
+    for voice, name in voices.items():
         work = _os.path.abspath(_os.path.join(BANK, "длинный кусок", name))
         shutil.rmtree(work, ignore_errors=True)
         opts = P.ConvertOptions(use_cache=False, single_file=True, minutes_per_file=60,
@@ -168,8 +170,8 @@ def main() -> int:
         return main_f5()
     if _sys.argv[1:] == ["обучен"]:
         return main_trained()
-    if _sys.argv[1:] == ["f5обучен"]:
-        return main_f5_trained()
+    if _sys.argv[1:2] == ["f5обучен"]:
+        return main_f5_trained(_sys.argv[2:])
     src = excerpt()
     _os.makedirs(DST, exist_ok=True)
     stats = {}

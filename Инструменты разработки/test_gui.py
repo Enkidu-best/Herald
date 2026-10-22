@@ -248,7 +248,7 @@ def main() -> int:
             must(q in app._rtf_key() and G.VERSION in app._rtf_key(), app._rtf_key())
         app.quality_var.set(cfg_backup.get("quality", "balanced"))
         app._on_quality()
-        ready = next(v for v in app._voices if v.ready)
+        ready = next(v for v in app._voices if v.ready and v.engine == "silero")   # задание 12: по алфавиту первым может быть Vosk
         app.voice_var.set(ready.label())
         must(app._eng_choice()[0] == "silero", "готовый голос - не Silero")
         must(app._rtf() == profiles.SILERO.rtf, "прогноз для Silero")
@@ -309,13 +309,19 @@ def main() -> int:
     check("проверка слов по звуку включена, строгой 3.2 в окне нет", checks)
 
     def rtf_live():
+        old = app.cfg.get("rtf", {}).get(app._rtf_key())
         app._set_busy(True, "тест")
         app._got_rtf(2.05)
         app._show_progress(0.3, "Озвучиваю: часть 1 из 2")
         t = app.status.cget("text")
         app._set_busy(False)
         must("RTF 2,05" in t, t)
-        must(abs(app.cfg["rtf"][app._rtf_key()] - 2.05) < 0.5, app.cfg.get("rtf"))
+        # замер сглаживается с прежним (0,7 × старое + 0,3 × новое): при настоящем прежнем
+        # замере на этом Mac ждём именно сглаженное значение, а не 2,05
+        want = 2.05 if not old else 0.7 * old + 0.3 * 2.05
+        must(abs(app.cfg["rtf"][app._rtf_key()] - want) < 0.01, (old, app.cfg.get("rtf")))
+        if old:
+            app.cfg["rtf"][app._rtf_key()] = old          # настоящий замер Андрея - как был
         must("замерено" in app.tech_label.cget("text"), "замер не показан в Настройках")
     check("честный RTF: в строке состояния и в Настройках", rtf_live)
     app.profile_var.set(cfg_backup.get("profile", "main"))
@@ -667,9 +673,9 @@ def main() -> int:
             return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
         L1, L2 = sorted((lum(G.SAY_HL_BG), lum(G.SAY_HL_FG)), reverse=True)
         must((L1 + 0.05) / (L2 + 0.05) >= 7, "контраст подсветки ниже 7:1")
-        sl0 = app._say_fx_vars["speed"][0]
-        must(abs(sl0.cget("from_") - 0.5) < 1e-6 and abs(sl0.cget("to") - 1.5) < 1e-6,
-             "темп 0,5…1,5")
+        # задание 12: ползунков звучания и A− / A+ здесь нет - звучание одно, на «Голосах»
+        must(not hasattr(app, "_say_fx_vars") and not hasattr(app, "say_zoom_lbl"),
+             "на «Прочитать вслух» остались ползунки звучания или A− / A+")
         app.say_clones_var.set(True)
         app._on_say_clones()
         app.update()
@@ -686,23 +692,30 @@ def main() -> int:
         app._say_on_kind("Быстрый")
         app._say_on_kind("Клон")
         must(app.say_voice_var.get() == want, "выбор клона не запомнился")
-        # ползунок темпа - прогноз пересчитывается сразу
+        # темп сохранён для голоса на «Голосах» - строка звучания и прогноз его видят
         app.say_box.delete("1.0", "end")
         app.say_box.insert("1.0", "Море к вечеру стихло. " * 30)
         app._say_text_changed()
-        sl = app._say_fx_vars["speed"][0]
-        sl.set(0.8)
-        app._say_fx_changed("speed")
+        v = app._say_voice()
+        keep = load_fx(default_voices_dir(), v.id)
         slow = app.say_forecast.cget("text")
-        sl.set(1.2)
-        app._say_fx_changed("speed")
-        must(app.say_forecast.cget("text") != slow, "прогноз не пересчитан по темпу")
-        app._say_fx_reset()
-        must(abs(sl.get() - 1.0) < 1e-6, "«Сбросить»")
+        try:
+            fx = load_fx(default_voices_dir(), v.id)
+            fx.speed = 1.2
+            save_fx(default_voices_dir(), v.id, fx)
+            app._say_on_voice(remember=False)
+            must("1,20" in app.say_fx_line.cget("text"), app.say_fx_line.cget("text"))
+            must(app.say_forecast.cget("text") != slow, "прогноз не пересчитан по темпу")
+        finally:
+            save_fx(default_voices_dir(), v.id, keep)
+        app._say_on_voice(remember=False)
+        app._open_voice_fx(app._say_voice())
+        must(app.page == "voices" and app._fx_voice == v.id, "«Звучание голоса ›» не открыла голос")
+        app.show("say")
         app._say_on_kind("Быстрый")
         app.say_clones_var.set(False)
         app._on_say_clones()
-    check("голоса: клоны скрыты, подписи, темп 0,5-1,5, светлая подсветка, прогноз", say_voices)
+    check("голоса: клоны скрыты, подписи, звучание - ссылкой на «Голоса», светлая подсветка, прогноз", say_voices)
 
     def stream_locked():
         app._set_busy(True, "тест")
@@ -873,6 +886,8 @@ def main() -> int:
         app.update()
         must(not hasattr(app, "vm_rows"), "в Настройках осталась карточка голосов")
         app.show("voices")
+        app.show_hidden_var.set(True)              # задание 12: скрытые - по флажку
+        app._refresh_voice_rows()
         app.update()
         rows = app._voice_row_widgets
         for vid in [c.id for c in VS.CATALOG]:
@@ -945,9 +960,233 @@ def main() -> int:
                     app.cfg.pop(k, None)
                 else:
                     app.cfg[k] = v
+            app.show_hidden_var.set(False)
             app.refresh_voices()
             app._refresh_voice_rows()
     check("«Голоса»: строка на голос, послушать, скачать, нет сети, «⋯» удалить, Vosk, своё имя", voice_manager, limit=60)
+
+    print("задание 12:")
+
+    def voice_order():
+        """Порядок: «Мои голоса», «Русские», «Английские», по алфавиту; Qwen - в русских."""
+        app.show("voices")
+        app._refresh_voice_rows()
+        app.update()
+        heads = [c.cget("text") for c in app.voice_rows.winfo_children()
+                 if isinstance(c, ctk.CTkLabel) and " · " in str(c.cget("text"))]
+        must(heads and heads[0].startswith("Мои голоса · "), f"группы: {heads}")
+        must([h.split(" · ")[0] for h in heads][:3] == ["Мои голоса", "Русские", "Английские"], heads)
+        vs = app._voices
+        mine = [v for v in vs if v.mine]
+        must(vs[:len(mine)] == mine, "«Мои голоса» не первые в списке выбора")
+        ru = [G._(v.title).lower() for v in vs if v.group() == "ru"]
+        must(ru == sorted(ru), "русские не по алфавиту")
+        if app._qwen_ok():
+            q = [v for v in vs if v.qwen]
+            must(q and all(v.group() == "ru" for v in q), "голоса Qwen не в русских")
+            must(all(" · Qwen" in v.label() for v in q), "у голоса Qwen нет пометки")
+            eng, kw = None, None
+            keep = app.voice_var.get()
+            app.voice_var.set(q[0].label())
+            eng, kw = app._eng_choice()
+            app.voice_var.set(keep)
+            must(eng == "mlxaudio", f"голос Qwen читает не Qwen: {eng}")
+        must(not any(v.hidden for v in vs), "скрытый голос в списке выбора")
+    check("порядок голосов: «Мои голоса», русские, английские; Qwen - в русских", voice_order)
+
+    def voice_trash():
+        """«Удалить…» клона - в корзину, «Вернуть» - назад; «Удалить навсегда» - из корзины."""
+        import shutil as _sh
+        from core import trash
+        from tkinter import messagebox as mb
+        vd = default_voices_dir()
+        src = next(v.id for v in app._all_voices() if not v.ready and not v.qwen)
+        name = "Тест корзины 12"
+        for e in (".wav", ".txt"):
+            _sh.copy(os.path.join(vd, src + e), os.path.join(vd, name + e))
+        real_yes = mb.askyesno
+        mb.askyesno = lambda *a, **k: True
+        try:
+            app.refresh_voices()
+            must(any(v.id == name for v in app._voices), "тестовый голос не появился")
+            app._voice_trash(name)
+            must(not any(v.id == name for v in app._all_voices()), "голос не удалился")
+            it = next((x for x in trash.items() if x.title == name), None)
+            must(it is not None, "в корзине нет голоса")
+            must("Вернуть" == app.vm_undo.cget("text"), "нет «Вернуть» после удаления")
+            app.vm_undo.invoke()
+            must(any(v.id == name for v in app._voices), "голос не вернулся из корзины")
+            app._voice_trash(name)
+            it = next(x for x in trash.items() if x.title == name)
+            app.show("settings")
+            app._refresh_trash()
+            app._trash_purge(it)
+            must(not any(x.id == it.id for x in trash.items()), "«Удалить навсегда» не удалил")
+        finally:
+            mb.askyesno = real_yes
+            for e in (".wav", ".txt", ".src.json", ".fx.json"):
+                try:
+                    os.remove(os.path.join(vd, name + e))
+                except OSError:
+                    pass
+            for x in trash.items():
+                if x.title == name:
+                    trash.purge(x)
+            app.refresh_voices()
+            app._refresh_voice_rows()
+    check("«Удалить…» клона - в корзину, «Вернуть», «Удалить навсегда»", voice_trash)
+
+    def aa_popover():
+        """«Aa» - одна панель в окне (не окно), повторное нажатие закрывает; 80-200 %."""
+        import tkinter as _tk
+        keep = app._scale
+        tops = lambda: [w for w in app.winfo_children() if isinstance(w, _tk.Toplevel)]
+        n0 = len(tops())
+        try:
+            for _i in range(5):
+                app._aa_popup()
+                app.update()
+            must(len(tops()) == n0, "«Aa» открывает отдельное окно")
+            must(app._aa_pop.winfo_ismapped(), "после 5 нажатий панель должна быть открыта")
+            app._aa_popup()
+            app.update()
+            must(not app._aa_pop.winfo_ismapped(), "повторное «Aa» не закрыло панель")
+            for _i in range(20):
+                app._scale_by(0.1)
+            must(abs(app._scale - 2.0) < 1e-6, f"предел сверху: {app._scale}")
+            for _i in range(20):
+                app._scale_by(-0.1)
+            must(abs(app._scale - 0.8) < 1e-6, f"предел снизу: {app._scale}")
+            app._scale_by(None)
+            must(abs(app._scale - G.DEFAULT_SCALE) < 1e-6, "«Сбросить» - не 120 %")
+            must(app.bind_all("<Command-equal>") or app.bind_all("<Control-equal>"), "нет Cmd+=")
+        finally:
+            app._set_scale(keep)
+            app._aa_close()
+            app.update()
+    check("«Aa»: одна панель в окне, повторное нажатие закрывает, 80-200 %, Cmd+= / − / 0", aa_popover)
+
+    def book_no_scroll():
+        """«Озвучка»: правая панель целиком видна при 1440×900, масштаб 100 и 120 %."""
+        keep, geo = app._scale, app.geometry()
+        try:
+            app.show("book")
+            for k in (1.0, 1.2):
+                app._set_scale(k)
+                app.geometry("1440x810")              # 1440×900 без строки меню и Dock
+                app.update()
+                time.sleep(0.2)
+                app.update()
+                o = app.opts_box
+                must(o.winfo_reqheight() <= o.winfo_height() + 2,
+                     f"масштаб {k:.0%}: панель {o.winfo_reqheight()} px, видно {o.winfo_height()} px")
+                must(not isinstance(o, ctk.CTkScrollableFrame), "панель с прокруткой")
+        finally:
+            app._set_scale(keep)
+            app.geometry(geo)
+            app.update()
+    check("«Озвучка» без прокрутки при 1440×900 и 100 / 120 %", book_no_scroll)
+
+    def formats():
+        """mp3 64-320 и FLAC в списке, с размером часа; оценка места по битрейту."""
+        vals = app.fmt_menu.cget("values")
+        must(len(vals) == 6 and all("МБ/ч" in v for v in vals), vals)
+        must(app._fmt() in G.FORMATS, app._fmt())
+        app._set_book(book)
+        wait(lambda: app.est is not None)
+        keep = app.fmt_var.get()
+        sizes = {}
+        for key in ("mp3 192 кбит/с (обычный)", "mp3 64 кбит/с (речь, моно, самый маленький файл)"):
+            app.fmt_var.set(app._fmt_label(key))
+            app.show_estimate()
+            sizes[key] = app.est_label.cget("text")
+        app.fmt_var.set(keep)
+        app._remember()
+        must(len(set(sizes.values())) == 2, f"оценка места не зависит от формата: {sizes}")
+        must("." not in app.est_label.cget("text").split("на диске")[-1].split()[0].strip("~"),
+             "размер с точкой")
+    check("формат: mp3 320 / 192 / 128 / 96 / 64 и FLAC, размер часа, оценка места", formats)
+
+    def service_files():
+        """Строка «Служебные файлы» в карточке книги, «Очистить» - в корзину."""
+        from core import trash
+        from tkinter import messagebox as mb
+        d = os.path.join(P.output_dir_for(book), P.SERVICE_DIR)
+        os.makedirs(d, exist_ok=True)
+        open(os.path.join(d, "проба.txt"), "w").write("x" * 4096)
+        real_yes = mb.askyesno
+        mb.askyesno = lambda *a, **k: True
+        try:
+            app._set_book(book)
+            must(pump(lambda: app.svc_line.winfo_manager() != "", 10), "строки «Служебные файлы» нет")
+            must("Служебные файлы" in app.svc_lbl.cget("text"), app.svc_lbl.cget("text"))
+            app._service_clear()
+            must(not os.path.exists(d), "служебные файлы не убрались")
+            must(any(x.kind == "service" for x in trash.items()), "в корзине их нет")
+        finally:
+            mb.askyesno = real_yes
+            for x in trash.items():
+                if x.kind == "service" and x.title == os.path.basename(P.output_dir_for(book)):
+                    trash.purge(x)
+            import shutil as _sh
+            _sh.rmtree(P.output_dir_for(book), ignore_errors=True)
+    check("служебные файлы: строка, «Очистить» - в корзину", service_files)
+
+    def recent_and_restart():
+        """«Недавние книги» в пустой карточке; «Начать заново» спрашивает."""
+        from tkinter import messagebox as mb
+        keep = list(app.cfg.get("recent_books") or [])
+        try:
+            app._set_book(book)
+            must(app._recent_list()[0] == os.path.abspath(book), app._recent_list())
+            app.clear_book()
+            app.update()
+            texts = [c.cget("text") for c in app.recent_box.winfo_children() if hasattr(c, "cget")]
+            must(any("Недавние книги" in str(t) for t in texts), texts)
+            must(str(app.start_btn.cget("state")) == "disabled", "без книги «Озвучить книгу» активна")
+            must(not app.pause_btn.winfo_manager(), "«Пауза» видна без озвучки")
+            app._set_book(book)
+            asked, real_yes = [], mb.askyesno
+            mb.askyesno = lambda *a, **k: (asked.append(a), False)[1]
+            forgot = []
+            real_forget = G.forget_progress
+            G.forget_progress = lambda p: forgot.append(p)
+            app._resume = {"done": 1, "total": 3}
+            app.do_restart()
+            mb.askyesno, G.forget_progress = real_yes, real_forget
+            must(asked and not forgot, "«Начать заново» не спросило или стёрло без согласия")
+        finally:
+            app.cfg["recent_books"] = keep
+            app._resume = None
+    check("«Недавние книги», одна главная кнопка, «Пауза» - только в работе, «Начать заново» спрашивает",
+          recent_and_restart)
+
+    def stress_fix():
+        """«Как будет прочитано»: щелчок по спорному слову - ударение для этой книги."""
+        from core import bookfix
+        keep_prep = P.prepare_read_text
+        P.prepare_read_text = lambda path, opts: "=== Часть 1 ===\n\nСтарый з+амок и новый з+амок.\n"
+        real_path, real_disp = P.read_text_path, P.read_disputed
+        P.read_text_path = lambda path, out_dir=None: "/нет/такого/файла"
+        P.read_disputed = lambda path, out_dir=None: ["замок"]
+        keep_fix = bookfix.load(book)
+        try:
+            app._set_book(book)
+            app.show_read_text()
+            must(pump(lambda: getattr(app, "_read_win", None) is not None
+                      and app._read_win.winfo_exists()
+                      and getattr(app._read_win, "_disputed", 0) == 2, 10), "окно не открылось")
+            bookfix.set_fix(book, "замок", 3)           # как выбор «Ударение: замо́к»
+            app._read_win._render()
+            body = app._read_win._box.get("1.0", "end")
+            must(body.count("замо\u0301к") == 2 and app._read_win._fixed == 1, repr(body))
+            must(bookfix.apply("в з+амке и з+амок", bookfix.load(book)) == "в з+амке и зам+ок",
+                 "поправка задела другое слово или не встала")
+            app._read_win.destroy()
+        finally:
+            bookfix.set_fix(book, "замок", keep_fix.get("замок"))
+            P.prepare_read_text, P.read_text_path, P.read_disputed = keep_prep, real_path, real_disp
+    check("«Как будет прочитано»: поправка спорного ударения для книги", stress_fix)
 
     G.S.speak, G.S.default_sink, G.preview_sample = real_speak, real_sink, real_preview
 

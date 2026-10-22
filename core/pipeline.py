@@ -114,6 +114,10 @@ class ConvertOptions:
     # слово - пересчёт куска с другим зерном. Заменяет строгую проверку 3.2,
     # которая сравнивала текст Whisper с текстом книги и ловила не то.
     sound_check: bool = True
+    # Задание 12: книга полностью озвучена и собрана - «_служебное» в корзину
+    # (core/trash, 30 дней). Окно берёт из Настроек (по умолчанию да), консоль - нет.
+    # В отпечаток «Продолжить» не входит: на звук не влияет.
+    cleanup_service: bool = False
 
 
 @dataclass
@@ -126,6 +130,7 @@ class ConvertResult:
     author: str
     fresh_sec: float = 0.0           # звука посчитано заново (без кэша), 3.8
     cached: int = 0                  # кусков взято из кэша
+    service_trashed: bool = False    # служебные файлы ушли в корзину (задание 12)
 
 
 def _safe_name(s: str) -> str:
@@ -1369,6 +1374,7 @@ def prepare_read_text(path: str, opts: "ConvertOptions") -> str:
               for ch in chapters]
     if opts.use_stress and lang == "ru":
         bodies, _u = unify_book(bodies)
+        bodies = _book_fixes(path, bodies)
     out = []
     for ci, (ch, body) in enumerate(zip(chapters, bodies), 1):
         chunks = _chunk_paragraphs(body, 187, opts.gap_sec, opts.para_gap_sec, opts.dialog_gap_sec)
@@ -1380,6 +1386,35 @@ def prepare_read_text(path: str, opts: "ConvertOptions") -> str:
     except Exception as e:
         log_problem("спорные ударения не сохранились", e, show=False)
     return "\n".join(out)
+
+
+def _book_fixes(path: str, bodies: list[str]) -> list[str]:
+    """Поправки ударений этой книги (core/bookfix, задание 12) - после всех шагов.
+    Нет поправок - текст тот же, отпечаток «Продолжить» не меняется."""
+    try:
+        from . import bookfix
+        fixes = bookfix.load(path)
+    except Exception as e:
+        log_problem("поправки ударений книги не прочитались", e, show=False)
+        return bodies
+    return [bookfix.apply(b, fixes) for b in bodies] if fixes else bodies
+
+
+def service_size(path: str, out_dir: str | None = None) -> int:
+    """Сколько байт занимают служебные файлы книги («.herald», «_служебное»)."""
+    from .trash import _size
+    d = output_dir_for(path, out_dir)
+    return sum(_size(os.path.join(d, x)) for x in (STATE_DIR, SERVICE_DIR)
+               if os.path.exists(os.path.join(d, x)))
+
+
+def trash_service(path: str, out_dir: str | None = None) -> bool:
+    """«Очистить»: служебные файлы книги - в корзину одной записью."""
+    from . import trash
+    d = output_dir_for(path, out_dir)
+    title = os.path.basename(d)
+    return trash.put([os.path.join(d, x) for x in (SERVICE_DIR, STATE_DIR)], "service",
+                     title) is not None
 
 
 def read_text_path(path: str, out_dir: str | None = None) -> str:
@@ -1636,6 +1671,7 @@ def convert_book(path: str, *, engine: str = "f5", eng_kwargs: dict | None = Non
                 f"{v} ({n})" for v, n in list(unified.values())[:40]))
             print(f"ℹ Ударения: у {len(unified)} слов вне словаря выровнено по книге "
                   f"({sum(n for _w, n in unified.values())} мест)", file=sys.stderr)
+        bodies = _book_fixes(path, bodies)
     prepared = [(ch.title, _chunk_paragraphs(body, meta.max_chunk_chars, opts.gap_sec,
                                              opts.para_gap_sec, opts.dialog_gap_sec))
                 for ch, body in zip(chapters, bodies)]
@@ -1681,6 +1717,7 @@ def convert_book(path: str, *, engine: str = "f5", eng_kwargs: dict | None = Non
     rendered: dict[int, RenderedChapter] = {}
     workers = max(1, int(opts.workers))
     stats: dict = {}                    # свежий звук и куски из кэша (3.8)
+    failed: set[int] = set()            # части, которые не записались (задание 12)
 
     def emit(ci: int, r: RenderedChapter, expected_chars: int = 0,
              reuse: bool = False):
@@ -1692,6 +1729,7 @@ def convert_book(path: str, *, engine: str = "f5", eng_kwargs: dict | None = Non
             print(f"[!] файл {ci}: на {expected_chars} символов вышло всего "
                   f"{r.duration:.1f} с звука - синтез не сработал, файл не записан. "
                   f"Прежний результат (если был) остался на месте.", file=sys.stderr)
+            failed.add(ci)
             if on_chapter:
                 on_chapter(ci, r.title, None)
             return
@@ -1713,6 +1751,7 @@ def convert_book(path: str, *, engine: str = "f5", eng_kwargs: dict | None = Non
             except Exception as e:
                 log_problem(f"не записался файл части {ci}", e)
                 mp3 = None
+                failed.add(ci)
             if on_chapter:
                 on_chapter(ci, r.title, mp3)
         elif on_chapter:
@@ -1866,12 +1905,22 @@ def convert_book(path: str, *, engine: str = "f5", eng_kwargs: dict | None = Non
 
     # книга целиком готова: сырые части больше не нужны. До этой строки они
     # лежат в «.herald» — на случай сбоя, чтобы не считать книгу заново.
+    trashed = False
     if len(ordered) == len(prepared):
         shutil.rmtree(workdir, ignore_errors=True)
+        # задание 12: служебные файлы готовой книги - в корзину (если все части записаны)
+        if opts.cleanup_service and not failed:
+            try:
+                from . import trash
+                trashed = trash.put([os.path.join(book_dir, SERVICE_DIR)], "service",
+                                    book_title) is not None
+            except Exception as e:
+                log_problem("служебные файлы книги не убрались в корзину", e, show=False)
     say(1.0, "Готово")
     return ConvertResult(m4b_path, mp3_dir, 1 if single_path else len(ordered),
                          total_dur, book_title, doc.author,
-                         float(stats.get("fresh_sec", 0.0)), int(stats.get("cached", 0)))
+                         float(stats.get("fresh_sec", 0.0)), int(stats.get("cached", 0)),
+                         trashed)
 
 
 # --- оценка объёма книги (без синтеза) ----------------------------------
@@ -1949,6 +1998,8 @@ def preview_sample(path: str, *, engine: str = "f5", eng_kwargs: dict | None = N
 
     text = _prepare_text(ch.text, getattr(eng, "stress_format", None),
                          opts.expand_numbers, opts.use_stress, doc_lang)
+    if opts.use_stress and getattr(eng, "stress_format", None) == "+" and doc_lang == "ru":
+        text = _book_fixes(path, [text])[0]
     # берём абзацы из середины целиком: так в пробнике слышны и паузы абзацев,
     # и паузы между репликами диалога - те же, что будут в книге
     paras = [p for p in re.split(r"\n\s*\n", text) if p.strip()]
