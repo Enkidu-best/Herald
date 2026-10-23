@@ -148,6 +148,10 @@ class F5Engine(TTSEngine):
 
         Возвращает voice_id (имя голоса), который дальше передаётся как voice.
         """
+        # битая запись - сразу понятная ошибка, до загрузки Whisper (задание 14: раньше
+        # модель грузилась секунды-минуты, а потом всё равно падала на чтении файла)
+        if self._duration(audio_path) <= 0:
+            raise ValueError("Запись не читается: файл повреждён или это не звук.")
         name = name or os.path.splitext(os.path.basename(audio_path))[0]
         name = "".join(c for c in name if c.isalnum() or c in " _-").strip() or "voice"
         wav_out = os.path.join(self.voices_dir, name + ".wav")

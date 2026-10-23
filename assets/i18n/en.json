@@ -353,7 +353,14 @@
   "Скачиваю (.+?): (\\d+) из (\\d+) МБ": "Downloading \\1: \\2 of \\3 MB",
   "источник ответил ошибкой (\\d+): (.*)": "the source replied with error \\1: \\2",
   "файл (.+?) скачался с ошибкой \\(не сошлась контрольная сумма\\) - попробуйте ещё раз": "file \\1 downloaded with an error (checksum mismatch) - please try again",
-  "голос Piper (.+?) не скачан - «Скачать» в Настройках": "Piper voice \\1 is not downloaded - use “Download” in Settings"
+  "голос Piper (.+?) не скачан - «Скачать» в Настройках": "Piper voice \\1 is not downloaded - use “Download” in Settings",
+  "^Ударения: у (\\d+) слов вне словаря выровнено по книге \\((\\d+) мест\\)$": "Stress: \\1 out-of-dictionary words made the same across the book (\\2 places)",
+  "^Продолжаю: готовых частей из прошлого раза - (\\d+) из (\\d+)$": "Continuing: \\1 of \\2 parts ready from last time",
+  "^\\[голос\\] отброшено фрагментов: ": "[voice] fragments rejected: ",
+  "^озвучка для других программ: (.+)$": "narration for other programs: \\1",
+  "^сервис: быстрый голос не загрузился заранее: (.+)$": "service: the fast voice did not preload: \\1",
+  "^сервис: модели выгружены после простоя$": "service: models unloaded after idle time",
+  "^сервис: озвучка не удалась: (.+)$": "service: narration failed: \\1"
  },
  "Так текст уйдёт в модель: числа словами, ударение - знак над гласной.": "This is how the text goes to the model: numbers as words, stress - a mark over the vowel.",
  "Служебные файлы книги - в корзину (30 дней)?": "Move the book's service files to the trash (30 days)?",
@@ -444,5 +451,13 @@
  "Остановить и закрыть": "Stop and close",
  "Готовые куски запоминаются: смена пауз или формата пересобирает книгу за минуты.": "Finished chunks are remembered: changing pauses or format rebuilds the book in minutes.",
  "«{0}»: на секунду звука ~{1} с счёта ({2}).": "\"{0}\": ~{1} s of computing per second of audio ({2}).",
- "Модель уточняет звук за {0} шагов.": "The model refines the sound in {0} steps."
+ "Модель уточняет звук за {0} шагов.": "The model refines the sound in {0} steps.",
+ "Пробник: {0:.0f} с звука, счёт {1}": "Sample: {0:.0f} s of audio, computed in {1}",
+ ", первый звук через {0:.1f} с, запинок {1}": ", first sound after {0:.1f} s, stalls {1}",
+ "Готово. Звука {0}, счёт {1} (на секунду звука {2:.2f} с)": "Done. Audio {0}, computed in {1} ({2:.2f} s per second of audio)",
+ "Папка: {0}": "Folder: {0}",
+ "Остановлено. Готовые части остались на диске.": "Stopped. Finished parts stay on disk.",
+ "Меню": "Menu",
+ "Свернуть меню можно, когда озвучка закончится.": "The menu can be collapsed when narration is finished.",
+ "Запись не читается: файл повреждён или это не звук.": "The recording cannot be read: the file is damaged or is not audio."
 }

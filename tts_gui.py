@@ -439,9 +439,12 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
     def ui_error(self, where: str, e: BaseException, show) -> None:
         """Сбой в потоке: в журнал и в окно - show(текст) в главном потоке. Текст берётся сразу:
         `e` Python удаляет при выходе из except, а лямбда выполнится позже (задание 13, А)."""
-        log_problem(where, e, show=False)
         msg = tr_msg(str(e)) or type(e).__name__
-        self.ui(lambda: show(msg))
+        self.ui(lambda: show(msg))            # сначала в окно - запись в журнал не задерживает
+        try:
+            log_problem(where, e, show=False)
+        except Exception:
+            pass
 
     def _drain(self):
         try:
@@ -638,6 +641,9 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         save_config(self.cfg)
 
     def _toggle_menu(self):
+        if self.running:                     # окно во время озвучки не пересобирается (задание 14 Б1)
+            messagebox.showinfo(_("Меню"), _("Свернуть меню можно, когда озвучка закончится."))
+            return
         self.cfg["menu_collapsed"] = not bool(self.cfg.get("menu_collapsed", False))
         save_config(self.cfg)
         self._restart()
@@ -1178,8 +1184,9 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
             pb.pack(side="left", padx=(10, 0))
             self._prof_btns[p.key] = pb
             self._profile_radios.append(r)
-            T.label(b, _(p.hint), 12, color=T.MUTED, anchor="w", justify="left",
-                    wraplength=640).pack(fill="x", padx=(30, 0))
+        # пояснение - одной строкой и только для выбранного (стандарт 4.1, задание 14 Б2)
+        self.prof_hint = T.label(b, "", 12, color=T.MUTED, anchor="w", justify="left", wraplength=640)
+        self.prof_hint.pack(fill="x", padx=(30, 0), pady=(6, 0))
 
         cp = T.card(page)
         cp.pack(fill="x", padx=24, pady=(0, 14))
@@ -1232,8 +1239,9 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
                                    command=self._on_quality)
             r.pack(anchor="w", pady=(8, 0))
             self._quality_radios.append(r)
-            T.label(bq, _(q.hint), 12, color=T.MUTED, anchor="w", justify="left",
-                    wraplength=640).pack(fill="x", padx=(30, 0))
+        self.quality_hint = T.label(bq, "", 12, color=T.MUTED, anchor="w", justify="left", wraplength=640)
+        self.quality_hint.pack(fill="x", padx=(30, 0), pady=(6, 0))
+        self._option_hints()
         # «не действует» - для движка или голоса, у которых свой счёт (задание 13 Г4)
         self.quality_note = T.label(bq, "", 12, color=T.WARN, anchor="w", justify="left", wraplength=640)
         self.quality_note.pack(fill="x", pady=(6, 0))
@@ -1829,7 +1837,16 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
             snd = _("Не действует для английской книги.")
         self.sound_note.configure(text=snd)
 
+    def _option_hints(self):
+        """Пояснение к выбранному движку и качеству - одна строка под группой."""
+        if hasattr(self, "prof_hint"):
+            self.prof_hint.configure(text=_(self.profile().hint))
+        if hasattr(self, "quality_hint"):
+            q = profiles.QUALITY.get(self.quality_var.get())
+            self.quality_hint.configure(text=_(q.hint) if q else "")
+
     def _on_quality(self):
+        self._option_hints()
         self.cfg["quality"] = self.quality_var.get()
         save_config(self.cfg)
         self._srv_sync()
@@ -1840,6 +1857,7 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
 
     def _on_profile(self):
         self.cfg["profile"] = self.profile_var.get()
+        self._option_hints()
         save_config(self.cfg)
         self._srv_sync()
         self._update_tech()
@@ -3474,18 +3492,24 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         self.est = None
         self.est_label.configure(text=_("Считаю объём книги…"))
         path, minutes = self.book_path, self.file_minutes()
+        # у каждой оценки свой номер (задание 14 А): ответ и ошибка прошлой оценки -
+        # даже той же книги - отбрасываются, новая её не ждёт
+        self._est_gen = gen = getattr(self, "_est_gen", 0) + 1
+
+        def failed(m):
+            if gen == self._est_gen:
+                self.est_label.configure(text=_('Не удалось прочитать книгу: {0}').format(m))
 
         def work():
             try:
                 est = estimate_book(path, minutes)
-                self.ui(lambda: self._got_estimate(path, est))
+                self.ui(lambda: self._got_estimate(path, est, gen))
             except Exception as e:
-                self.ui_error("книга не прочиталась", e, lambda m: self.est_label.configure(
-                    text=_('Не удалось прочитать книгу: {0}').format(m)))
-        threading.Thread(target=work, daemon=True).start()
+                self.ui_error("книга не прочиталась", e, failed)
+        threading.Thread(target=work, daemon=True, name="estimate").start()
 
-    def _got_estimate(self, path, est):
-        if path != self.book_path:
+    def _got_estimate(self, path, est, gen=None):
+        if path != self.book_path or (gen is not None and gen != getattr(self, "_est_gen", gen)):
             return
         self.est = est
         from core.chapters import clean_book_title
@@ -3947,6 +3971,8 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         self.status.configure(text=_("Останавливаю после текущего куска…"))
 
     def _logln(self, text: str):
+        # строки ядра («ℹ …», сервис /speak) - на языке окна по шаблонам (задание 14 Б3)
+        text = "\n".join(tr_msg(x) for x in text.split("\n"))
         self.ui(lambda: (self.log.insert("end", text + "\n"), self.log.see("end")))
 
     def _log_settings(self, what: str, engine: str, kw: dict, voice: str):
@@ -3956,7 +3982,7 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         if e is not None:
             self.log.insert("end", _('  книга: {0}, ~{1} звука, язык {2}\n').format(_files(e.chapters), _fmt_hms(e.audio_sec), getattr(e, 'language', '?')))
         size = _("одним файлом") if self.single_file() else _('части по {0}').format(self._len())
-        self.log.insert("end", _('  голос: {0} · движок «{1}» ({2}, {3})\n  запись: {4} · {5}\n  звучание: темп ×{6:.2f}, высота {7:+.1f}, бас {8:+.1f}, яркость {9:+.1f}\n\n').format(voice, self.profile().title, engine, kw, self._fmt(), size, fx.speed, fx.pitch, fx.bass, fx.brightness))
+        self.log.insert("end", _('  голос: {0} · движок «{1}» ({2}, {3})\n  запись: {4} · {5}\n  звучание: темп ×{6:.2f}, высота {7:+.1f}, бас {8:+.1f}, яркость {9:+.1f}\n\n').format(voice, _(self.profile().title), engine, kw, self._fmt(), size, fx.speed, fx.pitch, fx.bass, fx.brightness))
 
     def do_preview(self):
         """«Проверить голос (1 мин)»: звук идёт по мере готовности, а в конце пробник
@@ -3996,8 +4022,8 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
                 shutil.rmtree(os.path.dirname(out), ignore_errors=True)
                 dur = len(a) / sr
                 fs = live.first_sound
-                self._logln(f"Пробник: {dur:.0f} с звука, счёт {_fmt_hms(time.time() - t0)}"
-                            + (f", первый звук через {fs:.1f} с, запинок {live.stalls}"
+                self._logln(_('Пробник: {0:.0f} с звука, счёт {1}').format(dur, _fmt_hms(time.time() - t0))
+                            + (_(', первый звук через {0:.1f} с, запинок {1}').format(fs, live.stalls)
                                if fs is not None else ""))
                 self.ui(lambda: self._add_part(_("Пробник"), out_path, _('{0:.0f} с звука').format(dur)))
                 if live.sink is None:
@@ -4076,11 +4102,11 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
                                    on_rtf=lambda r: self.ui(lambda: self._got_rtf(r)))
                 took = time.time() - t0
                 what = _("один файл") if res.chapters == 1 else _files(res.chapters)
-                self._logln(f"\nГотово. Звука {_fmt_hms(res.duration)}, счёт {_fmt_hms(took)} "
-                            f"(на секунду звука {took / max(res.duration, 1):.2f} с)")
+                self._logln("\n" + _('Готово. Звука {0}, счёт {1} (на секунду звука {2:.2f} с)').format(
+                    _fmt_hms(res.duration), _fmt_hms(took), took / max(res.duration, 1)))
                 self.ui(lambda: self._learn_book(res.duration, took, res.fresh_sec))
                 if res.mp3_dir:
-                    self._logln(f"Папка: {res.mp3_dir}")
+                    self._logln(_('Папка: {0}').format(res.mp3_dir))
 
                 def done():
                     tail = _(" · служебные файлы - в корзине") if res.service_trashed else ""
@@ -4092,7 +4118,7 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
                     self._check_resume()
                 self.ui(done)
             except Cancelled:
-                self._logln("Остановлено. Готовые части остались на диске.")
+                self._logln(_("Остановлено. Готовые части остались на диске."))
                 self.ui(lambda: (self._set_busy(False, _("Остановлено - готовое на месте")),
                                  self._check_resume()))
             except ScannedPdfError as e:

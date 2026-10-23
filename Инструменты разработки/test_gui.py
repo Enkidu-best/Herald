@@ -7,7 +7,9 @@
 ловит всё, что упало, - включая исключения из колбэков tkinter, которые иначе
 просто печатаются в консоль и никого не останавливают.
 
-    python "Инструменты разработки/test_gui.py"
+    python "Инструменты разработки/test_gui.py"              # без моделей
+    python "Инструменты разработки/test_gui.py" --shuffle [N]  # проверки 12-14 в случайном порядке
+    python "Инструменты разработки/test_gui.py" --warm         # с прогревом Silero (под замком)
 
 Синтез здесь НЕ запускается: проверяется интерфейс, а не звук.
 
@@ -35,10 +37,17 @@ os.environ.setdefault("PYTHONHASHSEED", "0")
 
 FAILS: list[str] = []
 SKIPS: list[str] = []
+# --shuffle [зерно]: проверки заданий 12-14 - в случайном порядке (задание 14 А: проверка не
+# должна зависеть от того, что шло перед ней). Зерно печатается - порядок можно повторить.
+SHUFFLE = "--shuffle" in sys.argv
+DEFER: list | None = None
 
 
 def check(name: str, fn, limit: int = 30, skip: str | None = None):
     import signal
+    if DEFER is not None:
+        DEFER.append((name, fn, limit, skip))
+        return
     if skip:
         SKIPS.append(f"{name}: {skip}")
         print(f"  ПРОПУСК {name}: {skip}")
@@ -73,6 +82,23 @@ def main() -> int:
         print(f"  ПАДАЕТ колбэк tkinter: {val!r}")
         traceback.print_exception(exc, val, tb)
     tkinter.Tk.report_callback_exception = report
+
+    # Модели окну не нужны (синтез не запускается). Фоновый прогрев «Прочитать вслух» и
+    # сервиса качал и грузил Silero и расстановку ударений: на медленной машине без
+    # моделей он отнимал процессор у других шагов, и проверка зависела от порядка
+    # (задание 14 А). По умолчанию - выключен; любая загрузка модели - ошибка проверки.
+    # --warm - как раньше, с прогревом (под замком видеокарты).
+    if "--warm" not in sys.argv:
+        from core import speak_server as _ss
+
+        def _no_model(*_a, **_k):
+            raise RuntimeError("проверка окна попробовала загрузить модель")
+        _ss.SpeakServer._warm = lambda self: None
+        G.App._say_warm = lambda self: None
+        P._loaded_engine = _no_model
+        from core import asr as _asr
+        _asr.transcribe = _no_model               # Whisper - тоже модель (видеокарта на Mac)
+        print("модели и прогрев выключены (--warm - включить)")
 
     print("окно:")
     T.apply()
@@ -1030,6 +1056,9 @@ def main() -> int:
             app._refresh_voice_rows()
     check("«Голоса»: строка на голос, послушать, скачать, нет сети, «⋯» удалить, Vosk, своё имя", voice_manager, limit=60)
 
+    global DEFER
+    if SHUFFLE:
+        DEFER = []
     print("задание 12:")
 
     def voice_order():
@@ -1260,6 +1289,53 @@ def main() -> int:
     import json as _json
     import shutil as _shutil
 
+    def menu_while_busy():
+        """Б1: [≡] во время озвучки - сообщение, меню и настройка не меняются."""
+        said = []
+        real_info = _mb.showinfo
+        _mb.showinfo = lambda *a, **k: said.append(a)
+        keep = app.cfg.get("menu_collapsed", False)
+        try:
+            app._set_busy(True, "тест")
+            app._toggle_menu()
+            must(said and "озвучка закончится" in str(said[0]), f"нет сообщения: {said}")
+            must(app.cfg.get("menu_collapsed", False) == keep, "выбор записался во время озвучки")
+        finally:
+            _mb.showinfo = real_info
+            app._set_busy(False)
+    check("[≡] во время озвучки - «Свернуть меню можно, когда озвучка закончится»", menu_while_busy)
+
+    def one_hint():
+        """Б2: пояснение - одна строка для выбранного движка и качества."""
+        from core import profiles as _pr
+        keep_p, keep_q = app.profile_var.get(), app.quality_var.get()
+        texts = []
+
+        def walk(w):
+            for c in w.winfo_children():
+                if isinstance(c, ctk.CTkLabel):
+                    texts.append(c.cget("text"))
+                walk(c)
+        walk(app.pages["settings"])
+        hints = [_pr.PROFILES[k].hint for k in _pr.PROFILES] + [q.hint for q in _pr.QUALITY.values()]
+        shown = [t for t in texts if t in hints]
+        must(len(shown) == 2, f"пояснений на странице {len(shown)}, нужно 2 (движок и качество)")
+        try:
+            for key in ("draft", "main"):
+                app.profile_var.set(key)
+                app._on_profile()
+                must(app.prof_hint.cget("text") == _pr.PROFILES[key].hint, app.prof_hint.cget("text"))
+            for q in _pr.QUALITY.values():
+                app.quality_var.set(q.key)
+                app._on_quality()
+                must(app.quality_hint.cget("text") == q.hint, app.quality_hint.cget("text"))
+        finally:
+            app.profile_var.set(keep_p)
+            app._on_profile()
+            app.quality_var.set(keep_q)
+            app._on_quality()
+    check("пояснение в Настройках - одна строка для выбранного варианта", one_hint)
+
     def voices_open_selected():
         app._fx_voice = None
         app.show("book")
@@ -1397,12 +1473,35 @@ def main() -> int:
     print("ошибки в фоне - понятным сообщением, без зависания (задание 13 А):")
 
     def bad_book():
+        """Оценка прошлой книги ещё идёт (поток держит 6 с) - новая, нечитаемая, её не ждёт,
+        а поздний ответ прошлой книги не затирает сообщение (задание 14 А)."""
+        import threading as _th
         bad = os.path.join(TD.ROOT, "Книги", "битая.docx")
         open(bad, "wb").write(b"PK\x03\x04 not a docx" * 10)
-        app._set_book(bad)
-        must(pump(lambda: "Не удалось прочитать книгу" in app.est_label.cget("text"), 15),
-             f"окно застряло: {app.est_label.cget('text')!r}")
-        app.clear_book()
+        real_est = G.estimate_book
+        release = _th.Event()
+
+        def slow(path, minutes=15.0):
+            if path == book:
+                release.wait(6)
+            return real_est(path, minutes)
+        G.estimate_book = slow
+        try:
+            app._set_book(book)                    # прошлая книга: оценка висит
+            app._set_book(bad)
+            t0 = time.time()
+            must(pump(lambda: "Не удалось прочитать книгу" in app.est_label.cget("text"), 5),
+                 f"окно застряло: {app.est_label.cget('text')!r}")
+            took = time.time() - t0
+            release.set()
+            pump(lambda: False, 1.0)               # поздний ответ прошлой книги
+            must("Не удалось прочитать книгу" in app.est_label.cget("text") and app.est is None,
+                 f"поздний ответ прошлой книги затёр сообщение: {app.est_label.cget('text')!r}")
+            must(took < 3, f"новая оценка ждала прошлую: {took:.1f} с")
+        finally:
+            release.set()
+            G.estimate_book = real_est
+            app.clear_book()
     check("нечитаемая книга - «Не удалось прочитать книгу: …», не «Считаю объём…»", bad_book)
 
     def bad_sample():
@@ -1423,14 +1522,18 @@ def main() -> int:
         try:
             app.show("voices")
             app.load_sample()
-            must(pump(lambda: bool(errs), 60), "ошибка не показана")
+            t0 = time.time()
+            must(pump(lambda: bool(errs), 10), "ошибка не показана")
+            must(time.time() - t0 < 5, f"битая запись: ошибка через {time.time() - t0:.0f} с (модель?)")
+            must("не читается" in str(errs[0]), errs)
             must(not app.running, "окно осталось «занятым» после сбоя")
             must(app.add_voice_btn.cget("text") == "Добавить образец…", app.add_voice_btn.cget("text"))
             must("Не удалось подготовить голос" in app.vm_note.cget("text"), app.vm_note.cget("text"))
         finally:
+            pump(lambda: not app.running, 30)     # не оставлять окно «занятым» следующим шагам
             G.filedialog.askopenfilename, G.ctk.CTkInputDialog, _mb.showerror = real_open, real_dlg, real_err
             app.show("book")
-    check("«Добавить образец…» с битой записью - причина в окне, кнопка снова доступна", bad_sample, limit=90)
+    check("«Добавить образец…» с битой записью - причина в окне сразу, без модели, кнопка снова доступна", bad_sample, limit=60)
 
     def bad_preview():
         errs = []
@@ -1471,6 +1574,16 @@ def main() -> int:
         finally:
             _mb.showerror, P.prepare_read_text, P.read_text_path = real_err, keep_prep, real_path
     check("«Как будет прочитано» со сбоем - сообщение с причиной, кнопка вернулась", bad_read_text)
+
+    if DEFER is not None:
+        import random
+        i = sys.argv.index("--shuffle")
+        seed = int(sys.argv[i + 1]) if len(sys.argv) > i + 1 and sys.argv[i + 1].isdigit() else random.randrange(10 ** 6)
+        jobs, DEFER = DEFER, None
+        random.Random(seed).shuffle(jobs)
+        print(f"случайный порядок, зерно {seed}: {' → '.join(n.split(':')[0][:18] for n, *_r in jobs)}")
+        for name, fn, limit, skip in jobs:
+            check(name, fn, limit, skip)
 
     G.S.speak, G.S.default_sink, G.preview_sample = real_speak, real_sink, real_preview
 
@@ -1535,6 +1648,21 @@ def main() -> int:
                     found.append(f"{kind}: {t.strip()[:80]!r}")
             must(not found, f"кириллица при EN ({len(found)}): " + " | ".join(found[:40]))
             must(e.lang_seg.get() == "EN", "переключатель языка не EN")
+            # «Подробности» при EN (задание 14 Б3): строки окна и ядра - по-английски
+            import io
+            e.log.delete("1.0", "end")
+            tee = G.App._StderrToLog(e, io.StringIO())
+            tee.write("ℹ Продолжаю: готовых частей из прошлого раза - 1 из 2\n")
+            tee.write("ℹ Ударения: у 3 слов вне словаря выровнено по книге (7 мест)\n")
+            e._logln(G._("Остановлено. Готовые части остались на диске."))
+            e._logln("сервис: модели выгружены после простоя")
+            e._log_settings(G._("Озвучка книги"), "f5mlx", {}, "aidar") if e.book_path else None
+            end = time.time() + 2
+            while time.time() < end:
+                e.update()
+                time.sleep(0.03)
+            body = e.log.get("1.0", "end")
+            must(body.count("\n") >= 4 and not _re.search(r"[А-Яа-яЁё]", body), f"«Подробности» по-русски: {body!r}")
             must(abs(e._scale - (G.load_config().get("scale") or G.DEFAULT_SCALE)) < 1e-6
                  and G.DEFAULT_SCALE == 1.2, "масштаб по умолчанию не 120 %")
             must(G.VERSION in e.version_lbl.cget("text"), "версия внизу не совпадает с пакетом")
