@@ -1150,7 +1150,8 @@ def main() -> int:
             app._set_scale(keep)
             app.geometry(geo)
             app.update()
-    check("«Озвучка» без прокрутки при 1440×900 и 100 / 120 %", book_no_scroll)
+    check("«Озвучка» без прокрутки при 1440×900 и 100 / 120 %", book_no_scroll,
+          skip=TD.need_mac("требование - для экрана Mac 1440×900 и его шрифтов (на Linux шрифты крупнее)"))
 
     def formats():
         """mp3 64-320 и FLAC в списке, с размером часа; оценка места по битрейту."""
@@ -1520,6 +1521,8 @@ def main() -> int:
                         texts.append(("CTkTextbox", c.get("1.0", "end")))
             menu = e.nametowidget(e.cget("menu"))
             for i in range(menu.index("end") + 1):
+                if menu.type(i) not in ("cascade", "command"):
+                    continue                           # «отрывная» линия меню X11 - без подписи
                 texts.append(("Menu", menu.entrycget(i, "label")))
                 sub = e.nametowidget(menu.entrycget(i, "menu"))
                 for j in range((sub.index("end") or 0) + 1):
