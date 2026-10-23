@@ -36,6 +36,19 @@ FAST_VOICE = "aidar"
 LOCAL_HOSTS = ("127.0.0.1", "localhost")
 
 
+def voice_text(req: dict) -> tuple[str, list[tuple[str, str]]]:
+    """2а (common/tts_client): голосу не уходит текст чужого алфавита. Быстрые голоса сервиса (Silero) - русские: из
+    текста остаются русские отрывки; у клона - отрывки языка текста. Остальное - в заголовке X-Herald-Skipped
+    (клиент, как Interview Coach, сам отдаёт их голосу своего языка), по буквам не читается."""
+    from common.tts_client import split as ts
+    from .normalize import detect_language
+    text = str(req.get("text") or "").strip()
+    lang = "ru" if bool(req.get("fast", True)) else (req.get("lang") or detect_language(text))
+    segs = ts.segments(text, lang)
+    keep = " ".join(t for lg, t in segs if lg == lang).strip()
+    return keep, [(lg, t) for lg, t in segs if lg != lang]
+
+
 def wav_header(sr: int) -> bytes:
     """Заголовок WAV «неизвестной длины» - для звука потоком."""
     size = 0xFFFFFFFF
@@ -136,9 +149,10 @@ class SpeakServer:
         """Озвучить запрос в sink. Возвращает Live (после конца звука)."""
         from .stream import Live, make_speed, speak
         from . import profiles
-        text = str(req.get("text") or "").strip()
+        text, skipped = voice_text(req)
+        req["_skipped"] = skipped
         if not text:
-            raise ValueError("пустой text")
+            raise ValueError("в тексте нет слов на языке голоса" if skipped else "пустой text")
         fast = bool(req.get("fast", True))
         voice = req.get("voice")
         if fast:
@@ -286,6 +300,9 @@ class _Handler(BaseHTTPRequestHandler):
                 self.send_header("Content-Type", "audio/wav")
                 self.send_header("Transfer-Encoding", "chunked")
                 self.send_header("X-Herald-Sample-Rate", str(OUT_SR))
+                skipped = req.get("_skipped") or []
+                if skipped:                  # отрывки чужого языка не озвучены (2а) - сколько и каких языков
+                    self.send_header("X-Herald-Skipped", f"{len(skipped)} {','.join(sorted({lg for lg, _ in skipped}))}")
                 self.send_header("Cache-Control", "no-store")
                 self._cors()
                 self.end_headers()

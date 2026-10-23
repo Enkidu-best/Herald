@@ -39,7 +39,7 @@ jobs:
       - name: Чем считается
         run: python cli.py --engine-info
       - name: Очередь видеокарты (общий модуль) и одна нить MLX (без модели)
-        run: python common/lock/tests/test_heavy_lock.py && python "Инструменты разработки/test_mlxthread.py"
+        run: python common/lock/tests/test_heavy_lock.py && python "Инструменты разработки/test_mlxthread.py" && python common/tts_client/tests/test_split.py && python "Инструменты разработки/test_speak_lang.py"
       - name: Паузы (без модели)
         run: python "Инструменты разработки/test_pauses.py" --fast
       - name: Сверка слов (без модели)
