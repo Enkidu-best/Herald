@@ -15,7 +15,8 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 UI = HERE.parent / "lock_ui"
-SHOTS = Path(sys.argv.pop(1)) if len(sys.argv) > 1 else None
+# папка для снимков - только при запуске напрямую (под pytest argv - его параметры, «-q» - не папка)
+SHOTS = Path(sys.argv.pop(1)) if __name__ == "__main__" and len(sys.argv) > 1 else None
 
 try:
     from playwright.sync_api import sync_playwright
@@ -110,6 +111,22 @@ class WebDialog(unittest.TestCase):
         self.assertIn("Wait in line", txt)
         w = pg.evaluate("document.documentElement.scrollWidth <= innerWidth")
         self.assertTrue(w)
+        pg.close()
+
+    def test_over_modal_dialog(self):
+        """Окно программы - модальный <dialog> (верхний слой): окно очереди поверх него, кнопки нажимаются, Esc
+        закрывает только окно очереди (найдено в Legal Doc Builder, «Из документа»)."""
+        pg = self.open()
+        pg.evaluate("() => { const d = document.createElement('dialog'); d.id = 'app-dlg';"
+                    " d.innerHTML = '<textarea style=\"width:600px;height:400px\"></textarea>';"
+                    " document.body.append(d); d.showModal(); }")
+        self.ask(pg, {"lang": "ru", "cpu": True})
+        pg.click("button[data-answer=cpu]", timeout=3000)
+        self.assertEqual(pg.evaluate("window.ans"), "cpu")
+        self.ask(pg, {"lang": "ru"})
+        pg.keyboard.press("Escape")
+        self.assertIsNone(pg.evaluate("window.ans"))
+        self.assertTrue(pg.evaluate("document.getElementById('app-dlg').open"))
         pg.close()
 
     def test_header_state(self):

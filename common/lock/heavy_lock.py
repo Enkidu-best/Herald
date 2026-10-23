@@ -604,6 +604,11 @@ def _cli_status(lock: Path, as_json: bool) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    command: list[str] = []
+    if "--" in argv:                    # run: команда - всё после «--», параметры до него разбираются как обычно
+        i = argv.index("--")
+        argv, command = argv[:i], argv[i + 1:]
     ap = argparse.ArgumentParser(prog="heavy_lock.sh", description="Очередь видеокарты .heavy-lock")
     ap.add_argument("--path", help="путь к .heavy-lock (иначе HEAVY_LOCK или «Разработка ПО»)")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -615,8 +620,6 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("--who", choices=(HUMAN, BACKGROUND), default=BACKGROUND)
         p.add_argument("--pid", type=int, default=None, help="процесс-владелец (по умолчанию - вызвавший)")
         p.add_argument("--wait-min", type=float, default=330)
-        if name == "run":
-            p.add_argument("command", nargs=argparse.REMAINDER)
     st = sub.add_parser("status")
     st.add_argument("--json", action="store_true")
     a = ap.parse_args(argv)
@@ -636,7 +639,7 @@ def main(argv: list[str] | None = None) -> int:
             log(f"жду видеокарту: {who}; перед нами: {ahead}")
 
     if a.cmd == "run":
-        cmd = a.command[1:] if a.command[:1] == ["--"] else a.command
+        cmd = command
         if not cmd:
             ap.error("run: нужна команда после --")
         lk = HeavyLock(a.program, a.what, who=a.who, path=lock, idle_after=None)

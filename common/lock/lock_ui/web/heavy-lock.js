@@ -67,6 +67,14 @@
     return e;
   }
 
+  // открытый модальный <dialog> программы - в верхнем слое страницы: окно очереди - внутри него, иначе его не нажать
+  function topLayer() {
+    const open = [...document.querySelectorAll("dialog[open]")].filter((d) => {
+      try { return d.matches(":modal"); } catch (e) { return true; }
+    });
+    return open.length ? open[open.length - 1] : document.body;
+  }
+
   async function ask(holder, opts) {
     opts = opts || {};
     const lang = opts.lang || document.documentElement.lang || "ru";
@@ -108,7 +116,7 @@
         else if (e.key === "Enter" && !(e.target instanceof HTMLButtonElement)) { e.preventDefault(); done("wait"); }
       }
       document.addEventListener("keydown", onKey, true);
-      document.body.append(back);
+      topLayer().append(back);
       list.querySelector("button").focus();
     });
   }
