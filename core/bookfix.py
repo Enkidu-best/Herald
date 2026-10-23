@@ -8,7 +8,7 @@
 отверг): своё слово завести нельзя, правятся только спорные слова этой книги.
 
 Хранится вне папки книги (служебные файлы книги уходят в корзину, поправки - нет):
-`~/.cache/text2audio/book_fixes.json` = {путь книги: {слово: номер буквы ударной гласной}}.
+`<папка данных>/book_fixes.json` = {путь книги: {слово: номер буквы ударной гласной}}.
 """
 from __future__ import annotations
 
@@ -16,7 +16,8 @@ import json
 import os
 import re
 
-FIXES = os.path.expanduser("~/.cache/text2audio/book_fixes.json")
+from .osutil import data_dir as _data_dir
+FIXES = os.path.join(str(_data_dir()), "book_fixes.json")
 VOWELS = "аеёиоуыэюяАЕЁИОУЫЭЮЯ"
 _WORD = re.compile(r"[А-Яа-яЁё+́]+")
 

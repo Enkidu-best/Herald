@@ -44,6 +44,28 @@ BOTTOM OF THE MENU AND TOP
 "Theme" - system, light or dark. Top right - interface language RU | EN and "Aa" -
 text size 80-200 % (Cmd+= / Cmd+− / Cmd+0). "≡" next to the name collapses the menu.
 
+NARRATION FOR OTHER PROGRAMS
+Settings › "Enable the /speak service". Another program on this computer sends
+text - Herald reads it and streams the sound as it is ready:
+  POST http://127.0.0.1:8716/speak  {{"text": "Connection check."}}
+The answer is WAV (16-bit, mono, 48 kHz) in pieces. "fast": true (default) - a
+fast Silero voice ("voice": "aidar", "baya", "eugene", "kseniya" or "xenia"; any
+other voice - error 400 with the reason); "fast": false - a clone ("voice" - the
+voice name, otherwise the one chosen in the window); "play": true - Herald plays it
+itself. POST /stop - stop, GET /health - is it running and which version. Only
+127.0.0.1, no internet.
+
+ABOUT
+Herald {v} - books read aloud. Everything is computed on this computer: a Mac with
+Apple Silicon uses its GPU, Windows and Linux - an NVIDIA card or the processor.
+Where things are:
+  settings, voices, trash, cache of ready chunks - {data}
+  problem log - {log}
+  models - {models} and ~/.cache/huggingface
+  result - a folder named after the book, next to the book itself.
+While a book is being narrated, Herald holds the shared GPU lock (.heavy-lock next
+to the program folders): other programs wait their turn instead of slowing the book.
+
 LICENSES
 Allowed in commercial projects: the ESpeech engine, Vosk and Piper voices; not
 allowed: Silero and the main F5 engine (Misha) - non-commercial only. Cloning

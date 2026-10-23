@@ -26,8 +26,8 @@ _lock = threading.Lock()
 
 
 def _dir() -> str:
-    from .osutil import data_dir
-    d = os.path.join(str(data_dir()), "meter2")
+    from .osutil import model_dir
+    d = os.path.join(str(model_dir()), "meter2")
     os.makedirs(d, exist_ok=True)
     return d
 

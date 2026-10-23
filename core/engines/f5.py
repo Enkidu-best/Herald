@@ -47,7 +47,8 @@ TEMBRE_CLEAN = 30.0       # штраф за верх ГРЯЗНЕЕ, чем в �
 
 
 def default_voices_dir() -> str:
-    d = os.path.join(os.path.expanduser("~"), ".cache", "text2audio", "voices")
+    from ..osutil import data_dir
+    d = os.path.join(str(data_dir()), "voices")
     os.makedirs(d, exist_ok=True)
     return d
 

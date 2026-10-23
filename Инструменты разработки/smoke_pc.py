@@ -40,8 +40,11 @@ def words(s):
     return re.sub(r"[^а-яa-z ]", " ", s.lower().replace("ё", "е")).split()
 
 
+DATA = tempfile.mkdtemp(prefix="herald_smoke_data_")     # свои данные (стандарт 6.10): образец - сюда
+
+
 def run(cli, *args, timeout=3600):
-    env = dict(os.environ, PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
+    env = dict(os.environ, PYTHONUTF8="1", PYTHONIOENCODING="utf-8", HERALD_DATA_DIR=DATA)
     t0 = time.time()
     r = subprocess.run(cli + list(args), capture_output=True, text=True, encoding="utf-8",
                        errors="replace", timeout=timeout, env=env, cwd=ROOT)

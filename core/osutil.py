@@ -25,14 +25,28 @@ HERE = "на этом Mac" if IS_MAC else "на этом компьютере"
 
 
 def data_dir() -> Path:
-    """Голоса, кэш синтеза, модели Herald: ~/.cache/text2audio на всех системах
-    (так было с первой версии - голоса пользователя не теряются при обновлении)."""
-    d = Path.home() / ".cache" / "text2audio"
+    """Данные пользователя: настройки, голоса, корзина, поправки, кэш синтеза.
+    ~/.cache/text2audio на всех системах (так было с первой версии - голоса не теряются
+    при обновлении) или папка из HERALD_DATA_DIR (проверки - на своих данных, стандарт 6.10)."""
+    env = os.environ.get("HERALD_DATA_DIR")
+    d = Path(env).expanduser() if env else Path.home() / ".cache" / "text2audio"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def model_dir() -> Path:
+    """Скачанные модели (Silero, F5 MLX, meter2, Qwen, словарь ударений, torch CUDA) - не
+    данные пользователя: по умолчанию там же, где всегда; HERALD_MODEL_DIR - своя папка.
+    От HERALD_DATA_DIR не зависит: проверка на временной папке не качает гигабайты заново."""
+    env = os.environ.get("HERALD_MODEL_DIR")
+    d = Path(env).expanduser() if env else Path.home() / ".cache" / "text2audio"
     d.mkdir(parents=True, exist_ok=True)
     return d
 
 
 def log_dir() -> Path:
+    if os.environ.get("HERALD_DATA_DIR"):
+        return data_dir() / "log"
     if IS_MAC:
         return Path.home() / "Library" / "Logs" / APP
     if IS_WIN:

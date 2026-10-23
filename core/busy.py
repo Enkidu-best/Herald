@@ -9,7 +9,6 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 LOCK_NAME = ".heavy-lock"
@@ -17,28 +16,23 @@ SLOWDOWN = 1.5          # во сколько раз упала скорость
 
 
 def lock_path() -> Path:
-    here = Path(__file__).resolve().parent.parent          # папка Herald
-    return here.parent / LOCK_NAME
+    from .heavylock import lock_path as _lp
+    return _lp()
 
 
 def lock_owner() -> str | None:
-    """Имя программы, которая держит замок, или None (свободен / держит Herald)."""
+    """Кто держит замок, или None (свободен или держит ЭТОТ Herald - задание 13 Г1).
+    Другой процесс Herald (ночная проверка, второе окно) - тоже «занята»: его имя."""
+    from . import heavylock
     p = lock_path()
-    if not p.is_dir():
+    if not p.is_dir() or heavylock.ours(p):
         return None
-    try:
-        text = (p / "owner").read_text(encoding="utf-8").strip()
-    except OSError:
-        return "другая программа"
-    name = text.split(" Mon ")[0].split(" Tue ")[0].split(" Wed ")[0].split(" Thu ")[0]
-    for d in (" Fri ", " Sat ", " Sun "):
-        name = name.split(d)[0]
-    name = name.strip() or "другая программа"
-    return None if name.lower().startswith("herald") else name
+    who = heavylock.owner(p)
+    return "другая программа" if who in ("", "?") else who
 
 
 def lock_free() -> bool:
-    return not lock_path().is_dir() or lock_owner() is None
+    return lock_owner() is None
 
 
 def slowed(recent_rate: float | None, base_rate: float | None) -> bool:
@@ -47,4 +41,3 @@ def slowed(recent_rate: float | None, base_rate: float | None) -> bool:
 
 
 __all__ = ["lock_path", "lock_owner", "lock_free", "slowed", "SLOWDOWN"]
-_ = os

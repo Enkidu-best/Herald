@@ -22,7 +22,8 @@ import numpy as np
 
 from .log import log_problem
 
-CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "text2audio", "synth")
+from .osutil import data_dir as _data_dir
+CACHE_DIR = os.path.join(str(_data_dir()), "synth")
 MAX_BYTES = 3 * 1024 ** 3          # ~3 ГБ - это около 30 часов звука
 _voice_hash: dict[tuple, str] = {}
 

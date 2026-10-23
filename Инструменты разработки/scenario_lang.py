@@ -2,18 +2,22 @@
 # -*- coding: utf-8 -*-
 """Сценарий 3.7: RU | EN, «≡» и «Aa» в настоящем окне (через main(), как у
 пользователя). Окно пересобирается - книга и раздел остаются, выбор
-запоминается. Настройки окна после сценария возвращаются как были.
+запоминается. Данные - свои (временная папка, `herald_testdata.py`): настройки
+Андрея не трогаются.
 
     python "Инструменты разработки/scenario_lang.py"
 """
 import copy, os, sys, traceback
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(1, os.path.dirname(os.path.abspath(__file__)))
 os.chdir(sys.path[0])
+import herald_testdata as TD          # до tts_gui: HERALD_DATA_DIR
+TD.setup("herald_lang_")
 
 import tts_gui as G
 from core import i18n
 
-BOOK = os.path.abspath("Примеры текстов/Пример - проба пера.txt")
+BOOK = TD.BOOK
 backup = copy.deepcopy(G.load_config())
 G.save_config({**backup, "ui_lang": "ru"})
 seen, problems = [], []

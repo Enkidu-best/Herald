@@ -30,8 +30,8 @@ INDEX = f"https://download.pytorch.org/whl/{CUDA_TAG}/torch/"
 
 
 def pack_dir() -> Path:
-    from .osutil import data_dir
-    return data_dir() / "torch_cuda"
+    from .osutil import model_dir
+    return model_dir() / "torch_cuda"
 
 
 def ready() -> bool:

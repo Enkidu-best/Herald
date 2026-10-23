@@ -31,8 +31,8 @@ _tried = False
 
 
 def _path() -> str:
-    from .osutil import data_dir
-    d = os.path.join(str(data_dir()), "stressdict")
+    from .osutil import model_dir
+    d = os.path.join(str(model_dir()), "stressdict")
     os.makedirs(d, exist_ok=True)
     return os.path.join(d, f"wiktionary-{VERSION}.sqlite")
 

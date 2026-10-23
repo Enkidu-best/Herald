@@ -37,7 +37,8 @@ MARGIN = 0.10                  # запас к расчёту старта
 FIRST_MAX = 100                # первый кусок - до стольких знаков…
 FIRST_MIN = 40                 # …но не огрызок: на коротком куске F5 мажет первое слово
 CHARS_PER_SEC = 12.0           # оценка длины звука до первого замера (chapters)
-SPEED_FILE = os.path.join(os.path.expanduser("~"), ".cache", "text2audio", "live_speed.json")
+from .osutil import data_dir as _data_dir
+SPEED_FILE = os.path.join(str(_data_dir()), "live_speed.json")
 KEEP_OBS = 40
 
 # Движок не потокобезопасен: одновременно считает только один заказ (окно,

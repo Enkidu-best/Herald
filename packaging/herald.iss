@@ -2,7 +2,10 @@
 ; Внутри: программа, ffmpeg (LGPL). Моделей и образцов голосов внутри нет:
 ; модели качаются при первом запуске, голос пользователь добавляет сам.
 #ifndef AppVersion
-  #define AppVersion "3.8"
+  ; номер - из одного места, core/VERSION (задание 13 Г6); релиз передаёт его из метки
+  #define VerFile FileOpen(AddBackslash(SourcePath) + "..\core\VERSION")
+  #define AppVersion Trim(FileRead(VerFile))
+  #expr FileClose(VerFile)
 #endif
 
 [Setup]

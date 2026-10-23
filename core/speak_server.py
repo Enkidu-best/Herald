@@ -144,8 +144,13 @@ class SpeakServer:
         if fast:
             engine, kw = "silero", {}
             from .engines.silero import VOICES
-            if voice not in {v.id for v in VOICES}:
+            ids = [v.id for v in VOICES]
+            if not voice:
                 voice = FAST_VOICE
+            elif voice not in ids:
+                # не подменять молча (задание 13 Г5): Vosk / Piper сервис не озвучивает
+                raise ValueError(f"голос «{voice}» сервис не озвучивает: быстрые голоса сервиса - "
+                                 f"Silero ({', '.join(ids)})")
             prior = profiles.SILERO.rtf
         else:
             from .engines import clone_engine

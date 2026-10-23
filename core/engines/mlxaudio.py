@@ -40,8 +40,8 @@ MODELS = {
 
 
 def models_dir() -> str:
-    from ..osutil import data_dir
-    d = os.path.join(str(data_dir()), "models")
+    from ..osutil import model_dir
+    d = os.path.join(str(model_dir()), "models")
     os.makedirs(d, exist_ok=True)
     return d
 

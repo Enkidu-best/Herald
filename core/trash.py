@@ -4,7 +4,7 @@
 
 Что попадает: файлы удалённого голоса (образец, расшифровка, поправки, ссылка на свои
 веса - сами веса обучения не трогаются) и служебные файлы готовой книги («_служебное»).
-Каждая запись - папка `~/.cache/text2audio/trash/<время>__<имя>/` с файлами и
+Каждая запись - папка `<папка данных>/trash/<время>__<имя>/` с файлами и
 `item.json`: что это, откуда (пути на место), когда удалено, размер.
 """
 from __future__ import annotations
@@ -16,7 +16,8 @@ import time
 import uuid
 from dataclasses import dataclass
 
-TRASH_DIR = os.path.expanduser("~/.cache/text2audio/trash")
+from .osutil import data_dir as _data_dir
+TRASH_DIR = os.path.join(str(_data_dir()), "trash")
 KEEP_DAYS = 30
 META = "item.json"
 

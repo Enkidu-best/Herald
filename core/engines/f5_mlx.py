@@ -125,8 +125,8 @@ SWAY_COEF = -1.0              # как sway_sampling_coef там же
 
 
 def _mlx_model_dir(lang: str = "ru", variant: str | None = None) -> str:
-    d = os.path.join(os.path.expanduser("~"), ".cache", "text2audio",
-                     f"f5mlx_model_{lang}" + (f"_{variant}" if variant else ""))
+    from ..osutil import model_dir
+    d = os.path.join(str(model_dir()), f"f5mlx_model_{lang}" + (f"_{variant}" if variant else ""))
     os.makedirs(d, exist_ok=True)
     return d
 

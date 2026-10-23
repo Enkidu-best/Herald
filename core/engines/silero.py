@@ -34,7 +34,8 @@ VOICES = [
 
 def default_model_dir() -> str:
     """Каталог кэша модели: рядом с моделями Whisper от Scribe, в домашней папке."""
-    base = os.path.join(os.path.expanduser("~"), ".cache", "text2audio", "silero")
+    from ..osutil import model_dir
+    base = os.path.join(str(model_dir()), "silero")
     os.makedirs(base, exist_ok=True)
     return base
 

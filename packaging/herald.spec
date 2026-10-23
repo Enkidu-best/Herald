@@ -30,7 +30,9 @@ for dist in ("torch", "torchaudio", "transformers", "tokenizers", "huggingface-h
 datas += [(os.path.join(ROOT, "assets"), "assets"),
           (os.path.join(ROOT, "core", "engines", "f5net", "LICENSE"), os.path.join("core", "engines", "f5net")),
           # справочник ударений (Викисловарь, CC BY-SA) - 11а
-          (os.path.join(ROOT, "core", "data"), os.path.join("core", "data"))]
+          (os.path.join(ROOT, "core", "data"), os.path.join("core", "data")),
+          # номер версии (задание 13 Г6)
+          (os.path.join(ROOT, "core", "VERSION"), "core")]
 hidden += ["theme", "player", "core", "core.osutil", "core.asr", "core.align", "core.stream", "core.speak_server", "core.voice_store", "core.engines.fast", "core.cuda_pack",
            "core.engines.f5_torch", "core.engines.f5net.dit", "core.engines.f5net.modules",
            "sounddevice", "scipy.signal"]

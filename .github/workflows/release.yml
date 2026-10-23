@@ -67,7 +67,7 @@ jobs:
         shell: pwsh
         run: |
           $v = "${{ github.ref_name }}"
-          if ($v -match '^v(\d.*)$') { $v = $Matches[1] } else { $v = "3.2" }
+          if ($v -match '^v(\d.*)$') { $v = $Matches[1] } else { $v = (Get-Content core\VERSION -Raw).Trim() }
           & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "/DAppVersion=$v" packaging\herald.iss
       - name: Размеры
         shell: pwsh

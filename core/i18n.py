@@ -103,14 +103,10 @@ def tr_msg(msg: str) -> str:
 
 
 def text(name: str) -> str:
-    """Длинный текст (справка, «О программе»): assets/i18n/<name>_<язык>.txt.
-    «О программе» по-русски - из core.ABOUT (один исходник)."""
+    """Длинный текст (Справка): assets/i18n/<name>_<язык>.txt; «О программе» - её часть."""
     path = os.path.join(DICT_DIR, f"{name}_{_lang}.txt")
     if os.path.exists(path):
         return open(path, encoding="utf-8").read()
-    if name == "about":
-        from . import ABOUT
-        return ABOUT
     ru = os.path.join(DICT_DIR, f"{name}_ru.txt")
     return open(ru, encoding="utf-8").read() if os.path.exists(ru) else ""
 

@@ -10,13 +10,21 @@
     python "Инструменты разработки/test_gui.py"
 
 Синтез здесь НЕ запускается: проверяется интерфейс, а не звук.
+
+Данные - свои (стандарт 6.10, задание 13 Б): временная папка HERALD_DATA_DIR с двумя
+клонами, примером книги и пустой корзиной (`herald_testdata.py`); голоса, настройки и
+корзина Андрея не читаются и не меняются - в конце сверяются хэши. Проверки, которым
+нужен Mac (звук, раскладка), на других машинах пропускаются с причиной.
 """
 
 from __future__ import annotations
 
 import os as _os, sys as _sys
 _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+_sys.path.insert(1, _os.path.dirname(_os.path.abspath(__file__)))
 _os.chdir(_sys.path[0])
+import herald_testdata as TD          # до core и tts_gui: HERALD_DATA_DIR
+TD.setup("herald_gui_")
 
 import os
 import sys
@@ -26,10 +34,15 @@ import traceback
 os.environ.setdefault("PYTHONHASHSEED", "0")
 
 FAILS: list[str] = []
+SKIPS: list[str] = []
 
 
-def check(name: str, fn, limit: int = 30):
+def check(name: str, fn, limit: int = 30, skip: str | None = None):
     import signal
+    if skip:
+        SKIPS.append(f"{name}: {skip}")
+        print(f"  ПРОПУСК {name}: {skip}")
+        return
     try:
         signal.alarm(limit)
         fn()
@@ -176,7 +189,7 @@ def main() -> int:
     app.show("book")
 
     print("книга:")
-    book = "Примеры текстов/Пример - проба пера.txt"
+    book = TD.BOOK
     check("выбор книги", lambda: app._set_book(book))
     wait(lambda: app.est is not None)
     check("оценка посчиталась", lambda: must(app.est is not None, "оценки нет"))
@@ -232,7 +245,8 @@ def main() -> int:
             app._on_profile()
             app.update()
             engine, kw = app._eng_choice()
-            must(engine == "f5mlx" and kw == profiles.engine_kwargs(profiles.get(key), app._quality()),
+            # движок клона - по компьютеру: Mac - f5mlx, Linux / Windows - f5torch
+            must(engine == G.clone_engine() and kw == profiles.engine_kwargs(profiles.get(key), app._quality()),
                  f"{key}: {engine} {kw}")
             must(kw.get("steps") != 32, "32 шага в окне")
         app.profile_var.set("main")
@@ -245,7 +259,7 @@ def main() -> int:
             app.quality_var.set(q)
             app._on_quality()
             must(app._eng_choice()[1].get("cfg_steps") == k, f"{q}: {app._eng_choice()[1]}")
-            must(q in app._rtf_key() and G.VERSION in app._rtf_key(), app._rtf_key())
+            must(q in app._rtf_key() and G.SPEED_SET in app._rtf_key(), app._rtf_key())
         app.quality_var.set(cfg_backup.get("quality", "balanced"))
         app._on_quality()
         ready = next(v for v in app._voices if v.ready and v.engine == "silero")   # задание 12: по алфавиту первым может быть Vosk
@@ -477,7 +491,8 @@ def main() -> int:
         app._close_player()
         must(not app.player.playing and r2.transport is None, "звук не остановился")
         app._clear_parts()
-    check("мини-плеер: играть/пауза, стоп, время, перемотка, одна часть за раз", mini_player)
+    check("мини-плеер: играть/пауза, стоп, время, перемотка, одна часть за раз", mini_player,
+          skip=TD.need_mac("плеер частей - системный AVAudioPlayer и звуковое устройство"))
 
     def no_duplicate_folders():
         """3.2: у части одна кнопка папки; в шапке списка и в Настройках дублей нет."""
@@ -650,7 +665,8 @@ def main() -> int:
         must(app._say_key_action(type("E", (), {"keysym": "??", "keycode": 8 << 24 if
                                                sys.platform == "darwin" else 67})()) == "copy",
              "по коду клавиши")
-    check("Cmd/Ctrl+A C V X Z при русской и английской раскладке", say_keys)
+    check("Cmd/Ctrl+A C V X Z при русской и английской раскладке", say_keys,
+          skip=TD.need_mac("коды клавиш и русская раскладка macOS"))
 
     def say_voices():
         # 3.6: по умолчанию клонов во вкладке нет, «Быстрый / Клон» и «Начало» скрыты
@@ -784,10 +800,59 @@ def main() -> int:
             must(False, "чужой сайт пропущен")
         except urllib.error.HTTPError as e:
             must(e.code == 403, e.code)
+        # задание 13 Г5: голос не Silero - ошибка с причиной, а не молча «Айдар»
+        req = urllib.request.Request(f"http://127.0.0.1:{port}/speak", method="POST",
+                                     data=_json.dumps({"text": "Проверка.", "fast": True,
+                                                       "voice": "vosk:4"}).encode(),
+                                     headers={"Content-Type": "application/json"})
+        try:
+            urllib.request.urlopen(req, timeout=10)
+            must(False, "голос Vosk молча подменён")
+        except urllib.error.HTTPError as e:
+            body = _json.loads(e.read().decode("utf-8"))
+            must(e.code == 400 and "не озвучивает" in body.get("error", ""), (e.code, body))
+        # при «Qwen ru-stress» в окне клон через сервис - параметрами «Основного» (F5)
+        from core import profiles as _pr
+        keep_p = app.profile_var.get()
+        if _pr.available(_pr.PROFILES["qwen"]):
+            app.profile_var.set("qwen")
+            app._on_profile()
+            must(app._srv_kwargs == _pr.engine_kwargs(_pr.PROFILES["main"], app._quality()),
+                 f"сервис при Qwen: {app._srv_kwargs}")
+            app.profile_var.set(keep_p)
+            app._on_profile()
         app.srv_var.set(False)
         app._srv_toggle()
         must(app._srv is None, "сервис не выключился")
-    check("сервис /speak: только этот компьютер, включается и выключается", server)
+    check("сервис /speak: только этот компьютер, включается и выключается; не Silero - 400 с причиной", server)
+
+    def not_applicable():
+        """Г4: «Качество» и «Проверка» говорят, где не действуют; strict_words не пишется."""
+        from core import profiles as _pr
+        keep_v, keep_p = app.voice_var.get(), app.profile_var.get()
+        try:
+            silero = next(v for v in app._voices if v.ready and v.engine == "silero")
+            app.voice_var.set(silero.label())
+            app._on_voice(remember=False)
+            must("Не действует для голоса" in app.quality_note.cget("text"), app.quality_note.cget("text"))
+            must("Не действует для голоса" in app.sound_note.cget("text"), app.sound_note.cget("text"))
+            must(all(str(r.cget("state")) == "disabled" for r in app._quality_radios), "качество не серое")
+            clone = next(v for v in app._voices if v.id == TD.CLONE)
+            app.voice_var.set(clone.label())
+            app._on_voice(remember=False)
+            must(app.quality_note.cget("text") == "" and app.sound_note.cget("text") == "", "у клона - «не действует»")
+            must(all(str(r.cget("state")) == "normal" for r in app._quality_radios), "у клона качество серое")
+            app.profile_var.set("draft")
+            app._on_profile()
+            must("Черновик" in app.quality_note.cget("text"), app.quality_note.cget("text"))
+            app._on_strict()
+            must("strict_words" not in G.load_config(), "strict_words снова пишется в настройки")
+        finally:
+            app.profile_var.set(keep_p)
+            app._on_profile()
+            app.voice_var.set(keep_v)
+            app._on_voice(remember=False)
+    check("«Качество» и «Проверка» - «не действует» для готового голоса и «Черновика»", not_applicable)
 
     def read_text():
         """«Как будет прочитано»: ударение знаком, только просмотр (3.8)."""
@@ -1188,6 +1253,224 @@ def main() -> int:
             P.prepare_read_text, P.read_text_path, P.read_disputed = keep_prep, real_path, real_disp
     check("«Как будет прочитано»: поправка спорного ударения для книги", stress_fix)
 
+    print("задание 13: «Голоса», замок видеокарты, закрытие, «голос изменился»:")
+    from tkinter import messagebox as _mb
+    from core import heavylock as HL
+    import json as _json
+    import shutil as _shutil
+
+    def voices_open_selected():
+        app._fx_voice = None
+        app.show("book")
+        app.show("voices")
+        app.update()
+        v = app._voice_obj()
+        must(v is not None and app._fx_voice == v.id, f"справа {app._fx_voice}, выбран {v and v.id}")
+        must(app.fx_title.cget("text") != "Выберите голос слева", "справа «Выберите голос слева»")
+        app.show("book")
+    check("«Голоса» открываются с голосом озвучки справа", voices_open_selected)
+
+    def book_lock():
+        lockp = HL.lock_path()
+        must(str(lockp).startswith(TD.ROOT), f"проверка трогает настоящий замок: {lockp}")
+        seen = []
+
+        def fake_convert(path, **_k):
+            seen.append(HL.owner_pid(lockp) == os.getpid() and HL.owner(lockp) == "Herald")
+            return P.ConvertResult(None, None, 1, 1.0, "t", "a")
+
+        def foreign():
+            lockp.mkdir()
+            (lockp / "owner").write_text(f"Понятный документ Fri Oct 23 10:00:00 2026 pid {os.getppid()}\n",
+                                         encoding="utf-8")
+        real = G.convert_book
+        G.convert_book = fake_convert
+        try:
+            app._set_book(book)
+            pump(lambda: app.est is not None)
+            app.do_start()
+            must(pump(lambda: not app.running, 10), "озвучка не закончилась")
+            must(seen == [True], f"во время книги замок не у Herald: {seen}")
+            must(not lockp.exists(), "замок не снят после книги")
+            foreign()
+            asked = []
+            app._ask = lambda *a, **k: (asked.append(a), "wait")[1]
+            seen.clear()
+            app.do_start()
+            must(asked and "Понятный документ" in str(asked[0]), f"не спросил: {asked}")
+            must(pump(lambda: "Жду очереди" in app.status.cget("text"), 5), app.status.cget("text"))
+            must(not seen, "озвучка пошла при чужом замке")
+            _shutil.rmtree(lockp)
+            must(pump(lambda: not app.running, 15), "после снятия чужого замка озвучка не прошла")
+            must(seen == [True] and not lockp.exists(), f"очередь: {seen}, замок {lockp.exists()}")
+            foreign()
+            seen.clear()
+            app.do_start()
+            pump(lambda: "Жду очереди" in app.status.cget("text"), 5)
+            app.do_stop()
+            must(pump(lambda: not app.running, 10), "«Остановить» не отменил ожидание")
+            must(not seen and lockp.exists() and "Понятный документ" in HL.owner(lockp),
+                 "ожидание отменено, а чужой замок тронут или книга пошла")
+            _shutil.rmtree(lockp)
+            app._ask = lambda *a, **k: None                    # «Отмена» - ничего не начинается
+            foreign()
+            app.do_start()
+            must(not app.running, "«Отмена» начала озвучку")
+        finally:
+            G.convert_book = real
+            app.__dict__.pop("_ask", None)
+            _shutil.rmtree(lockp, ignore_errors=True)
+            app._check_resume()
+    check("замок видеокарты: книга берёт и отдаёт, чужой - вопрос и очередь, «Остановить» в очереди",
+          book_lock, limit=60)
+
+    def close_asks():
+        asked, gone = [], []
+        app.destroy = lambda: gone.append(1)
+        try:
+            app._set_busy(True, "тест")
+            app._ask = lambda *a, **k: (asked.append(a), None)[1]
+            app.on_close()
+            must(asked and "Остановить и закрыть" in str(asked[0]), f"вопроса нет: {asked}")
+            must(not gone and app.running and not app._stop_flag.is_set(), "«Отмена» закрыла или остановила")
+            app._ask = lambda *a, **k: "close"
+            app.on_close()
+            must(gone and app._stop_flag.is_set(), "«Остановить и закрыть» не остановило")
+            app._set_busy(False)
+            asked.clear()
+            gone.clear()
+            app._ask = lambda *a, **k: (asked.append(a), "close")[1]
+            app.on_close()
+            must(not asked and gone, "без озвучки окно спросило")
+        finally:
+            del app.destroy
+            app.__dict__.pop("_ask", None)
+            app._set_busy(False)
+    check("закрытие во время озвучки: вопрос, «Отмена» - идёт дальше; без озвучки - без вопроса", close_asks)
+
+    def ask_labels():
+        """Своё окно вопроса: кнопки подписаны действием, Esc - «Отмена»."""
+        texts = []
+
+        def look():
+            d = app._ask_dlg
+            for w in d.winfo_children():
+                for c in [w] + list(w.winfo_children()):
+                    if isinstance(c, ctk.CTkButton):
+                        texts.append(c.cget("text"))
+            d.event_generate("<Escape>")
+        app.after(300, look)
+        got = app._ask("Идёт озвучка", "текст", [("close", "Остановить и закрыть", "danger"),
+                                                 (None, "Отмена", "ghost")])
+        must(texts == ["Остановить и закрыть", "Отмена"] and got is None, (texts, got))
+    check("окно вопроса: кнопки «Остановить и закрыть» / «Отмена», Esc - отмена", ask_labels)
+
+    def voice_changed():
+        sd = os.path.join(P.output_dir_for(book), P.STATE_DIR)
+        os.makedirs(sd, exist_ok=True)
+        v = next(x for x in app._voices if x.id == TD.TRAINED)
+        keep = app.voice_var.get()
+        app.voice_var.set(v.label())
+        app._set_book(book)
+        pump(lambda: app.est is not None)
+        engine, kw = app._eng_choice()
+        fp = P.settings_fingerprint(engine, dict(kw, language=app.est.language), v.id, app._conv_options())
+        open(os.path.join(sd, "part0001.flac"), "wb").close()
+        st = {"fingerprint": fp, "total": 3, "finished": False, "parts": {"1": {"flac": "part0001.flac"}}}
+        stf = os.path.join(sd, P.STATE_FILE)
+        try:
+            for mark, want in (("старые веса|1|1", True), (P.voice_weights_mark(v.id), False), (None, False)):
+                d = dict(st) if mark is None else dict(st, voice_weights=mark)
+                _json.dump(d, open(stf, "w"))
+                app._check_resume()
+                must(pump(lambda: "Продолжить" in app.start_btn.cget("text"), 5), app.start_btn.cget("text"))
+                must(pump(lambda: bool(app.vchg_lbl.winfo_manager()) == want, 5),
+                     f"отметка {mark!r}: строка «Голос изменился» {'нет' if want else 'лишняя'}")
+        finally:
+            P.forget_progress(book)
+            app.voice_var.set(keep)
+            app._check_resume()
+            pump(lambda: not app.vchg_lbl.winfo_manager(), 5)
+    check("«Продолжить» после смены весов голоса - «Голос изменился…», без смены - тихо", voice_changed)
+
+    print("ошибки в фоне - понятным сообщением, без зависания (задание 13 А):")
+
+    def bad_book():
+        bad = os.path.join(TD.ROOT, "Книги", "битая.docx")
+        open(bad, "wb").write(b"PK\x03\x04 not a docx" * 10)
+        app._set_book(bad)
+        must(pump(lambda: "Не удалось прочитать книгу" in app.est_label.cget("text"), 15),
+             f"окно застряло: {app.est_label.cget('text')!r}")
+        app.clear_book()
+    check("нечитаемая книга - «Не удалось прочитать книгу: …», не «Считаю объём…»", bad_book)
+
+    def bad_sample():
+        bad = os.path.join(TD.ROOT, "битый образец.mp3")
+        open(bad, "wb").write(b"ID3 not audio" * 50)
+        errs = []
+        real_open, real_dlg, real_err = G.filedialog.askopenfilename, G.ctk.CTkInputDialog, _mb.showerror
+
+        class Dlg:
+            def __init__(self, *a, **k):
+                pass
+
+            def get_input(self):
+                return "Битый образец"
+        G.filedialog.askopenfilename = lambda *a, **k: bad
+        G.ctk.CTkInputDialog = Dlg
+        _mb.showerror = lambda *a, **k: errs.append(a)
+        try:
+            app.show("voices")
+            app.load_sample()
+            must(pump(lambda: bool(errs), 60), "ошибка не показана")
+            must(not app.running, "окно осталось «занятым» после сбоя")
+            must(app.add_voice_btn.cget("text") == "Добавить образец…", app.add_voice_btn.cget("text"))
+            must("Не удалось подготовить голос" in app.vm_note.cget("text"), app.vm_note.cget("text"))
+        finally:
+            G.filedialog.askopenfilename, G.ctk.CTkInputDialog, _mb.showerror = real_open, real_dlg, real_err
+            app.show("book")
+    check("«Добавить образец…» с битой записью - причина в окне, кнопка снова доступна", bad_sample, limit=90)
+
+    def bad_preview():
+        errs = []
+        real_err = _mb.showerror
+        _mb.showerror = lambda *a, **k: errs.append(a)
+
+        def broken(path, *, live=None, progress=None, **_k):
+            raise RuntimeError("образец голоса не читается")
+        G.preview_sample = broken
+        try:
+            app._set_book(book)
+            pump(lambda: app.est is not None)
+            app.do_preview()
+            must(pump(lambda: bool(errs) and not app.running, 15), "пробник завис после сбоя")
+            must("не читается" in str(errs[0]), errs)
+        finally:
+            _mb.showerror = real_err
+            G.preview_sample = fake_preview
+    check("«Проверить голос» с битым образцом - ошибка в окне, не зависание", bad_preview)
+
+    def bad_read_text():
+        errs = []
+        real_err, keep_prep = _mb.showerror, P.prepare_read_text
+        real_path = P.read_text_path
+        _mb.showerror = lambda *a, **k: errs.append(a)
+
+        def broken(path, opts):
+            raise ValueError("ударения не расставились")
+        P.prepare_read_text = broken
+        P.read_text_path = lambda path, out_dir=None: "/нет/такого/файла"
+        try:
+            app._set_book(book)
+            app.show_read_text()
+            must(pump(lambda: bool(errs), 10), "ошибка не показана")
+            must("не расставились" in str(errs[0]), errs)
+            must(pump(lambda: app.readtext_btn.cget("text") == "Как будет прочитано", 5),
+                 "кнопка не вернулась")
+        finally:
+            _mb.showerror, P.prepare_read_text, P.read_text_path = real_err, keep_prep, real_path
+    check("«Как будет прочитано» со сбоем - сообщение с причиной, кнопка вернулась", bad_read_text)
+
     G.S.speak, G.S.default_sink, G.preview_sample = real_speak, real_sink, real_preview
 
     G.save_config(cfg_backup)
@@ -1252,6 +1535,10 @@ def main() -> int:
             must(abs(e._scale - (G.load_config().get("scale") or G.DEFAULT_SCALE)) < 1e-6
                  and G.DEFAULT_SCALE == 1.2, "масштаб по умолчанию не 120 %")
             must(G.VERSION in e.version_lbl.cget("text"), "версия внизу не совпадает с пакетом")
+            must(G.VERSION == open("core/VERSION", encoding="utf-8").read().strip(), "версия не из core/VERSION")
+            e.show("help")
+            e.update()
+            must(G.VERSION in e.help_box.get("1.0", "end"), "в Справке нет версии")
             th = e.cfg.get("theme", "system")
             e._cycle_theme()
             must(e.cfg.get("theme") != th, "тема не переключается")
@@ -1267,6 +1554,13 @@ def main() -> int:
         miss = i18n.missing(i18n_keys.all_keys())
         must(not miss, f"ключи без перевода ({len(miss)}): {miss[:5]}")
     check("в словаре EN нет пропущенных ключей", no_missing)
+
+    def andrey_untouched():
+        ch = TD.andrey_changed()
+        must(not ch, f"изменились файлы Андрея: {ch[:10]}")
+    check("данные Андрея (голоса, настройки, корзина) не изменились - хэши до и после", andrey_untouched)
+    if SKIPS:
+        print(f"пропущено с причиной: {len(SKIPS)}")
     print("всё в порядке" if not FAILS else f"\nПРОВАЛЕНО: {len(FAILS)}")
     for f in FAILS:
         print("   ", f)

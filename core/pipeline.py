@@ -1037,8 +1037,9 @@ def _synth_chunks(eng: TTSEngine, voice: str, chunks, sr: int,
             fut = pool.submit(produce, groups[gi + 1])
         heard: dict[int, list | None] = {}
 
-        def judge(i, audio, risk, h=None):
+        def judge(i, audio, risk, h=None, model=model):
             """(годится, оценка): оценка - чем больше, тем лучше дубль.
+            Зовётся в том же витке цикла; `model` привязан явно (ruff B023).
 
             По звуку оценка дубля - его САМОЕ ПЛОХОЕ слово (а не среднее): из
             пересчётов берётся тот, где худшее слово звучит лучше всего."""
@@ -1079,16 +1080,16 @@ def _synth_chunks(eng: TTSEngine, voice: str, chunks, sr: int,
                         try:
                             wrong = SC.wrong_words(ws, lp, texts[i], _al(), hard,
                                                    [SC.NEW_REFS_PER_CHUNK])
-                        except Exception as e:
-                            log_problem("проверка ударения по звуку не сработала", e, show=False)
+                        except Exception as ex:
+                            log_problem("проверка ударения по звуку не сработала", ex, show=False)
                             wrong = []
                         bad = bad + [w + STRESS_TAG for w in wrong]
             if meter_on and len(audio):
                 try:
                     from . import meter
                     bad = bad + [w + STRESS_TAG for w in meter.wrong_words(audio, sr, texts[i])]
-                except Exception as e:
-                    log_problem("meter2 не проверил ударения", e, show=False)
+                except Exception as ex:
+                    log_problem("meter2 не проверил ударения", ex, show=False)
             if bad or not edges:
                 heard_txt = " ".join(w for w, _s, _e in (h or []))
                 log_info(f"проверка куска: края {'да' if edges else 'НЕТ'}, слова не так: "
@@ -1269,6 +1270,22 @@ def settings_fingerprint(engine: str, eng_kwargs: dict, voice: str,
     }
     return hashlib.sha1(json.dumps(data, sort_keys=True, ensure_ascii=False,
                                    default=str).encode("utf-8")).hexdigest()
+
+
+def voice_weights_mark(voice: str) -> str:
+    """Отметка своих весов голоса (`.f5model`): папка, размер и время файла весов; нет
+    своих весов - "". В отпечаток «Продолжить» НЕ входит (отпечаток книг, начатых раньше,
+    не меняется) - пишется в state.json на начало книги; «Продолжить» сверяет её и
+    предупреждает, если голос обучили заново (задание 13 Г3)."""
+    f = os.path.join(default_voices_dir(), voice + ".f5model")
+    if not os.path.isfile(f):
+        return ""
+    try:
+        d = os.path.expanduser(open(f, encoding="utf-8").read().strip())
+        st = os.stat(os.path.join(d, "model_v1.safetensors"))
+        return f"{d}|{st.st_size}|{int(st.st_mtime)}"
+    except OSError:
+        return "?"
 
 
 def _part_hash(fp: str, chunks) -> str:
@@ -1523,7 +1540,10 @@ def resume_info(path: str, *, engine: str, eng_kwargs: dict, voice: str,
             return None
         done = sum(1 for d in st.get("parts", {}).values()
                    if os.path.exists(os.path.join(sd, d.get("flac", ""))))
-        return {"done": done, "total": int(st.get("total", 0))} if done else None
+        # отметка весов есть только у книг, начатых (или продолженных) после задания 13
+        changed = "voice_weights" in st and st["voice_weights"] != voice_weights_mark(voice)
+        return ({"done": done, "total": int(st.get("total", 0)), "voice_changed": changed}
+                if done else None)
     except Exception as e:
         log_problem("не удалось проверить, есть ли незаконченная озвучка", e, show=False)
         return None
@@ -1713,6 +1733,7 @@ def convert_book(path: str, *, engine: str = "f5", eng_kwargs: dict | None = Non
     if state.get("fingerprint") != fp or state.get("total") != len(prepared):
         state = {"fingerprint": fp, "total": len(prepared), "parts": {},
                  "finished": False}
+    state.setdefault("voice_weights", voice_weights_mark(voice))   # на начало книги (Г3)
     hashes = {ci: _part_hash(fp, chunks) for ci, (_t, chunks) in enumerate(prepared, 1)}
     rendered: dict[int, RenderedChapter] = {}
     workers = max(1, int(opts.workers))
@@ -1817,7 +1838,7 @@ def convert_book(path: str, *, engine: str = "f5", eng_kwargs: dict | None = Non
                 if part_progress:
                     part_progress(ci, len(prepared), 0.0)
 
-                def bump():
+                def bump(ci=ci, chunks=chunks):     # зовётся в этом же витке; привязка явная (B023)
                     nonlocal done, in_part
                     done += 1
                     in_part += 1

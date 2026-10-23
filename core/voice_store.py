@@ -79,8 +79,8 @@ def by_id(vid: str) -> FastVoice | None:
 
 # --- где лежит --------------------------------------------------------------
 def _data() -> Path:
-    from .osutil import data_dir
-    return data_dir()
+    from .osutil import model_dir
+    return model_dir()
 
 
 def vosk_dir() -> Path:
