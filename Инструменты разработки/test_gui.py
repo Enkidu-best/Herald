@@ -1371,11 +1371,11 @@ def main() -> int:
             must(not lockp.exists(), "замок не снят после книги")
             foreign()
             asked = []
-            app._ask = lambda *a, **k: (asked.append(a), "wait")[1]
+            app._ask_busy = lambda *a, **k: (asked.append((a, k)), "wait")[1]
             seen.clear()
             app.do_start()
             must(asked and "Понятный документ" in str(asked[0]), f"не спросил: {asked}")
-            must(pump(lambda: "Жду очереди" in app.status.cget("text"), 5), app.status.cget("text"))
+            must(pump(lambda: "Жду видеокарту" in app.status.cget("text"), 5), app.status.cget("text"))
             must(not seen, "озвучка пошла при чужом замке")
             _shutil.rmtree(lockp)
             must(pump(lambda: not app.running, 15), "после снятия чужого замка озвучка не прошла")
@@ -1383,23 +1383,87 @@ def main() -> int:
             foreign()
             seen.clear()
             app.do_start()
-            pump(lambda: "Жду очереди" in app.status.cget("text"), 5)
+            pump(lambda: "Жду видеокарту" in app.status.cget("text"), 5)
             app.do_stop()
             must(pump(lambda: not app.running, 10), "«Остановить» не отменил ожидание")
             must(not seen and lockp.exists() and "Понятный документ" in HL.owner(lockp),
                  "ожидание отменено, а чужой замок тронут или книга пошла")
             _shutil.rmtree(lockp)
-            app._ask = lambda *a, **k: None                    # «Отмена» - ничего не начинается
+            app._ask_busy = lambda *a, **k: None               # «Отмена» - ничего не начинается
             foreign()
             app.do_start()
             must(not app.running, "«Отмена» начала озвучку")
         finally:
             G.convert_book = real
-            app.__dict__.pop("_ask", None)
+            app.__dict__.pop("_ask_busy", None)
             _shutil.rmtree(lockp, ignore_errors=True)
             app._check_resume()
     check("замок видеокарты: книга берёт и отдаёт, чужой - вопрос и очередь, «Остановить» в очереди",
           book_lock, limit=60)
+
+    def book_lock_cpu_and_idle():
+        """Общие модули 01: «На процессоре» (прогноз, очень медленно - F5 на torch, HERALD_DEVICE=cpu только на эту
+        книгу) и простой на паузе 15 минут (подмена часов) - видеокарта отпускается, «Продолжить» берёт снова."""
+        lockp = HL.lock_path()
+        must(str(lockp).startswith(TD.ROOT), f"проверка трогает настоящий замок: {lockp}")
+        got = []
+
+        def fake_convert(path, engine="", **_k):
+            got.append((engine, os.environ.get("HERALD_DEVICE")))
+            return P.ConvertResult(None, None, 1, 1.0, "t", "a")
+        real, real_accel = G.convert_book, app._accel
+        G.convert_book = fake_convert
+        lockp.mkdir()
+        (lockp / "owner").write_text(f"Понятный документ Fri Oct 23 10:00:00 2026 pid {os.getppid()}\n", encoding="utf-8")
+        asked = []
+        try:
+            app._set_book(book)
+            pump(lambda: app.est is not None)
+            app._accel = "mlx"
+            fc = app._cpu_forecast("f5mlx")
+            must(fc and fc["factor"] > 3 and fc["seconds"] > 0, f"прогноз: {fc}")
+            must(app._cpu_forecast("silero") is None, "у готового голоса - кнопка «На процессоре»")
+            keep_choice = app._eng_choice
+            app._eng_choice = lambda: ("f5mlx", {})
+            app._ask_busy = lambda *a, **k: (asked.append(k), "cpu")[1]
+            app.do_start()
+            must(pump(lambda: not app.running, 10), "озвучка на процессоре не закончилась")
+            must(asked and asked[0].get("cpu", {}).get("factor", 0) > 3, f"окно без прогноза: {asked}")
+            must(got == [("f5torch", "cpu")], f"не на процессоре: {got}")
+            must(os.environ.get("HERALD_DEVICE") is None, "HERALD_DEVICE остался после книги")
+            must(lockp.exists() and "Понятный документ" in HL.owner(lockp), "чужой замок тронут")
+            app._eng_choice = keep_choice
+        finally:
+            G.convert_book, app._accel = real, real_accel
+            app.__dict__.pop("_ask_busy", None)
+            app.__dict__.pop("_eng_choice", None)
+            _shutil.rmtree(lockp, ignore_errors=True)
+        # простой на паузе: замок наш, 15 минут без действий - отпущен; «Продолжить» - снова наш
+        clock = {"t": 1000.0}
+        lk = app._hlock
+        keep_clock, keep_who = lk.clock, lk.who
+        lk.clock, lk.who = (lambda: clock["t"]), "human"        # простой - только у человека (не у фона)
+        try:
+            must(lk.try_acquire(), "замок не взялся")
+            app.running = True
+            app._pause_flag.clear()
+            app._paused_at = time.time()
+            app._t0 = time.time()
+            app._pause_flag.set()
+            lk.touch()
+            clock["t"] += 16 * 60
+            app._idle_tick()
+            must(not lk.held and lk.idle_released and not lockp.exists(), "на паузе 15 мин видеокарта не отпущена")
+            must("15 минут" in app.status.cget("text") or "15 minutes" in app.status.cget("text"), app.status.cget("text"))
+            app.do_pause()                                    # «Продолжить» - замок свободен, берётся сам
+            must(lk.held and not app._pause_flag.is_set(), "«Продолжить» не взял замок")
+        finally:
+            app.running = False
+            app._pause_flag.clear()
+            lk.release()
+            lk.clock, lk.who = keep_clock, keep_who
+            app._set_busy(False)
+    check("«На процессоре» с прогнозом и простой на паузе 15 минут", book_lock_cpu_and_idle, limit=30)
 
     def close_asks():
         asked, gone = [], []

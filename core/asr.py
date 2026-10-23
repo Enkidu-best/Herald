@@ -81,12 +81,16 @@ def _load16k(path: str):
 def transcribe(path: str, kind: str = "turbo", language: str | None = None,
                word_timestamps: bool = False) -> dict:
     if backend() == "mlx":
-        import mlx_whisper
-        with contextlib.redirect_stdout(io.StringIO()):
-            return mlx_whisper.transcribe(path, path_or_hf_repo=MLX.get(kind, kind),
-                                          language=language, verbose=False,
-                                          word_timestamps=word_timestamps,
-                                          condition_on_previous_text=False)
+        from .mlxthread import run      # MLX - только в одной нити процесса (задание 14 В)
+
+        def go():
+            import mlx_whisper
+            with contextlib.redirect_stdout(io.StringIO()):
+                return mlx_whisper.transcribe(path, path_or_hf_repo=MLX.get(kind, kind),
+                                              language=language, verbose=False,
+                                              word_timestamps=word_timestamps,
+                                              condition_on_previous_text=False)
+        return run(go)
     segs, info = _fw(kind).transcribe(_load16k(path), language=language,
                                       word_timestamps=word_timestamps,
                                       condition_on_previous_text=False)

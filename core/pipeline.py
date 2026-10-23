@@ -76,11 +76,8 @@ def unload_engines() -> None:
     _ENGINE_CACHE.clear()
     import gc
     gc.collect()
-    try:
-        import mlx.core as mx
-        mx.clear_cache()
-    except Exception:
-        pass                           # не Mac или старый MLX - память вернёт gc
+    from .mlxthread import clear_cache   # в нити MLX (14 В): выгрузку зовёт нить сервера /speak
+    clear_cache()
 
 
 @dataclass

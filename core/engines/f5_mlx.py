@@ -31,7 +31,6 @@ import threading
 
 import numpy as np
 
-from concurrent.futures import ThreadPoolExecutor
 
 from .f5 import F5Engine
 
@@ -42,12 +41,13 @@ from .f5 import F5Engine
 # если второй движок (например, при переключении книги с английской на русскую)
 # заведёт свой поток, он достанет из кэша чужой граф и упадёт с
 # «There is no Stream(gpu, 1) in current thread», а книга выйдет пустой.
-# Поэтому поток должен быть общим и жить столько же, сколько процесс.
-_MLX_POOL = ThreadPoolExecutor(max_workers=1, thread_name_prefix="mlx")
+# Поэтому поток должен быть общим и жить столько же, сколько процесс: core/mlxthread.py (одна нить на весь процесс -
+# и для проверки слов по звуку, задание 14 В).
 
 
 def _in_mlx_thread(fn, *args):
-    return _MLX_POOL.submit(fn, *args).result()
+    from ..mlxthread import run
+    return run(fn, *args)
 
 # Берём ровно ту же accent_tune-модель, что и torch-движок (её голос одобрен).
 # Веса в формате PyTorch — f5-tts-mlx сконвертирует их сам (convert_weights=True).
@@ -655,7 +655,20 @@ class F5MLXEngine(F5Engine):
             except Exception as e:
                 from ..log import log_problem
                 log_problem("[F5-MLX] пачка кусков не озвучилась", e)
-                outs = [(np.zeros(0, dtype=np.float32), False)] * len(jobs)
+                outs = None
+                if "Stream" in str(e):         # модель из чужой нити (14 В): загрузить заново в нити MLX, ещё раз
+                    try:
+                        self._f5 = None
+                        _in_mlx_thread(self._load_in_thread)
+                        outs = _in_mlx_thread(
+                            self._synth_in_thread, audio, ref_frames, ref_text,
+                            [p for _i, p in jobs], [speed_muls[i] for i, _p in jobs],
+                            [headroom_muls[i] for i, _p in jobs])
+                    except Exception as e2:
+                        log_problem("[F5-MLX] и после перезагрузки модели пачка не озвучилась", e2)
+                        outs = None
+                if outs is None:
+                    outs = [(np.zeros(0, dtype=np.float32), False)] * len(jobs)
             for (i, _p), (w, risk) in zip(jobs, outs):
                 waves[i].append(w)
                 self.last_cut_risk[i] = self.last_cut_risk[i] or risk

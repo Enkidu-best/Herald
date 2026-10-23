@@ -565,11 +565,15 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         self.after(1500, self._gpu_status)
 
     def _gpu_status(self):
-        """Состояние справа: видеокарта занята другой программой (общий замок)."""
+        """Состояние справа: видеокарта занята другой программой (общий замок), Herald в очереди или работает
+        поверх чужого замка - слова общего модуля (стандарт 2.1)."""
         try:
             from core import busy
-            owner = busy.lock_owner()
-            self.gpu_lbl.configure(text=_('Видеокарта занята: «{0}»').format(owner) if owner else "")
+            from common.lock.lock_ui import texts as lt
+            st, text, _kind = lt.header_state(self._hlock, i18n.lang(), working=self.running)
+            if st not in ("busy", "busy_queued", "alongside") or (st == "busy" and not busy.lock_owner()):
+                text = ""
+            self.gpu_lbl.configure(text=(_("Видеокарта:") + " " + text) if text else "")
         except Exception:
             pass                                  # состояние - только подсказка
         if self.winfo_exists():
@@ -3538,19 +3542,41 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
                 else _('{0:.0f} МБ').format(mb))
         lang = {"ru": _("русская книга"), "en": _("английская книга")}.get(getattr(e, "language", "ru"), "")
         parts = _("один файл") if self.single_file() else _files(e.chapters)
-        wait = audio_sec * self._rtf()
-        # 3.8: куски, уже посчитанные этим голосом и режимом, берутся из кэша за
-        # секунды - ждать только остальные («Проба пера 3» второй раз: 2:19 против 0:55)
-        ci = self._cache_info_for()
+        wait, ci = self._book_wait(audio_sec)
         done_line = ""
         if ci and ci["cached"]:
-            left = 1.0 - ci["cached_chars"] / max(1, ci["chars"])
-            wait = wait * left + CACHED_CHUNK_SEC * ci["cached"]
             done_line = "\n" + _('{0} из {1} кусков уже посчитаны - они возьмутся из готового.').format(ci["cached"], ci["n"])
         night = _("  Удобно поставить на ночь.") if wait > 3 * 3600 else ""
         self.est_label.configure(text=(
             _('{0} · {1} · звука {2}\nЖдать около {3} · на диске ~{4}.{5}').format(lang, parts, _fmt_hms(audio_sec), _fmt_hms(wait), size, night) + done_line))
         self._check_resume()
+
+    def _book_wait(self, audio_sec: float) -> tuple[float, dict | None]:
+        """Сколько ждать книгу на этом компьютере (с): звук × скорость профиля; куски, уже посчитанные этим голосом
+        и режимом, берутся из кэша за секунды - ждать только остальные (3.8)."""
+        wait = audio_sec * self._rtf()
+        ci = self._cache_info_for()
+        if ci and ci["cached"]:
+            left = 1.0 - ci["cached_chars"] / max(1, ci["chars"])
+            wait = wait * left + CACHED_CHUNK_SEC * ci["cached"]
+        return wait, ci
+
+    def _cpu_forecast(self, engine: str) -> dict | None:
+        """«На процессоре» в окне «Видеокарта занята» (доп. 21:40): только клон F5 на MLX - тот же голос через F5 на
+        torch, на процессоре (HERALD_DEVICE=cpu). Прогноз - ожидание книги × множитель процессора профиля
+        (profiles.ACCEL_MUL, замер на этом Mac). Готовые голоса и Qwen - без этой кнопки."""
+        if engine != "f5mlx" or not self.est or not self.est.audio_sec:
+            return None
+        factor = profiles.ACCEL_MUL["cpu"] / max(1e-6, profiles.ACCEL_MUL.get(self._accel, 1.0))
+        v = self._voice_obj()
+        rate = load_fx(default_voices_dir(), v.id).speed or 1.0 if v and not v.ready else 1.0
+        wait, _ci = self._book_wait(self.est.audio_sec / rate)
+        return {"seconds": wait * factor, "factor": factor}
+
+    def _ask_busy(self, holder, cpu: dict | None = None, queue=()) -> str | None:
+        """Окно «Видеокарта занята» - общее для всех программ (common/lock, стандарт 2.4): wait / now / cpu / None."""
+        from common.lock.lock_ui import tk_busy
+        return tk_busy.ask_busy(self, T, holder, lang=i18n.lang(), cpu=cpu, queue_names=queue)
 
     def _cache_info_for(self):
         """Что из книги уже в кэше синтеза (считается в фоне, 3.8). None - не знаем."""
@@ -3946,6 +3972,8 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
                 T.restyle(self.pause_btn, "primary", "play")
             return
         if self._pause_flag.is_set():                    # продолжить
+            if self._hlock.idle_released and not self._resume_lock():
+                return                       # видеокарта занята - окно; ждём очереди или остаёмся на паузе
             self._t0 += time.time() - self._paused_at    # пауза не в счёт
             if self._synth_t0 is not None:
                 self._synth_t0 += time.time() - self._paused_at
@@ -3961,6 +3989,42 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
             self.pause_btn.configure(text=_("Продолжить"))
             T.restyle(self.pause_btn, "primary", "play")
             self.status.configure(text=_("Пауза - доделываю текущий кусок и жду. Готовое на месте"))
+            self._hlock.touch()           # с этой минуты - простой: 15 минут - видеокарта отпускается
+            self.after(30000, self._idle_tick)
+
+    def _idle_tick(self):
+        """Пауза книги дольше 15 минут - видеокарта отпускается для других программ (стандарт 2.5)."""
+        if not self.running or not self._pause_flag.is_set():
+            return
+        if self._hlock.idle_check():
+            from common.lock.lock_ui import texts as lt
+            self.status.configure(text=lt.t("idle_released", i18n.lang()))
+        if not self._hlock.idle_released:
+            self.after(30000, self._idle_tick)
+
+    def _resume_lock(self) -> bool:
+        """«Продолжить» после простоя: взять видеокарту снова. Занята - окно; «Подождать очереди» - продолжит само."""
+        lock = self._hlock
+        if lock.resume():
+            return True
+        ans = self._ask_busy(lock.holder(), queue=lock.ahead_names())
+        if ans == "now":
+            lock.run_now()
+            lock.idle_released = False
+            return True
+        if ans == "wait":
+            from common.lock.lock_ui import texts as lt
+            self.status.configure(text=lt.waiting_line(lock.holder(), lock.ahead(), i18n.lang()))
+
+            def queued(h, ahead):
+                self.ui(lambda h=h, a=ahead: self.status.configure(text=lt.waiting_line(h, a, i18n.lang())))
+            queued.full = True
+
+            def wait():
+                if lock.acquire(cancel=self._stop_flag, on_wait=queued):
+                    self.ui(self.do_pause)          # дождались - продолжить
+            threading.Thread(target=wait, daemon=True).start()
+        return False
 
     def do_stop(self):
         if self._live_kind == "preview" and self._live is not None:
@@ -4050,24 +4114,21 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         engine, kw = self._eng_choice()
         opts = self._conv_options()
         resuming = bool(self._resume)
-        # общий замок видеокарты (задание 13 Г1): чужой - спросить, ждать ли очереди
-        from core import heavylock
-        lock, wait_lock = self._hlock, False
+        # общий замок видеокарты (задание 13 Г1, общий модуль): чужой - окно «Видеокарта занята»
+        from common.lock.lock_ui import texts as lt
+        lock, wait_lock, cpu_run = self._hlock, False, False
+        lock.set_what(f"озвучка книги «{os.path.basename(path)}»")   # для окна других программ - по-русски
         if not lock.try_acquire():
-            who = heavylock.owner(lock.path) or _("другая программа")
-            ans = self._ask(
-                _("Видеокарта занята"),
-                _('Видеокарту сейчас занимает «{0}». «Подождать очереди» - озвучка начнётся сама, '
-                  'как только видеокарта освободится. «Озвучить сейчас» - обе программы пойдут '
-                  'медленнее.').format(who),
-                [("wait", _("Подождать очереди"), "primary"), ("now", _("Озвучить сейчас"), "default"),
-                 (None, _("Отмена"), "ghost")])
+            ans = self._ask_busy(lock.holder(), cpu=self._cpu_forecast(engine), queue=lock.ahead_names())
             if ans is None:
                 return
+            if ans == "now":
+                lock.run_now()
+            elif ans == "cpu":            # тот же голос F5 на torch, на процессоре; замок не нужен
+                engine, cpu_run = "f5torch", True
             wait_lock = ans == "wait"
         step1 = _("Шаг 1 из 3 · Подготовка текста: числа и ударения")
-        self._set_busy(True, _('Жду очереди: видеокарту держит «{0}»').format(heavylock.owner(lock.path))
-                       if wait_lock else step1)
+        self._set_busy(True, lt.waiting_line(lock.holder(), lock.ahead(), i18n.lang()) if wait_lock else step1)
         self.vchg_lbl.pack_forget()
         self.pause_btn.configure(state="normal")
         self.progress.set(0)
@@ -4085,9 +4146,12 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
             self._logln(f"✓ {ci}: {os.path.basename(mp3) if mp3 else title}")
             self.ui(lambda: self._add_part(name, mp3, note))
 
-        def queued(who):
-            self.ui(lambda w=who: self.status.configure(
-                text=_('Жду очереди: видеокарту держит «{0}»').format(w or _("другая программа"))))
+        def queued(h, ahead):
+            self.ui(lambda h=h, a=ahead: self.status.configure(text=lt.waiting_line(h, a, i18n.lang())))
+        queued.full = True
+        device_was = os.environ.get("HERALD_DEVICE")
+        if cpu_run:
+            os.environ["HERALD_DEVICE"] = "cpu"
 
         def work():
             try:
@@ -4129,6 +4193,11 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
                 self._fail(e)
             finally:
                 lock.release()               # конец, «Остановить», ошибка - замок свободен
+                if cpu_run:                  # «На процессоре» - только на эту книгу
+                    if device_was is None:
+                        os.environ.pop("HERALD_DEVICE", None)
+                    else:
+                        os.environ["HERALD_DEVICE"] = device_was
         threading.Thread(target=work, daemon=True).start()
 
     def _on_showlog(self):

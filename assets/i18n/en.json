@@ -233,7 +233,6 @@
  "Пробник · ": "Preview · ",
  "Пробник": "Preview",
  "Пробник готов - он в списке, рядом с книгой": "Preview ready - it's in the list, next to the book",
- "Видеокарта занята: «{0}»": "GPU is in use: “{0}”",
  "{0:.2f} с": "{0:.2f} s",
  "Показать": "Show",
  "Скрыть": "Hide",
@@ -443,11 +442,7 @@
  "Не действует для голоса «{0}»: проверка - только у клонов, обученных голосов и голосов Qwen.": "Does not apply to the voice \"{0}\": the check works only for clones, trained voices and Qwen voices.",
  "Журнал: ": "Log: ",
  "Не действует для движка «{0}»: у него своё число шагов.": "Does not apply to the engine \"{0}\": it has its own number of steps.",
- "Видеокарту сейчас занимает «{0}». «Подождать очереди» - озвучка начнётся сама, как только видеокарта освободится. «Озвучить сейчас» - обе программы пойдут медленнее.": "The GPU is now used by \"{0}\". \"Wait my turn\" - narration starts by itself as soon as the GPU is free. \"Narrate now\" - both programs will run slower.",
- "Подождать очереди": "Wait my turn",
- "Озвучить сейчас": "Narrate now",
  "Отмена": "Cancel",
- "Жду очереди: видеокарту держит «{0}»": "Waiting my turn: the GPU is held by \"{0}\"",
  "Остановить и закрыть": "Stop and close",
  "Готовые куски запоминаются: смена пауз или формата пересобирает книгу за минуты.": "Finished chunks are remembered: changing pauses or format rebuilds the book in minutes.",
  "«{0}»: на секунду звука ~{1} с счёта ({2}).": "\"{0}\": ~{1} s of computing per second of audio ({2}).",
@@ -459,5 +454,6 @@
  "Остановлено. Готовые части остались на диске.": "Stopped. Finished parts stay on disk.",
  "Меню": "Menu",
  "Свернуть меню можно, когда озвучка закончится.": "The menu can be collapsed when narration is finished.",
- "Запись не читается: файл повреждён или это не звук.": "The recording cannot be read: the file is damaged or is not audio."
+ "Запись не читается: файл повреждён или это не звук.": "The recording cannot be read: the file is damaged or is not audio.",
+ "Видеокарта:": "GPU:"
 }
