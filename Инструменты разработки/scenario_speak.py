@@ -25,6 +25,7 @@ import struct
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -60,6 +61,20 @@ def health(port: int, timeout=0.8) -> bool:
 
 
 def speak(port: int, text: str, voice: str):
+    """Один запрос /speak. 503 «занят» - сервер ещё прогревает движок (на процессоре CI
+    первая загрузка Silero дольше 30 с ожидания): повторить, как клиент, до 3 минут."""
+    t_end = time.monotonic() + 180
+    while True:
+        try:
+            return _speak_once(port, text, voice)
+        except urllib.error.HTTPError as e:
+            if e.code != 503 or time.monotonic() > t_end:
+                raise
+            print(f"  … /speak {voice}: 503 (движок занят прогревом) - повтор через 5 с", flush=True)
+            time.sleep(5)
+
+
+def _speak_once(port: int, text: str, voice: str):
     req = urllib.request.Request(f"http://127.0.0.1:{port}/speak", method="POST",
                                  data=json.dumps({"text": text, "fast": True, "voice": voice}).encode(),
                                  headers={"Content-Type": "application/json"})
