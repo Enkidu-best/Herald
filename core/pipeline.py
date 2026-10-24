@@ -1378,14 +1378,13 @@ def read_disputed(path: str, out_dir: str | None = None) -> list[str]:
 def prepare_read_text(path: str, opts: "ConvertOptions") -> str:
     """«Как будет прочитано» без озвучки: та же подготовка, что в convert_book.
     Спорные ударения (RUAccent против silero-stress) - в _служебное/."""
-    from .stress import take_disputed, take_decisions
-    take_disputed()
-    take_decisions()
+    from .stress import take_disputed
     doc = read_document(path)
     chapters = build_chapters(doc, opts.minutes_per_file)
     lang = detect_language(doc.text or " ".join(c.text for c in chapters[:3]))
-    bodies = [_prepare_text(ch.text, "+", opts.expand_numbers, opts.use_stress, lang)
-              for ch in chapters]
+    # тот же кэш подготовки, что у озвучки (14 Г): поправка ударения - без повторной разметки
+    bodies, _hits = _prepare_chapters(chapters, os.path.join(output_dir_for(path), STATE_DIR), "+",
+                                      opts.expand_numbers, opts.use_stress, lang)
     if opts.use_stress and lang == "ru":
         bodies, _u = unify_book(bodies)
         bodies = _book_fixes(path, bodies)
@@ -1412,6 +1411,103 @@ def _book_fixes(path: str, bodies: list[str]) -> list[str]:
         log_problem("поправки ударений книги не прочитались", e, show=False)
         return bodies
     return [bookfix.apply(b, fixes) for b in bodies] if fixes else bodies
+
+
+# 14 Г: подготовленный текст частей (числа, ударения) - в «.herald» книги. «Продолжить» и повторный запуск с тем же
+# текстом главы и той же подготовкой берут готовое; «.herald» уходит вместе с готовой книгой и «Начать заново».
+PREP_FILE = "подготовка.json"
+PREP_VERSION = 1
+_PREP_CODE = ("normalize.py", "stress.py", "stressdict.py", "homograph_llm.py", "VERSION")
+_PREP_PKGS = ("ruaccent", "silero-stress", "ru-normalizr", "razdel", "pymorphy3", "num2words")
+
+
+def _prep_env() -> str:
+    """Отпечаток всего, кроме текста главы, от чего зависит подготовка: код нормализации и ударений (с его
+    переключателями), словари core/data, версии пакетов и файлы моделей RUAccent. Изменилось - подготовка заново."""
+    import hashlib
+    import importlib.metadata as md
+    h = hashlib.sha1()
+    here = os.path.dirname(os.path.abspath(__file__))
+    for name in _PREP_CODE:
+        try:
+            with open(os.path.join(here, name), "rb") as f:
+                h.update(name.encode() + f.read())
+        except OSError:
+            h.update(name.encode() + b"-")
+    dirs = [os.path.join(here, "data")]
+    try:
+        import importlib.util
+        spec = importlib.util.find_spec("ruaccent")
+        if spec and spec.origin:
+            dirs.append(os.path.dirname(spec.origin))
+    except (ImportError, ValueError):
+        pass
+    for d in dirs:
+        for root, subdirs, files in os.walk(d):
+            subdirs[:] = sorted(x for x in subdirs if x != "__pycache__")
+            for n in sorted(files):
+                try:
+                    st = os.stat(os.path.join(root, n))
+                except OSError:
+                    continue
+                h.update(f"{os.path.relpath(os.path.join(root, n), d)}:{st.st_size}:{int(st.st_mtime)}".encode())
+    for pkg in _PREP_PKGS:
+        try:
+            h.update(f"{pkg}={md.version(pkg)}".encode())
+        except md.PackageNotFoundError:
+            h.update(f"{pkg}=-".encode())
+    return h.hexdigest()
+
+
+def _prepare_chapters(chapters, workdir: str, stress_fmt: str | None, expand_numbers: bool,
+                      use_stress: bool, lang: str) -> tuple[list[str], int]:
+    """Шаг 1 по главам с кэшем (14 Г): [(_prepare_text главы)], сколько глав взято готовыми. Спорные слова и решения
+    ударений (stress.DISPUTED, DECISIONS) после вызова - те же, что при подготовке всех глав подряд: у каждой главы они
+    хранятся вместе с текстом. unify_book и поправки книги - после, по всей книге, как раньше."""
+    import hashlib
+    from . import stress
+    path = os.path.join(workdir, PREP_FILE)
+    try:
+        with open(path, encoding="utf-8") as f:
+            cache = json.load(f)
+        if cache.get("v") != PREP_VERSION:
+            cache = {}
+    except (OSError, ValueError):
+        cache = {}
+    old = cache.get("parts") or {}
+    env = _prep_env()
+    parts, bodies, hits = {}, [], 0
+    disputed: set[str] = set()
+    decisions: dict = {}
+    stress.take_disputed()
+    stress.take_decisions()
+    for ch in chapters:
+        key = hashlib.sha1(json.dumps([PREP_VERSION, env, ch.text, stress_fmt, expand_numbers, use_stress, lang],
+                                      ensure_ascii=False).encode("utf-8")).hexdigest()
+        got = old.get(key)
+        if got is not None and isinstance(got.get("text"), str):
+            hits += 1
+        else:
+            body = _prepare_text(ch.text, stress_fmt, expand_numbers, use_stress, lang)
+            got = {"text": body, "disputed": stress.take_disputed(), "decisions": stress.take_decisions()}
+        parts[key] = got
+        bodies.append(got["text"])
+        disputed.update(got.get("disputed") or [])
+        for k, d in (got.get("decisions") or {}).items():      # как _decide подряд: первое решение, места - сумма
+            cur = decisions.setdefault(k, {**d, "мест": 0})
+            cur["мест"] += int(d.get("мест", 0))
+    stress.DISPUTED.update(disputed)
+    stress.DECISIONS.update(decisions)
+    if hits < len(chapters) or set(parts) != set(old):
+        try:
+            os.makedirs(workdir, exist_ok=True)
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump({"v": PREP_VERSION, "parts": parts}, f, ensure_ascii=False)
+            os.replace(tmp, path)
+        except OSError as e:
+            log_problem("подготовленный текст не сохранился - в следующий раз подготовка заново", e, show=False)
+    return bodies, hits
 
 
 def service_size(path: str, out_dir: str | None = None) -> int:
@@ -1672,14 +1768,20 @@ def convert_book(path: str, *, engine: str = "f5", eng_kwargs: dict | None = Non
     if not chapters:
         raise ReaderError("Не удалось извлечь текст из файла.")
 
+    book_title = clean_book_title(doc.title or doc.base_title)
+    base = _safe_name(book_title)
+    book_dir = os.path.join(out_dir, base)
+    workdir = os.path.join(book_dir, STATE_DIR)
     say(0.04, "Готовлю текст (числа, ударения)…")
-    from .stress import take_disputed, take_decisions
-    take_disputed()
-    take_decisions()
+    from .stress import take_disputed
     # заголовок уже стоит первой строкой в ch.text (см. chapters.py), отдельно
     # его добавлять нельзя — иначе название прочитается дважды
-    bodies = [_prepare_text(ch.text, stress_fmt, opts.expand_numbers,
-                            opts.use_stress, doc_lang) for ch in chapters]
+    bodies, from_prep = _prepare_chapters(chapters, workdir, stress_fmt, opts.expand_numbers,
+                                          opts.use_stress, doc_lang)
+    if from_prep == len(chapters):
+        say(0.045, "Подготовка текста - готово (из прошлого запуска)")
+    elif from_prep:
+        log_info(f"подготовка текста: глав из прошлого запуска {from_prep} из {len(chapters)}")
     if opts.use_stress and stress_fmt == "+" and doc_lang == "ru":
         # имя героя должно звучать одинаково во всей книге (см. stress.unify_book)
         bodies, unified = unify_book(bodies)
@@ -1708,10 +1810,7 @@ def convert_book(path: str, *, engine: str = "f5", eng_kwargs: dict | None = Non
         log_problem(f"не прочитались настройки звучания голоса «{voice}», "
                     "книга будет без них", e)
 
-    book_title = clean_book_title(doc.title or doc.base_title)
     narrator = opts.narrator or voice          # чтец в тегах (имя голоса или своё, «✎»)
-    base = _safe_name(book_title)
-    book_dir = os.path.join(out_dir, base)
     os.makedirs(book_dir, exist_ok=True)
     save_read_text(book_dir, prepared)
     save_disputed(book_dir, take_disputed())
@@ -1723,7 +1822,6 @@ def convert_book(path: str, *, engine: str = "f5", eng_kwargs: dict | None = Non
     save_chunk_list(book_dir, prepared, opts.gap_sec, path)
     mp3_dir = book_dir if opts.make_chapter_mp3 else None
     # сырые части — в «.herald» рядом с результатом (см. «продолжение после сбоя»)
-    workdir = os.path.join(book_dir, STATE_DIR)
     os.makedirs(workdir, exist_ok=True)
     fp = settings_fingerprint(engine, eng_kwargs, voice, opts)
     state = _load_state(workdir)

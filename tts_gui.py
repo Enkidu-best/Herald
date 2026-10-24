@@ -3948,6 +3948,8 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
             text = _('Шаг 3 из 3 · {0}').format(what) if fr < 1 else _("Готово")
         elif msg.startswith("Скачиваю модели"):
             text = _('Шаг 1 из 3 · {0}').format(tr_msg(msg))      # первый запуск: честно, что идёт скачивание
+        elif msg.startswith("Подготовка текста - готово"):
+            text = _('Шаг 1 из 3 · {0}').format(tr_msg(msg))      # 14 Г: «Продолжить» - текст из прошлого запуска
         else:
             text = _('Шаг 1 из 3 · {0}').format(what)
         self.status.configure(text=text)
