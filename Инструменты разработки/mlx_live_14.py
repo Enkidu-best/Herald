@@ -6,7 +6,9 @@
   2. озвучка после искусственного сбоя в нити MLX;
   3. проверка слов по звуку (mlx_whisper) из другой нити во время озвучки («Прочитать вслух» во время книги);
   4. замер «На процессоре» для окна «Видеокарта занята» (доп. 21:40): тот же текст через F5 на torch на процессоре -
-     во сколько раз медленнее MLX на этом Mac. Итог - «bench_out/mlx_live_14.json» (не в git).
+     во сколько раз медленнее MLX на этом Mac;
+  5. память для бюджета диспетчера («_Общие модули 02», раздел 1): пик MLX после загрузки F5, после озвучек и вместе с
+     проверкой слов, полная память процесса (footprint). Итог - «bench_out/mlx_live_14.json» (не в git).
 
     HEAVY_LOCK_WHO=background .venv/bin/python "Инструменты разработки/mlx_live_14.py" [--no-cpu]
 
@@ -35,6 +37,28 @@ TEXT = ("Море к вечеру стихло, и над водой повис 
         "чтобы корабли нашли дорогу к берегу.")
 
 
+def mlx_gb() -> dict:
+    """Память MLX, ГБ: пик с начала и сейчас (mx.get_peak_memory / get_active_memory, в старых - mx.metal.*)."""
+    import mlx.core as mx
+    peak = getattr(mx, "get_peak_memory", None) or mx.metal.get_peak_memory
+    active = getattr(mx, "get_active_memory", None) or mx.metal.get_active_memory
+    return {"пик": round(peak() / 2**30, 2), "сейчас": round(active() / 2**30, 2)}
+
+
+def footprint_gb() -> float | None:
+    """Полная память процесса (footprint: модели MLX живут в общей памяти и в RSS не видны)."""
+    import subprocess
+    try:
+        out = subprocess.run(["footprint", "-p", str(os.getpid())], capture_output=True, text=True, timeout=20).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    for line in out.splitlines():
+        if "phys_footprint:" in line:
+            val, unit = line.split(":")[1].split()[:2]
+            return round(float(val) / (1 if unit.upper().startswith("G") else 1024), 2)
+    return None
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--no-cpu", action="store_true")
@@ -54,6 +78,7 @@ def main() -> int:
         t0 = time.time()
         eng.load()
         res["загрузка F5-MLX, с"] = round(time.time() - t0, 1)
+        res["5. память MLX, ГБ"] = {"после загрузки F5": mlx_gb()}
         times, ok = [], 0
         for _ in range(3):
             t0 = time.time()
@@ -62,6 +87,7 @@ def main() -> int:
             ok += int(len(w) > 0 and np.isfinite(w).all())
         dur = len(w) / SR
         res["1. три озвучки подряд"] = {"годных": ok, "время, с": [round(x, 2) for x in times], "звука, с": round(dur, 2)}
+        res["5. память MLX, ГБ"]["после трёх озвучек"] = mlx_gb()
         try:
             _in_mlx_thread(lambda: (_ for _ in ()).throw(RuntimeError("искусственный сбой")))
         except RuntimeError:
@@ -83,6 +109,8 @@ def main() -> int:
         th.join(300)
         res["3. проверка слов во время озвучки"] = {"озвучено": bool(len(w3) > 0), "распознано": bool(heard.get("text")),
                                                      "ошибки": errs, "no Stream": any("Stream" in e for e in errs)}
+        res["5. память MLX, ГБ"]["F5 + проверка слов (turbo)"] = mlx_gb()
+        res["5. память процесса (footprint), ГБ"] = footprint_gb()
         res["нить MLX одна"] = mlxthread.thread_ident()
         rtf_mlx = min(times) / max(dur, 0.1)
         res["RTF MLX"] = round(rtf_mlx, 3)
