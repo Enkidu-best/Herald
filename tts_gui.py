@@ -74,6 +74,10 @@ FAST_VOICE = "aidar"       # «Прочитать вслух» быстрым г
 SAY_HL_BG, SAY_HL_FG = "#FFE99A", "#1A1A1A"   # подсветка звучащего предложения
 SAY_TEMPO = (0.5, 1.5)
 CACHED_CHUNK_SEC = 1.0     # кусок из кэша: прочитать, проверить края, склеить     # темп во вкладке (3.6: Андрей хотел медленнее 0,8)
+# «На процессоре» в окне «Видеокарта занята»: F5 на torch-процессоре медленнее F5-MLX на этом Mac. Замер 24.10
+# (Инструменты разработки/mlx_live_14.py, bench_out/mlx_live_14.json): RTF 4,24 против 1,30 - 3,3 раза. Общий
+# profiles.ACCEL_MUL["cpu"] (12) - для прогнозов на любом компьютере без видеокарты, его не трогаю
+CPU_VS_MLX = 3.3
 GENDER = {"м": "муж.", "ж": "жен."}
 RECENT_MAX = 5             # «Недавние книги» в пустой карточке (задание 12)
 SCALE_MIN, SCALE_MAX = 0.8, 2.0    # «Aa» - 80-200 % (Единый стандарт 1.5)
@@ -3563,11 +3567,11 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
 
     def _cpu_forecast(self, engine: str) -> dict | None:
         """«На процессоре» в окне «Видеокарта занята» (доп. 21:40): только клон F5 на MLX - тот же голос через F5 на
-        torch, на процессоре (HERALD_DEVICE=cpu). Прогноз - ожидание книги × множитель процессора профиля
-        (profiles.ACCEL_MUL, замер на этом Mac). Готовые голоса и Qwen - без этой кнопки."""
+        torch, на процессоре (HERALD_DEVICE=cpu). Прогноз - ожидание книги × CPU_VS_MLX. Готовые голоса и Qwen - без
+        этой кнопки."""
         if engine != "f5mlx" or not self.est or not self.est.audio_sec:
             return None
-        factor = profiles.ACCEL_MUL["cpu"] / max(1e-6, profiles.ACCEL_MUL.get(self._accel, 1.0))
+        factor = CPU_VS_MLX
         v = self._voice_obj()
         rate = load_fx(default_voices_dir(), v.id).speed or 1.0 if v and not v.ready else 1.0
         wait, _ci = self._book_wait(self.est.audio_sec / rate)
