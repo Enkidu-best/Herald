@@ -68,7 +68,9 @@ PAUSES = (("gap_sec", "После предложения", 0.4, 0.2, 1.5),
           ("para_gap_sec", "После абзаца", 0.8, 0.3, 2.0),
           ("dialog_gap_sec", "Между репликами", 1.1, 0.3, 2.5))
 VOICE_NAME_LIMIT = 24
-DEFAULT_SCALE = 1.2        # масштаб по умолчанию - 120 % (стандарт интерфейса, п. 1)
+DEFAULT_SCALE = 1.0        # «Aa» по умолчанию - 100 % (Единый стандарт 1.5, 24.10)
+BASE_SCALE = 17 / 14       # шрифты окна заданы на основе 14: «100 %» = текст 17 px, как во всех программах
+SCALE_KEY = "scale100"     # новый ключ настроек: сохранённый раньше масштаб (120 % на основе 14) сброшен один раз
 _RESTART = None            # окно пересобирается (язык, меню): что вернуть на место
 FAST_VOICE = "aidar"       # «Прочитать вслух» быстрым голосом: готовый голос Silero
 SAY_HL_BG, SAY_HL_FG = "#FFE99A", "#1A1A1A"   # подсветка звучащего предложения
@@ -314,8 +316,8 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         from core import audio_out
         audio_out.set_output(self.cfg.get("audio_out"))
         self.title(APP_NAME)
-        # окно растёт вместе с масштабом текста (120 % по умолчанию), но не больше экрана
-        k = float(self.cfg.get("scale", DEFAULT_SCALE))
+        # окно растёт вместе с масштабом текста (100 % = 17 px по умолчанию), но не больше экрана
+        k = float(self.cfg.get(SCALE_KEY, DEFAULT_SCALE)) * BASE_SCALE
         sw, sh = self.winfo_screenwidth() - 40, self.winfo_screenheight() - 90
         self.geometry(f"{min(sw, int(1180 * k))}x{min(sh, int(780 * k))}")
         self.minsize(min(sw, int(1040 * k)), min(sh, int(700 * k)))
@@ -353,7 +355,7 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
         self._accel = "mlx" if osutil.IS_APPLE_SILICON else "cpu"
         self._prog_hist: list = []
         self._wait_lock = False
-        self._scale = float(self.cfg.get("scale", DEFAULT_SCALE))
+        self._scale = float(self.cfg.get(SCALE_KEY, DEFAULT_SCALE))
         # звук потоком (core/stream): пробник, «Прослушать», «Прочитать вслух».
         # Одновременно звучит один; новый останавливает прежний
         self._live = None
@@ -644,8 +646,8 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
 
     def _set_scale(self, f: float):
         self._scale = max(SCALE_MIN, min(SCALE_MAX, round(f, 2)))
-        ctk.set_widget_scaling(self._scale)
-        self.cfg["scale"] = self._scale
+        ctk.set_widget_scaling(self._scale * BASE_SCALE)
+        self.cfg[SCALE_KEY] = self._scale
         save_config(self.cfg)
 
     def _toggle_menu(self):
@@ -982,10 +984,10 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
             self.log.pack_forget()
 
     def _build_options(self, card):
-        # без прокрутки (задание 12): при 1440×900 и «Aa» 100-120 % панель целиком на
+        # без прокрутки (задание 12): при 1440×900 и «Aa» 100 % панель целиком на
         # экране - подписи и меню в одну строку, редкое - ссылками
         o = ctk.CTkFrame(card, fg_color="transparent", corner_radius=0, width=300)
-        o.pack(fill="both", expand=True, padx=18, pady=12)
+        o.pack(fill="both", expand=True, padx=18, pady=8)   # 100 % = текст 17 px - отступы плотнее (Единый вид 01)
         self.opts_box = o                                   # для проверок
         ctk.CTkFrame(o, width=290, height=0, fg_color="transparent").pack()
         T.section(o, _("Голос")).pack(fill="x")
@@ -1027,7 +1029,7 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
                      "от синтеза."), 11, color=T.FAINT, anchor="w", justify="left",
                 wraplength=290).pack(fill="x", pady=(4, 0))
 
-        ctk.CTkFrame(o, height=1, fg_color=T.BORDER, corner_radius=0).pack(fill="x", pady=10)
+        ctk.CTkFrame(o, height=1, fg_color=T.BORDER, corner_radius=0).pack(fill="x", pady=6)
         line = ctk.CTkFrame(o, fg_color="transparent")
         line.pack(fill="x")
         T.label(line, _("Движок"), 13, anchor="w", width=104).pack(side="left")
@@ -1037,7 +1039,7 @@ class App(ctk.CTk, tkinterdnd2.TkinterDnD.DnDWrapper):
                                   wraplength=290)
         self.accel_hint.pack(fill="x", pady=(2, 0))
 
-        ctk.CTkFrame(o, height=1, fg_color=T.BORDER, corner_radius=0).pack(fill="x", pady=10)
+        ctk.CTkFrame(o, height=1, fg_color=T.BORDER, corner_radius=0).pack(fill="x", pady=6)
         self.preview_btn = T.button(o, _("Проверить голос (1 мин)"), "play", height=34, size=14,
                                     command=self.do_preview)
         self.preview_btn.pack(fill="x")
@@ -4314,7 +4316,7 @@ def main():
         cfg["ui_lang"] = "ru" if cfg else i18n.system_lang()
         save_config(cfg)
     i18n.set_lang(cfg["ui_lang"])
-    ctk.set_widget_scaling(float(cfg.get("scale", DEFAULT_SCALE)))
+    ctk.set_widget_scaling(float(cfg.get(SCALE_KEY, DEFAULT_SCALE)) * BASE_SCALE)
     real_err = sys.stderr
     while True:
         _RESTART = None

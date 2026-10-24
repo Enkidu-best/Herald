@@ -1152,7 +1152,7 @@ def main() -> int:
                 app._scale_by(-0.1)
             must(abs(app._scale - 0.8) < 1e-6, f"предел снизу: {app._scale}")
             app._scale_by(None)
-            must(abs(app._scale - G.DEFAULT_SCALE) < 1e-6, "«Сбросить» - не 120 %")
+            must(abs(app._scale - G.DEFAULT_SCALE) < 1e-6, "«Сбросить» - не 100 %")
             must(app.bind_all("<Command-equal>") or app.bind_all("<Control-equal>"), "нет Cmd+=")
         finally:
             app._set_scale(keep)
@@ -1161,11 +1161,11 @@ def main() -> int:
     check("«Aa»: одна панель в окне, повторное нажатие закрывает, 80-200 %, Cmd+= / − / 0", aa_popover)
 
     def book_no_scroll():
-        """«Озвучка»: правая панель целиком видна при 1440×900, масштаб 100 и 120 %."""
+        """«Озвучка»: правая панель целиком видна при 1440×900, масштаб 100 % (= прежние 120 %, текст 17 px)."""
         keep, geo = app._scale, app.geometry()
         try:
             app.show("book")
-            for k in (1.0, 1.2):
+            for k in (1.0,):
                 app._set_scale(k)
                 app.geometry("1440x810")              # 1440×900 без строки меню и Dock
                 app.update()
@@ -1179,7 +1179,7 @@ def main() -> int:
             app._set_scale(keep)
             app.geometry(geo)
             app.update()
-    check("«Озвучка» без прокрутки при 1440×900 и 100 / 120 %", book_no_scroll,
+    check("«Озвучка» без прокрутки при 1440×900 и 100 %", book_no_scroll,
           skip=TD.need_mac("требование - для экрана Mac 1440×900 и его шрифтов (на Linux шрифты крупнее)"))
 
     def formats():
@@ -1727,8 +1727,11 @@ def main() -> int:
                 time.sleep(0.03)
             body = e.log.get("1.0", "end")
             must(body.count("\n") >= 4 and not _re.search(r"[А-Яа-яЁё]", body), f"«Подробности» по-русски: {body!r}")
-            must(abs(e._scale - (G.load_config().get("scale") or G.DEFAULT_SCALE)) < 1e-6
-                 and G.DEFAULT_SCALE == 1.2, "масштаб по умолчанию не 120 %")
+            must(abs(e._scale - (G.load_config().get(G.SCALE_KEY) or G.DEFAULT_SCALE)) < 1e-6
+                 and G.DEFAULT_SCALE == 1.0, "масштаб по умолчанию не 100 %")
+            if abs(e._scale - 1.0) < 1e-6:                 # 100 % = основной текст 17 px (стандарт 1.5)
+                px = ctk.ScalingTracker.get_widget_scaling(e) * 14
+                must(abs(px - 17) < 0.6, f"основной текст не 17 px: {px:.1f}")
             must(G.VERSION in e.version_lbl.cget("text"), "версия внизу не совпадает с пакетом")
             must(G.VERSION == open("core/VERSION", encoding="utf-8").read().strip(), "версия не из core/VERSION")
             e.show("help")

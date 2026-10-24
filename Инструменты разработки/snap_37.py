@@ -27,7 +27,7 @@ T.apply()
 cfg = copy.deepcopy(G.load_config())
 # снимки - при масштабе по умолчанию (120 %): и виджеты, и размер окна; настройки
 # Андрея возвращаются в конце
-G.save_config({**cfg, "scale": G.DEFAULT_SCALE})
+G.save_config({**cfg, G.SCALE_KEY: G.DEFAULT_SCALE})
 ctk.set_widget_scaling(G.DEFAULT_SCALE)
 BOOKS = {"ru": "Примеры текстов/Пример - проба пера.txt",
          "en": "Примеры текстов/Example - Tide and Lantern.txt"}

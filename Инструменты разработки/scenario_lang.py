@@ -55,7 +55,7 @@ def init(self):
                 check(self.cfg.get("menu_collapsed") is True, "меню не свернулось")
                 check(G.VERSION in self.version_lbl.cget("text"), "версии внизу нет")
                 self._set_scale(1.3)
-                check(abs(G.load_config().get("scale", 0) - 1.3) < 1e-6, "масштаб не запомнился")
+                check(abs(G.load_config().get(G.SCALE_KEY, 0) - 1.3) < 1e-6, "масштаб не запомнился")
                 self._set_scale(G.DEFAULT_SCALE)
                 self._toggle_menu()
             elif k == 4:
