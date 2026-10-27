@@ -12,6 +12,8 @@
         fast=true (по умолчанию) - готовый голос Silero (voice - его имя, иначе
         «aidar»); fast=false - клон (voice - имя образца, иначе выбранный в окне).
     POST /stop   - остановить звук и синтез.
+    GET  /voices - голоса для настроек других программ (стандарт 27.10): {"fast": [{id, title, gender}], "clones": [...]}
+        fast - Silero (быстро, без видеокарты), clones - образцы клонирования (медленнее, нужна видеокарта).
     GET  /health - {"ok": true, "version": "3.4"}.
 
 Запросы из браузера пускаются только со страниц localhost/127.0.0.1, а Host
@@ -34,6 +36,24 @@ DEFAULT_PORT = 8716
 DEFAULT_IDLE_MIN = 10
 FAST_VOICE = "aidar"
 LOCAL_HOSTS = ("127.0.0.1", "localhost")
+
+
+def voices_list() -> dict:
+    """Голоса без загрузки моделей: быстрые - из списка Silero, клоны - по файлам образцов (звук + расшифровка)."""
+    import os
+    from .engines.silero import VOICES
+    from .engines.f5 import default_voices_dir
+    fast = [{"id": v.id, "title": v.title, "gender": v.gender} for v in VOICES]
+    clones = []
+    try:
+        d = default_voices_dir()
+        for fn in sorted(os.listdir(d)):
+            stem, ext = os.path.splitext(fn)
+            if ext.lower() in (".wav", ".flac") and os.path.isfile(os.path.join(d, stem + ".txt")):
+                clones.append({"id": stem, "title": stem})
+    except OSError:
+        pass
+    return {"fast": fast, "clones": clones}
 
 
 def voice_text(req: dict) -> tuple[str, list[tuple[str, str]]]:
@@ -249,6 +269,8 @@ class _Handler(BaseHTTPRequestHandler):
         if self.path.rstrip("/") == "/health":
             from . import VERSION
             self._json(200, {"ok": True, "version": VERSION})
+        elif self.path.rstrip("/") == "/voices":
+            self._json(200, {"ok": True, **voices_list()})
         else:
             self._json(404, {"ok": False, "error": "нет такого адреса"})
 

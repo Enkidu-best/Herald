@@ -29,5 +29,10 @@ t, sk = voice_text({"text": "Say it in English. Скажите по-русски
 check("клон английского голоса - только английское", t == "Say it in English." and sk == [("ru", "Скажите по-русски.")], t)
 t, sk = voice_text({"text": "STAR", "fast": True})
 check("нет слов языка голоса - пусто (сервис ответит ошибкой, не по буквам)", t == "" and sk == [("en", "STAR")], t)
-print(f"\nИтог: {5 - len(fails)} из 5")
+from core.speak_server import voices_list  # noqa: E402
+v = voices_list()
+check("GET /voices: 5 быстрых голосов Silero с подписями", [x["id"] for x in v["fast"]] == ["aidar", "eugene", "baya", "kseniya", "xenia"]
+      and all(x["title"] for x in v["fast"]), str(v["fast"]))
+check("GET /voices: клоны - списком (без загрузки моделей)", isinstance(v["clones"], list), str(v["clones"])[:80])
+print(f"\nИтог: {7 - len(fails)} из 7")
 sys.exit(1 if fails else 0)
