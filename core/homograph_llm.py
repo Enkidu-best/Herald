@@ -15,9 +15,12 @@ from __future__ import annotations
 import json
 import urllib.request
 
-OLLAMA = "http://localhost:11434"
-MODEL = "qwen3.5:9b"
-FALLBACK_MODEL = "qwen3.5:4b"
+from common.llm_config import llm_config as lc
+
+# модели и адрес - общая настройка «Разработка ПО/.models.json» (common/llm_config, «_Общая база 01»)
+OLLAMA = lc.ollama_url()
+MODEL = lc.model("main")
+FALLBACK_MODEL = lc.model("fallback")
 TIMEOUT = 60
 
 _VOWELS = "аеёиоуыэюяАЕЁИОУЫЭЮЯ"
