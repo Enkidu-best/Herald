@@ -1417,16 +1417,21 @@ def _book_fixes(path: str, bodies: list[str]) -> list[str]:
 # текстом главы и той же подготовкой берут готовое; «.herald» уходит вместе с готовой книгой и «Начать заново».
 PREP_FILE = "подготовка.json"
 PREP_VERSION = 1
-_PREP_CODE = ("normalize.py", "stress.py", "stressdict.py", "homograph_llm.py", "VERSION")
+# «_Общая база 01б»: судья омографов - не текст homograph_llm.py, а имя модели, которую дала общая настройка
+# (`.models.json` через common/llm_config): сменили модель - подготовка заново; правка кода без смены модели - нет.
+_PREP_CODE = ("normalize.py", "stress.py", "stressdict.py", "VERSION")
 _PREP_PKGS = ("ruaccent", "silero-stress", "ru-normalizr", "razdel", "pymorphy3", "num2words")
 
 
 def _prep_env() -> str:
     """Отпечаток всего, кроме текста главы, от чего зависит подготовка: код нормализации и ударений (с его
-    переключателями), словари core/data, версии пакетов и файлы моделей RUAccent. Изменилось - подготовка заново."""
+    переключателями), словари core/data, версии пакетов, файлы моделей RUAccent и имя модели судьи омографов
+    (`homograph_llm.MODEL`, `FALLBACK_MODEL` - из общей настройки). Изменилось - подготовка заново."""
     import hashlib
     import importlib.metadata as md
+    from . import homograph_llm
     h = hashlib.sha1()
+    h.update(f"homograph_model={homograph_llm.MODEL}|{homograph_llm.FALLBACK_MODEL}".encode())
     here = os.path.dirname(os.path.abspath(__file__))
     for name in _PREP_CODE:
         try:
